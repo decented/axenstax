@@ -358,6 +358,8 @@ pub enum OpKind {
     Slot,
     Grid,
     Armour,
+    Offhand,
+    SwapHands,
     Result,
     Trash,
     DragDistribute,
@@ -380,6 +382,8 @@ impl OpKind {
                 WindowClick::Slot { .. } => OpKind::Slot,
                 WindowClick::Grid { .. } => OpKind::Grid,
                 WindowClick::Armour { .. } => OpKind::Armour,
+                WindowClick::Offhand { .. } => OpKind::Offhand,
+                WindowClick::SwapHands { .. } => OpKind::SwapHands,
                 WindowClick::Result => OpKind::Result,
                 WindowClick::Trash => OpKind::Trash,
                 WindowClick::DragDistribute { .. } => OpKind::DragDistribute,
@@ -403,6 +407,8 @@ impl OpKind {
             OpKind::Slot => "slot",
             OpKind::Grid => "grid",
             OpKind::Armour => "armour",
+            OpKind::Offhand => "off-hand",
+            OpKind::SwapHands => "swap hands",
             OpKind::Result => "result",
             OpKind::Trash => "trash",
             OpKind::DragDistribute => "drag distribute",
@@ -968,7 +974,7 @@ fn serve_container(
     sp.container_sent.seen = Some(MirrorView { cell, kind, contents: p.after.clone() });
     let involved = involved_slots(pkt, click, [&r.touched, &p.applied.touched]);
     let view = view_correction(sp, r_after.as_ref(), &involved);
-    let digest = window::digest_with(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station, Some(p.after.as_ref()));
+    let digest = window::digest_with(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station, Some(p.after.as_ref()));
     let correction = Correction { client, own: Some(own_delta), view };
     let correction = if correction.corrects_client() {
         Some(correction)
@@ -1216,7 +1222,7 @@ fn refused_container_op(
         correction = c.corrects_client().then_some(c);
     }
     let shown = sp.container_sent.seen.as_ref().map(|v| v.contents.as_ref());
-    let digest = window::digest_with(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station, shown);
+    let digest = window::digest_with(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station, shown);
     Served { result: Some(ClickResult::Refused), digest, container_refused: true, correction, believed: 0, swapped: 0, over_bound }
 }
 
@@ -1461,7 +1467,7 @@ mod tests {
         let pairs = |ops: Vec<LoggedOp>| ops.into_iter().map(|l| (l.op, l.digest)).collect::<Vec<_>>();
         assert_eq!(pairs(log.take_before(edits.first_stamp())), vec![(WireWindowOp::Click(WindowClick::Close), 1)]);
         assert_eq!(pairs(log.take_before(edits.first_stamp())), vec![], "the rest wait for the input");
-        let (sent, _, stamps, _) = edits.take((0, 0, 0));
+        let (sent, _, stamps, _) = edits.take((0, 0, 0, crate::hands::Hand::Main));
         assert_eq!(sent.len(), 2);
         assert!(stamps[0] < stamps[1], "each edit keeps its own stamp (C3b-fix-d, A-L3)");
         assert_eq!(edits.first_stamp(), None);
@@ -1480,15 +1486,15 @@ mod tests {
         let edit = |x| BlockChange { x, y: 70, z: 0, new_block: 1, meta: 0 };
         edits.push(edit(1));
         edits.push(edit(2));
-        edits.stamp_hands((2, 1, 7));
+        edits.stamp_hands((2, 1, 7, crate::hands::Hand::Main));
         edits.extend([edit(3)]);
-        edits.stamp_hands((5, 4, 9));
-        edits.stamp_hands((6, 0, 0));
+        edits.stamp_hands((5, 4, 9, crate::hands::Hand::Main));
+        edits.stamp_hands((6, 0, 0, crate::hands::Hand::Main));
         edits.push(edit(4));
-        let (sent, hands, _, _) = edits.take((8, 1, 3));
+        let (sent, hands, _, _) = edits.take((8, 1, 3, crate::hands::Hand::Main));
         assert_eq!(sent.iter().map(|b| b.x).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
-        assert_eq!(hands, vec![(2, 1, 7), (2, 1, 7), (5, 4, 9), (8, 1, 3)]);
-        assert!(edits.is_empty() && edits.take((0, 0, 0)).1.is_empty());
+        assert_eq!(hands, vec![(2, 1, 7, crate::hands::Hand::Main), (2, 1, 7, crate::hands::Hand::Main), (5, 4, 9, crate::hands::Hand::Main), (8, 1, 3, crate::hands::Hand::Main)]);
+        assert!(edits.is_empty() && edits.take((0, 0, 0, crate::hands::Hand::Main)).1.is_empty());
         edits.push(edit(9));
         edits.clear();
         assert_eq!((edits.len(), edits.first_stamp()), (0, None));

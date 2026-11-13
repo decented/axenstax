@@ -40,6 +40,8 @@ pub(super) struct Client {
     pub(super) inv: Inventory,
     pub(super) ui: CraftingUi,
     pub(super) armour: [Option<ArmourItem>; 4],
+    /// The off-hand (v101).
+    pub(super) offhand: Option<ItemStack>,
     /// The highest window event applied.
     pub(super) events: u32,
     pub(super) actions: JoinerActions,
@@ -68,6 +70,7 @@ impl Client {
             inv: Inventory::new(),
             ui: CraftingUi::new(),
             armour: [None; 4],
+            offhand: None,
             events: 0,
             actions: JoinerActions::default(),
             input_seq: 0,
@@ -91,8 +94,8 @@ impl Client {
                 protocol::PacketType::ItemActionOutcome => {
                     let out: ItemActionOutcomePacket = protocol::safe_deserialize(payload).unwrap();
                     if let Some(request) = self.actions.take(out.seq) {
-                        crate::joiner_actions::apply_item_outcome(&mut self.inv, &mut self.ui, &request, &out);
-                        if crate::joiner_actions::apply_use_wear(&mut self.inv, &request, &out).is_some() {
+                        crate::joiner_actions::apply_item_outcome(&mut self.inv, &mut self.ui, &mut self.offhand, &request, &out);
+                        if crate::joiner_actions::apply_use_wear(&mut self.inv, &mut self.offhand, &request, &out).is_some() {
                             self.wore += 1;
                         }
                     }
@@ -142,14 +145,14 @@ impl Client {
     pub(super) fn use_block(&mut self, cell: [i32; 3], kind: UseKind, hot: usize) -> bool {
         let held = self.inv.hotbar_slot(hot).map(|s| s.item.clone());
         let asked = Asked::UseBlock { cell, kind, claim: crate::block_use::claim(kind, held.as_ref()) };
-        if !self.actions.can_afford(&self.inv, &self.ui, &None, asked, held.as_ref()) {
+        if !self.actions.can_afford(&self.inv, &self.ui, &self.offhand, asked, held.as_ref()) {
             return false;
         }
         let (held_kind, held_id) = held.as_ref().map_or(protocol::ItemRef::Empty.to_wire(), |i| {
             crate::inventory::item_to_ref(i).to_wire()
         });
         let held_full = held.as_ref().map_or(protocol::WireItem::None, crate::inventory::item_to_wire_full);
-        let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: hot, held }, self.input_seq + 1);
+        let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: hot, held, hand: crate::hands::Hand::Main }, self.input_seq + 1);
         let pkt = protocol::ItemActionPacket {
             seq,
             action: protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full },
@@ -352,6 +355,14 @@ impl Rig {
         self.hs.server.players[s].inventory.set_slot(slot, Some(stack));
     }
 
+    /// Put `count` of `item` in joiner `n`'s off-hand on both sides.
+    pub(super) fn give_offhand(&mut self, n: usize, item: Item, count: u8) {
+        let stack = ItemStack { item, count };
+        self.cs[n].offhand = Some(stack.clone());
+        let s = self.cs[n].slot;
+        self.hs.server.players[s].offhand = Some(stack);
+    }
+
     /// The server's copy of joiner `n`'s window is the client's, slot for
     /// slot, with equal digests, no event left waiting and no mismatch.
     pub(super) fn assert_lockstep(&self, n: usize, what: &str) {
@@ -359,9 +370,10 @@ impl Rig {
         let sp = &self.hs.server.players[c.slot];
         let slots = |inv: &Inventory| inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>();
         assert_eq!(slots(&sp.inventory), slots(&c.inv), "{what}: the 36 slots");
+        assert_eq!(sp.offhand, c.offhand, "{what}: the off-hand");
         assert_eq!(
-            window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station),
-            window::digest_parts(&c.inv, &c.armour, &c.ui.cursor_item, &c.ui.grid, c.ui.station()),
+            window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station),
+            window::digest_parts(&c.inv, &c.armour, &c.offhand, &c.ui.cursor_item, &c.ui.grid, c.ui.station()),
             "{what}: the digests"
         );
         assert_eq!(sp.window_events.waiting(), 0, "{what}: every event applied on the client's word");

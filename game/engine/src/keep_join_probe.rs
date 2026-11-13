@@ -144,6 +144,7 @@ struct Session {
     intake: ChunkIntake,
     inv: crate::inventory::Inventory,
     armour: [Option<crate::armour::ArmourItem>; 4],
+    offhand: Option<crate::item::ItemStack>,
     ui: crate::craft_ui::CraftingUi,
     inbox: WindowInbox,
     chunks: u32,
@@ -177,7 +178,7 @@ impl Session {
             render_distance,
             changes: HashMap::new(),
             last_chunk_at: Instant::now(),
-            last_input: Instant::now(),
+            last_input: Instant::now(), offhand: None,
         }
     }
 
@@ -468,7 +469,7 @@ fn probe() {
             held_kind: kind,
             held_id: id,
             block_changes: vec![change],
-            edit_hands: vec![(0, kind, id)],
+            edit_hands: vec![(0, kind, id, crate::hands::Hand::Main)],
             ..Default::default()
         });
         // The server sends a refused edit's cell back; an accepted one stays quiet.

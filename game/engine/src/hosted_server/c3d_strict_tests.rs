@@ -94,6 +94,7 @@ impl Rig {
 struct ClientWindow {
     inv: crate::inventory::Inventory,
     armour: [Option<crate::armour::ArmourItem>; 4],
+    offhand: Option<crate::item::ItemStack>,
     cursor: Option<ItemStack>,
     grid: crate::window::CraftGrid,
     station: crate::window::Station,
@@ -101,7 +102,7 @@ struct ClientWindow {
 
 impl ClientWindow {
     fn of(sp: &crate::server::ServerPlayer) -> Self {
-        Self { inv: sp.inventory.clone(), armour: sp.armour, cursor: sp.cursor.clone(), grid: sp.craft_grid.clone(), station: sp.station }
+        Self { inv: sp.inventory.clone(), armour: sp.armour, cursor: sp.cursor.clone(), grid: sp.craft_grid.clone(), station: sp.station, offhand: None }
     }
     /// Apply `click` as the client does; its digest and verdict.
     fn click(&mut self, hs: &HostedServer, eye: glam::Vec3, click: &WindowClick) -> (u32, bool) {
@@ -449,7 +450,7 @@ fn c3d_strict_debt_at_staging_commits_nothing_and_is_never_written_off() {
     stock(&mut r.hs.server.players[r.i]);
     let sp = &mut r.hs.server.players[r.i];
     let take = crate::container_window::ItemDelta { take: vec![(0, ItemStack::new_block(crate::block::DIRT, 1))], give: vec![] };
-    sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &take);
+    sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &mut None, &take);
     let mut cw = ClientWindow::of(r.sp());
     let before = server_places(r.sp());
     let action = click_packet(&mut r, &mut cw, WindowClick::Slot { slot: 0, right: false }, false);
@@ -633,7 +634,7 @@ fn c3d_strict_auto_refill_before_the_join_sync_or_during_death_is_accepted() {
         let mut r = strict_rig(tag);
         stock(&mut r.hs.server.players[r.i]);
         let sp = &mut r.hs.server.players[r.i];
-        let window = crate::window_events::EffectiveWindow { inv: sp.inventory.clone(), armour: sp.armour, cursor: sp.cursor.clone(), grid: sp.craft_grid.clone() };
+        let window = crate::window_events::EffectiveWindow { inv: sp.inventory.clone(), armour: sp.armour, cursor: sp.cursor.clone(), grid: sp.craft_grid.clone(), offhand: None };
         let n = crate::window_events::queue(sp, crate::window_events::WindowEvent::Replace { window: Box::new(window), debt: Default::default(), station: crate::window::Station::Player }, 0);
         if death { sp.window_events.death_replace = Some(n); }
         let on = !r.sp().inventory.auto_refill;

@@ -392,6 +392,7 @@ fn replay_player_state(idx: u32, slot: &crate::player_slot::PlayerSlot) -> crate
         anim_state: 0,
         flags: 0,
         skin_key: 0,
+        held_tool: crate::protocol::HeldWire::NO_TOOL, off_kind: 0, off_id: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
     }
 }
 
@@ -2542,10 +2543,8 @@ impl super::GameState {
     /// avatar — on the PWA/WASM target too. All fields it reads are cross-platform.
     pub(crate) fn local_player_state(&self, idx: usize) -> crate::protocol::PlayerState {
         let slot = &self.players[idx];
-        let (held_kind, held_id) = match slot.inventory.hotbar_slot(slot.hotbar_slot) {
-            Some(stack) => crate::inventory::item_to_ref(&stack.item).to_wire(),
-            None => crate::protocol::ItemRef::Empty.to_wire(),
-        };
+        let main = crate::protocol::HeldWire::of(slot.inventory.hotbar_slot(slot.hotbar_slot).map(|s| &s.item));
+        let off = crate::protocol::HeldWire::of(slot.offhand.as_ref().map(|s| &s.item));
         // Local players are position-trusted: their `player.velocity` IS
         // simulated client-side (unlike server-side local players, whose
         // velocity is stale), so use real horizontal speed for the walk signal
@@ -2569,10 +2568,14 @@ impl super::GameState {
             yaw: slot.camera.yaw,
             pitch: slot.camera.pitch,
             health: slot.combat.health,
-            held_kind,
-            held_id,
+            held_kind: main.kind,
+            held_id: main.id,
             anim_state,
             flags,
+            held_tool: main.tool,
+            off_kind: off.kind,
+            off_id: off.id,
+            off_tool: off.tool,
             // The local player's own skin reference, sourced from the applied
             // cosmetic (default → 0). Flows onto this client's broadcast state
             // so peers can match/diff its look once a skin-bytes path exists.
@@ -4723,7 +4726,7 @@ impl super::GameState {
         if self.sent_uses.parked_len() > 0 {
             self.sent_uses.reseat_parked(&mut p.inventory);
         }
-        let undone_all = crate::use_edits::undo_refused(&mut self.sent_uses, &mut p.inventory, &mut p.crafting_ui, refused);
+        let undone_all = crate::use_edits::undo_refused(&mut self.sent_uses, &mut p.inventory, &mut p.crafting_ui, &mut p.offhand, refused);
         // The newest undone notice's reason (the use the player made last).
         let toast = undone_all.iter().find(|(_, u)| u.is_some()).map(|(n, _)| n.note);
         for (notice, undone) in undone_all {
@@ -17700,6 +17703,7 @@ impl super::GameState {
                     pitch: 0.0,
                     health: 20.0,
                     held_kind: 0, held_id: 0, anim_state: 0, flags: 0, skin_key: 0,
+                    held_tool: crate::protocol::HeldWire::NO_TOOL, off_kind: 0, off_id: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
                 };
                 let (skin_v, _held) = crate::entity_model::build_player_avatar_vertices(
                     &ps, 0.0, 0, 0 /* layer 0 = equipped skin */, 1.0, &self.registry,
@@ -23405,10 +23409,10 @@ impl super::GameState {
             return;
         }
         let p = &mut self.players[0];
-        crate::joiner_actions::apply_item_outcome(&mut p.inventory, &mut p.crafting_ui, &request, out);
+        crate::joiner_actions::apply_item_outcome(&mut p.inventory, &mut p.crafting_ui, &mut p.offhand, &request, out);
         // C3b-2 — shears on a hive wear where they now are (C3c-2: and a
         // shot's weapon, a reel's rod, flint and steel).
-        let wear = crate::joiner_actions::apply_use_wear(&mut p.inventory, &request, out);
+        let wear = crate::joiner_actions::apply_use_wear(&mut p.inventory, &mut p.offhand, &request, out);
         if wear.is_some() {
             self.handle_tool_use(wear);
         }
@@ -23484,7 +23488,7 @@ impl super::GameState {
             return;
         }
         let p = &mut self.players[0];
-        let applied = crate::joiner_actions::apply_outcome(&mut p.inventory, &mut p.crafting_ui, &request, out);
+        let applied = crate::joiner_actions::apply_outcome(&mut p.inventory, &mut p.crafting_ui, &mut p.offhand, &request, out);
         if applied.wear.is_some() {
             self.handle_tool_use(applied.wear);
         }
@@ -23952,10 +23956,10 @@ impl super::GameState {
         // ItemRef (tools→tier, blocks→id, materials→discriminant) so remote
         // peers render the real held tool, not just block ids. Shared encoder
         // with the server (inventory::item_to_ref).
-        let (held_kind, held_id) = match slot.inventory.hotbar_slot(slot.hotbar_slot) {
-            Some(stack) => crate::inventory::item_to_ref(&stack.item).to_wire(),
-            None => crate::protocol::ItemRef::Empty.to_wire(),
-        };
+        let main_wire = crate::protocol::HeldWire::of(slot.inventory.hotbar_slot(slot.hotbar_slot).map(|s| &s.item));
+        let (held_kind, held_id) = (main_wire.kind, main_wire.id);
+        // v101 — the off-hand item for the avatar wire (presentation only).
+        let off_wire = crate::protocol::HeldWire::of(slot.offhand.as_ref().map(|s| &s.item));
 
         // Movement/action intent: forward the SAME intent the client simulated
         // this tick (stashed by `tick()` in `net_local_intent`) so the server's
@@ -24035,6 +24039,10 @@ impl super::GameState {
             // C3c-1 — set by `RemoteClient::send_input` from the tags noted
             // beside the edits (the host's loopback mirrors no use).
             use_tags: Vec::new(),
+            held_tool: main_wire.tool,
+            off_kind: off_wire.kind,
+            off_id: off_wire.id,
+            off_tool: off_wire.tool,
         };
 
         // Serialize once, send to whichever transport is active

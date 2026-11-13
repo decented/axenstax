@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn a_joined_client_sends_no_second_eat_while_one_is_in_flight() {
         use crate::joiner_actions::{Asked, JoinerActions, Pending};
-        let eat = || Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: None };
+        let eat = || Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: None, hand: crate::hands::Hand::Main };
         let mut ja = JoinerActions::default();
         assert!(!ja.eat_in_flight());
         assert!(may_eat_now(0, true, ja.eat_in_flight()));

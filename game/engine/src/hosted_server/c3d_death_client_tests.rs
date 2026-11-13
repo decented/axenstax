@@ -31,7 +31,7 @@ impl Joined {
 
     /// A Strict `Close` through the real entry point; its header.
     fn close_now(&mut self, what: &str) -> crate::action_identity::ActionHeader {
-        assert!(self.ui.close_joined(&mut self.rc, &mut self.inv, &mut self.armour, &self.reg).expect("reserved"), "{what}: the Close is predicted");
+        assert!(self.ui.close_joined(&mut self.rc, &mut self.inv, &mut self.armour, &mut None, &self.reg).expect("reserved"), "{what}: the Close is predicted");
         self.last_action()
     }
 }
@@ -144,7 +144,7 @@ fn c3d_strict_client_early_respawn_with_a_table_screen_converges() {
     j.rc.send_respawn();
     j.pumps(1);
     assert!(j.rc.respawn_unanswered() && !j.hs.server.players[j.i].is_present_and_alive(), "the early Respawn waits");
-    assert!(j.ui.force_close_joined(&mut j.rc, &mut j.inv, &mut j.armour, &j.reg, true).expect("reserved"), "the force-close is predicted");
+    assert!(j.ui.force_close_joined(&mut j.rc, &mut j.inv, &mut j.armour, &mut None, &j.reg, true).expect("reserved"), "the force-close is predicted");
     let close = j.last_action();
     j.hs.tick();
     assert_eq!(j.fate(close), Some(ActionFate::Superseded), "a dead body's Close");

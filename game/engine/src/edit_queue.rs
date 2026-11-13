@@ -435,7 +435,7 @@ mod tests {
     }
 
     fn use_tag(x: i32) -> UseTag {
-        UseTag { x, y: 70, z: 0, kind: 2, slot: 0, used: None, tool: WireItem::None, unfit: 0 }
+        UseTag { x, y: 70, z: 0, kind: 2, slot: 0, used: None, tool: WireItem::None, unfit: 0, hand: crate::hands::Hand::Main }
     }
 
     /// C3c-1 — each edit with its tag of either kind, in order.
@@ -553,7 +553,7 @@ mod tests {
         let input = InputHand {
             held: (4, 40),
             hotbar_slot: Some(5),
-            edit_hands: vec![(2, 1, 10), (11, 1, 11)],
+            edit_hands: vec![(2, 1, 10, crate::hands::Hand::Main), (11, 1, 11, crate::hands::Hand::Main)],
             events_applied: 7,
             use_tags: Vec::new(),
         };

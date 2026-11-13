@@ -575,7 +575,7 @@ impl ClaimedWindow {
         if !self.claimed.contains(&at) {
             return None;
         }
-        PlayerSlots::of(&self.inv, &self.armour, &self.cursor, &self.grid).stack(at)
+        PlayerSlots::of(&self.inv, &self.armour, &None, &self.cursor, &self.grid).stack(at)
     }
 
     /// C3b-fix-a — the first claimed inventory slot holding `item`: where a
@@ -1322,6 +1322,7 @@ mod tests {
     struct Win {
         inv: Inventory,
         armour: [Option<ArmourItem>; 4],
+        offhand: Option<crate::item::ItemStack>,
         cursor: Option<ItemStack>,
         grid: CraftGrid,
         chest: ChestData,
@@ -1336,7 +1337,7 @@ mod tests {
                 cursor: None,
                 grid: Default::default(),
                 chest: ChestData::new(),
-                furnace: FurnaceData::default(),
+                furnace: FurnaceData::default(), offhand: None,
             }
         }
 
@@ -1563,13 +1564,13 @@ mod tests {
         inv.set_slot(9, Some(stone(10)));
         // Take 16: 10 found, 6 owed — and reported short (C3b-fix-c).
         let take = ItemDelta { take: vec![(0, stone(16))], give: vec![] };
-        let applied = debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &take);
+        let applied = debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &mut None, &take);
         assert_eq!(applied, DebtApplied { settled: vec![], short: vec![(Item::Block(block::STONE), 6)], paid: vec![], saturated: false });
         assert_eq!((inv.slot(9), debt.owed(&Item::Block(block::STONE))), (None, 6));
         // Give 16: 6 pay the debt, 10 land — and the 6 are reported paid
         // (C3b-fix-e L4: the server nets them off `correction_short`).
         let give = ItemDelta { take: vec![], give: vec![stone(16)] };
-        let applied = debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &give);
+        let applied = debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &mut None, &give);
         assert_eq!(applied.settled, vec![16], "all 16 settled");
         assert_eq!(applied.paid, vec![(Item::Block(block::STONE), 6)]);
         assert_eq!((inv.slot(0), debt.is_empty()), (Some(&stone(10)), true));
@@ -1578,7 +1579,7 @@ mod tests {
             inv.set_slot(i, Some(ItemStack::new_block(block::DIRT, 64)));
         }
         let give = ItemDelta { take: vec![], give: vec![stone(5)] };
-        assert_eq!(debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &give).settled, vec![0], "nothing settled: 5 unfit");
+        assert_eq!(debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &mut None, &give).settled, vec![0], "nothing settled: 5 unfit");
     }
 
     /// C3b-fix-a — a delta comes from net counts by item, split into stacks

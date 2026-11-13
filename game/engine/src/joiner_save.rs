@@ -1265,7 +1265,7 @@ mod oc_tests {
     /// sites that mark a session (`window_events::apply_own_now`, the
     /// numbered path): only a capture sees what it does.
     fn owe(sp: &mut ServerPlayer, item: &Item, n: u8) {
-        sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &take(item, n));
+        sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &mut None, &take(item, n));
     }
 
     /// Every tool and armour piece kind, by the wire's own decode.
@@ -1623,7 +1623,7 @@ mod oc_tests {
         let mut client = CorrectionDebt::from_entries(vec![(stone(), u32::MAX - 1)]).unwrap();
         let (mut inv, mut grid, mut cursor, mut armour) =
             (crate::inventory::Inventory::new(), Default::default(), None, [None; 4]);
-        let applied = client.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &take(&stone(), 5));
+        let applied = client.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &mut None, &take(&stone(), 5));
         assert!(applied.saturated);
         assert_eq!(client, sp.window_events.debt, "the same rule on both copies");
     }
@@ -1689,7 +1689,7 @@ mod oc_tests {
             inv: crate::inventory::Inventory::new(),
             armour: [None; 4],
             cursor: Some(ItemStack::new_block(crate::block::DIRT, 4)),
-            grid: Default::default(),
+            grid: Default::default(), offhand: None,
         };
         w.inv.set_slot(0, Some(ItemStack::new_block(STONE, 3)));
         w.armour[3] = Some(crate::armour::ArmourItem::new(
@@ -1765,7 +1765,7 @@ mod oc_tests {
             inv: crate::inventory::Inventory::new(),
             armour: [None; 4],
             cursor: Some(plan(200)),
-            grid: Default::default(),
+            grid: Default::default(), offhand: None,
         };
         for at in 0..36 {
             w.inv.set_slot(at, Some(plan(at as u8)));
@@ -1827,7 +1827,7 @@ pub(crate) fn encode_delivered_v3(save: &JoinerSave) -> Result<Vec<u8>, String> 
 mod quest_codec_tests {
     use super::*;
     fn imported() -> JoinerSave {
-        let mut window = EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        let mut window = EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default(), offhand: None };
         window.inv.set_slot(7, Some(ItemStack::new_block(crate::block::GLASS, 9)));
         let mut save = JoinerSave::from_parts(&window, 13.0, 17, [2.0, 7.0, -3.0], [8; 16], Some(123));
         save.owed.push(OwedEntry::capture(&Item::Block(crate::block::GLASS), 7));

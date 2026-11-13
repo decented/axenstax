@@ -152,9 +152,9 @@ impl HostedServer {
         let change = &applied;
         self.apply_edit_world(i, change, old, true, yielded);
         if yielded { crate::break_drops::mark_exposed_neighbours(&mut self.server.world, change.x, change.y, change.z, now); }
-        let (inv, armour, cursor, grid) = after.into_parts();
+        let (inv, armour, offhand, cursor, grid) = after.into_parts();
         let sp = &mut self.server.players[i];
-        sp.inventory = inv; sp.armour = armour; sp.cursor = cursor; sp.craft_grid = grid;
+        sp.inventory = inv; sp.armour = armour; sp.offhand = offhand; sp.cursor = cursor; sp.craft_grid = grid;
         prepared.commit(sp, now);
         #[cfg(test)]
         super::actions::commit_fault::after_commit(sp);

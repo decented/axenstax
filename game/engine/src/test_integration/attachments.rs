@@ -36,7 +36,7 @@ impl Client {
         if !self.actions.can_afford(&self.inv, &self.ui, &None, asked, held.as_ref()) {
             return false;
         }
-        let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: hot, held }, self.input_seq + 1);
+        let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: hot, held, hand: crate::hands::Hand::Main }, self.input_seq + 1);
         let action = ItemAction::Attach {
             x: cell[0],
             y: cell[1],
@@ -55,7 +55,7 @@ impl Client {
     /// `GameState::send_detach`: peel face `face` of `cell`.
     fn detach(&mut self, cell: [i32; 3], face: usize) -> bool {
         let asked = Asked::Detach { cell, face: face as u8 };
-        let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: 0, held: None }, self.input_seq + 1);
+        let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: 0, held: None, hand: crate::hands::Hand::Main }, self.input_seq + 1);
         let action = ItemAction::Detach { x: cell[0], y: cell[1], z: cell[2], face: face as u8 };
         let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.events, hand: crate::hands::Hand::Main };
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));

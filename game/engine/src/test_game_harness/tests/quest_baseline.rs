@@ -134,6 +134,7 @@ fn game_harness_d2c3_real_joined_villager_click_sends_one_server_action() {
             &p.inventory,
             &p.armour_slots,
             &p.crafting_ui.cursor_item,
+            &None,
             &p.crafting_ui.grid,
             &hg.state.registry,
         )
@@ -148,8 +149,9 @@ fn game_harness_d2c3_real_joined_villager_click_sends_one_server_action() {
                 &p.inventory,
                 &p.armour_slots,
                 &p.crafting_ui.cursor_item,
+                &None,
                 &p.crafting_ui.grid,
-                &hg.state.registry
+                &hg.state.registry,
             )
             .slots(),
             before,

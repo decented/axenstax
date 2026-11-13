@@ -1016,7 +1016,7 @@ mod tests {
         start(&mut p.inventory);
         p.inventory.auto_refill = false;
         p.armour_slots = [None; 4];
-        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots, &None);
         let eye = p.player.eye_pos();
         let clicks = [
             WindowClick::Slot { slot: 1, right: false },
@@ -1030,9 +1030,9 @@ mod tests {
             WindowClick::Slot { slot: 9, right: true },
         ];
         for click in &clicks {
-            p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, click, false, eye, |_| crate::block::AIR);
+            p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &mut None, click, false, eye, |_| crate::block::AIR);
         }
-        assert!(p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots), "the stone goes back");
+        assert!(p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots, &mut None), "the stone goes back");
         for _ in 0..3 {
             step(&mut server, &mut hg);
         }
@@ -1323,8 +1323,8 @@ mod tests {
         let sp = &mut server.server.players[slot];
         crate::window_events::apply_through(sp, applied, 0);
         let p = &hg.state.players[0];
-        let client = crate::window::digest_parts(&p.inventory, &p.armour_slots, &p.crafting_ui.cursor_item, &p.crafting_ui.grid, p.crafting_ui.station());
-        let server_digest = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station);
+        let client = crate::window::digest_parts(&p.inventory, &p.armour_slots, &None, &p.crafting_ui.cursor_item, &p.crafting_ui.grid, p.crafting_ui.station());
+        let server_digest = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station);
         assert_eq!(client, server_digest, "the windows agree");
         assert_eq!(p.inventory.slot(0).map(|s| s.count), Some(4), "the yield came back: four cobblestone");
         let worn = |inv: &crate::inventory::Inventory| match inv.slot(1).map(|s| &s.item) { Some(Item::Tool(t)) => t.durability, _ => 0 };
@@ -1359,7 +1359,7 @@ mod tests {
         saved.enter_world();
         saved.inventory.set_slot(5, Some(crate::item::ItemStack::new_block(crate::block::DIRT, 4)));
         let take = crate::container_window::ItemDelta { take: vec![(0, one_stone.clone())], give: vec![] };
-        saved.window_events.debt.apply(&mut saved.inventory, &mut saved.craft_grid, &mut saved.cursor, &mut saved.armour, &take);
+        saved.window_events.debt.apply(&mut saved.inventory, &mut saved.craft_grid, &mut saved.cursor, &mut saved.armour, &mut None, &take);
         assert_eq!(saved.window_events.debt.owed(&stone), 1);
         server.server.players.push(saved);
         server.server.save_joiner(0).unwrap();
@@ -1427,17 +1427,17 @@ mod tests {
         server.server.players[slot].inventory.set_slot(0, Some(sticks));
         hg.state.players[0].hotbar_slot = 0;
         let p = &mut hg.state.players[0];
-        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots, &None);
         let eye = p.player.eye_pos();
         let pick_up = crate::window::WindowClick::Slot { slot: 0, right: false };
-        p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &pick_up, false, eye, |_| crate::block::AIR);
+        p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &mut None, &pick_up, false, eye, |_| crate::block::AIR);
         for _ in 0..3 {
             harness_step(&mut server, &mut hg);
         }
         assert!(server.server.players[slot].cursor.is_some(), "the server's cursor holds the sticks");
         // One tick: Close, then Q.
         let p = &mut hg.state.players[0];
-        assert!(p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots));
+        assert!(p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots, &mut None));
         hg.state.players[0].drop_ready_tick = 0;
         hg.state.send_drop_request(0, 0);
         for _ in 0..3 {
@@ -1481,7 +1481,7 @@ mod tests {
             meta: 0,
         });
         let p = &mut hg.state.players[0];
-        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots, &None);
         hg.state.network_send_input();
         for _ in 0..3 {
             harness_step(&mut server, &mut hg);
@@ -1592,7 +1592,7 @@ mod tests {
         catch_up(&mut server, &mut hg);
         queue_tagged_breaks(&mut hg, &server, slot, 160);
         let made_before = hg.state.remote_client.as_ref().expect("joined").next_input_seq();
-        hg.state.send_eat_request(0);
+        hg.state.send_eat_request(0, crate::hands::Hand::Main);
         let queued = |hg: &HeadlessGame| hg.state.remote_client.as_ref().expect("joined").has_queued_requests();
         assert!(queued(&hg), "the Eat waits behind the breaks");
         let mut steps = 0;
@@ -1647,7 +1647,7 @@ mod tests {
         hg.state.players[0].hotbar_slot = 0;
         catch_up(&mut server, &mut hg);
         queue_tagged_breaks(&mut hg, &server, slot, 80);
-        hg.state.send_eat_request(0);
+        hg.state.send_eat_request(0, crate::hands::Hand::Main);
         paced_step(&mut server, &mut hg);
         let client = hg.state.remote_client.as_mut().expect("joined");
         assert!(client.has_carry_over() && client.has_queued_requests(), "edits still wait, and the Eat behind them");
@@ -4262,14 +4262,14 @@ mod tests {
         assert_eq!((sp.possession.plan_minted, sp.possession.plan_mismatch), (1, 0));
         // The Plan moves: slot 2 → slot 20 → hotbar slot 7.
         let p = &mut hg.state.players[0];
-        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots, &None);
         let eye = p.player.eye_pos();
         for at in [2, 20, 20, 7] {
             let click = crate::window::WindowClick::Slot { slot: at, right: false };
-            let r = p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &click, false, eye, |_| crate::block::AIR);
+            let r = p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &mut None, &click, false, eye, |_| crate::block::AIR);
             assert!(r.ok(), "click {at}");
         }
-        assert!(p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots));
+        assert!(p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots, &mut None));
         // Step until the ops land (the loopback transport is real-time: a
         // loaded machine can take more than three ticks to deliver them).
         for _ in 0..40 {
@@ -4775,10 +4775,10 @@ mod tests {
             pack_wait(&mut server, &mut hg, |server, hg| (server.server.players[slot].yaw - hg.state.players[0].camera.yaw).abs() < 0.01);
             right_click(&mut hg); // Actual kept-unpacked Chest interaction.
             assert!(hg.state.pack_window_frozen(0));
-            let before = crate::staged_window::MarkerWindow::capture_parts(&hg.state.players[0].inventory, &hg.state.players[0].armour_slots, &hg.state.players[0].crafting_ui.cursor_item, &hg.state.players[0].crafting_ui.grid, &hg.state.registry).slots();
+            let before = crate::staged_window::MarkerWindow::capture_parts(&hg.state.players[0].inventory, &hg.state.players[0].armour_slots, &None, &hg.state.players[0].crafting_ui.cursor_item, &hg.state.players[0].crafting_ui.grid, &hg.state.registry).slots();
             hg.state.send_drop_request(0, 0);
             hg.state.apply_window_click(0, &crate::window::WindowClick::Sort);
-            let after = crate::staged_window::MarkerWindow::capture_parts(&hg.state.players[0].inventory, &hg.state.players[0].armour_slots, &hg.state.players[0].crafting_ui.cursor_item, &hg.state.players[0].crafting_ui.grid, &hg.state.registry).slots();
+            let after = crate::staged_window::MarkerWindow::capture_parts(&hg.state.players[0].inventory, &hg.state.players[0].armour_slots, &None, &hg.state.players[0].crafting_ui.cursor_item, &hg.state.players[0].crafting_ui.grid, &hg.state.registry).slots();
             assert_eq!(after, before, "held physical mutation is refused in either mode");
             pack_wait(&mut server, &mut hg, |server, hg| server.server.ecs.get::<&crate::horse_ai::HorseData>(steed).is_ok_and(|data| data.pack.is_some()) && !hg.state.pack_window_frozen(0) && server.server.players[slot].pack_flight.is_none());
             assert!(hg.state.players[0].inventory.slot(0).is_none(), "one actual Chest was consumed");

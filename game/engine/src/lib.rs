@@ -4203,6 +4203,7 @@ fn run_shot_3p(args: &[String]) {
         anim_state: 0, // idle
         flags: 0,
         skin_key: 0,
+        held_tool: crate::protocol::HeldWire::NO_TOOL, off_kind: 0, off_id: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
     };
     let eye = foot + glam::Vec3::new(0.0, 1.62, 0.0);
 

@@ -141,7 +141,7 @@ impl Joiner {
             held_full,
             hotbar_slot: 0,
             sneak: false,
-            events_applied: u32::MAX,
+            events_applied: u32::MAX, hand: crate::hands::Hand::Main,
         };
         self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::EntityInteract, &pkt));
         self.seq

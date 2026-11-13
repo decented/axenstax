@@ -1109,13 +1109,14 @@ mod tests {
     struct Win {
         inv: Inventory,
         armour: [Option<ArmourItem>; 4],
+        offhand: Option<crate::item::ItemStack>,
         cursor: Option<ItemStack>,
         grid: CraftGrid,
     }
 
     impl Win {
         fn new() -> Self {
-            Win { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() }
+            Win { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default(), offhand: None }
         }
 
         /// Apply `click` at `station`, by a body standing beside the table
@@ -1146,7 +1147,7 @@ mod tests {
         }
 
         fn digest_at(&mut self, station: Station) -> u32 {
-            digest_parts(&self.inv, &self.armour, &self.cursor, &self.grid, station)
+            digest_parts(&self.inv, &self.armour, &None, &self.cursor, &self.grid, station)
         }
 
         fn cursor_count(&self) -> Option<u8> {

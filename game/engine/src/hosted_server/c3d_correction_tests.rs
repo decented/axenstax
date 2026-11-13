@@ -22,6 +22,7 @@ const TABLE: [i32; 3] = [41, 80, 40];
 struct Client {
     inv: crate::inventory::Inventory,
     armour: [Option<crate::armour::ArmourItem>; 4],
+    offhand: Option<crate::item::ItemStack>,
     cursor: Option<ItemStack>,
     grid: crate::window::CraftGrid,
     ui: crate::craft_ui::CraftingUi,
@@ -35,10 +36,10 @@ impl Client {
     fn joined(r: &Rig) -> Self {
         let sp = r.sp();
         Client { inv: sp.inventory.clone(), armour: sp.armour, cursor: sp.cursor.clone(), grid: sp.craft_grid.clone(),
-            ui: crate::craft_ui::CraftingUi::new(), debt: Default::default(), applied: r.applied, rejects: Vec::new() }
+            ui: crate::craft_ui::CraftingUi::new(), debt: Default::default(), applied: r.applied, rejects: Vec::new(), offhand: None }
     }
     fn station(&self) -> Station { self.ui.station() }
-    fn digest(&self) -> u32 { crate::window::digest_parts(&self.inv, &self.armour, &self.cursor, &self.grid, self.station()) }
+    fn digest(&self) -> u32 { crate::window::digest_parts(&self.inv, &self.armour, &None, &self.cursor, &self.grid, self.station()) }
     /// Apply everything the server sent, in order (what the game loop does).
     fn receive(&mut self, r: &mut Rig) {
         let reg = crate::block::BlockRegistry::new();
@@ -112,7 +113,7 @@ fn c3d_strict_stale_config_after_a_valve_applied_replace_is_served() {
     crate::window_events::apply_overdue(&mut r.hs.server.players[r.i], now);
     assert!(!r.sp().window_events.replace_waiting(), "the valve applied the death Replace");
     let sp = r.sp();
-    let copy = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station);
+    let copy = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station);
     assert_ne!(c.digest(), copy, "the client's old base differs from the replaced copy");
     let e = op(&mut r, protocol::WireWindowOp::OpenPlayer, c.digest(), true);
     c.receive(&mut r);
@@ -231,7 +232,7 @@ fn c3d_mirror_join_and_death_syncs_keep_client_locks_and_station() {
             let mut ui = crate::craft_ui::CraftingUi::new();
             ui.open = true;
             ui.table = Some(TABLE);
-            let mut w = crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None };
+            let mut w = crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None, offhand: &mut None };
             let station = crate::inventory_sync::apply(&mut w, sync, &reg, &mut crate::use_edits::SentUses::default(), &mut Default::default(), mode).unwrap();
             if let Some(station) = station { ui.adopt_station(station); }
             if mode == crate::action_identity::InventoryMode::Mirror {

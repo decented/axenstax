@@ -381,6 +381,7 @@ fn pose(source: &HeadlessGame, peer: &HeadlessGame, seat: Seat, target: u32) -> 
             &slot.inventory,
             &slot.armour_slots,
             &slot.crafting_ui.cursor_item,
+            &None,
             &slot.crafting_ui.grid,
             &peer.state.registry,
         )

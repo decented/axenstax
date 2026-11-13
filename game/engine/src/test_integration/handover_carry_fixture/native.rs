@@ -119,6 +119,7 @@ pub(super) fn actor_quest(
         &actor.slot.inventory,
         &actor.slot.armour_slots,
         &actor.slot.crafting_ui.cursor_item,
+        &None,
         &actor.slot.crafting_ui.grid,
         &host.server.registry,
     )
@@ -511,8 +512,7 @@ pub(super) fn walk_to_giver(host: &mut HostedServer, actor: &mut Actor, target: 
 }
 pub(super) fn repeat_completed(host: &mut HostedServer, actor: &mut Actor, target: u32, incarnation: u64, id: [u8;16]) {
     settle_actor(host, actor);
-    let raw = crate::staged_window::MarkerWindow::try_capture_parts(&actor.slot.inventory, &actor.slot.armour_slots,
-        &actor.slot.crafting_ui.cursor_item, &actor.slot.crafting_ui.grid, &host.server.registry).unwrap();
+    let raw = crate::staged_window::MarkerWindow::try_capture_parts(&actor.slot.inventory, &actor.slot.armour_slots, &None, &actor.slot.crafting_ui.cursor_item, &actor.slot.crafting_ui.grid, &host.server.registry).unwrap();
     let sp = &host.server.players[actor.i()];
     let action = actor.send(ActionIntent::Quest(QuestRequest { actor_respawns: sp.respawns, target,
         before: raw.digest_with(sp.station, None), incarnation, operation: QuestOperation::TurnIn { id } }));

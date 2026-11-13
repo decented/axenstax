@@ -20,7 +20,7 @@ fn mat(m: MaterialId, n: u8) -> ItemStack { ItemStack::new_material(m, n) }
 
 fn rig(tag: &str, items: &[(usize, ItemStack)]) -> Joined {
     let mut j = joined(tag, items, true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
     j.assert_honest("the refill setting");
     j
@@ -28,7 +28,7 @@ fn rig(tag: &str, items: &[(usize, ItemStack)]) -> Joined {
 
 /// The game loop's Strict Q-drop of one from hotbar `hot`.
 fn drop_one(j: &mut Joined, hot: usize) -> ActionHeader {
-    route_drop(Some(&mut j.rc), &mut j.ui, &mut j.inv, &mut j.armour, hot, &j.reg).expect("routed").expect("a Strict seat sends the drop typed")
+    route_drop(Some(&mut j.rc), &mut j.ui, &mut j.inv, &mut j.armour, &mut None, hot, &j.reg).expect("routed").expect("a Strict seat sends the drop typed")
 }
 
 /// Units of `item` lying on the server's ground.
@@ -119,11 +119,11 @@ fn bed(j: &mut Joined) -> [i32; 3] {
 }
 
 fn sleep(j: &mut Joined, bed: [i32; 3]) -> ActionHeader {
-    let pending = Pending { kind: Asked::Sleep { bed }, mob: None, hotbar_slot: 0, held: None };
+    let pending = Pending { kind: Asked::Sleep { bed }, mob: None, hotbar_slot: 0, held: None, hand: crate::hands::Hand::Main };
     let packet = protocol::ItemActionPacket { seq: 0, action: protocol::ItemAction::Sleep { bed }, events_applied: 0, hand: crate::hands::Hand::Main };
-    let window = j.ui.digest(&j.inv, &j.armour);
-    let header = route_item(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the sleep typed");
-    assert_eq!(j.ui.digest(&j.inv, &j.armour), window, "routing predicted nothing");
+    let window = j.ui.digest(&j.inv, &j.armour, &None);
+    let header = route_item(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the sleep typed");
+    assert_eq!(j.ui.digest(&j.inv, &j.armour, &None), window, "routing predicted nothing");
     header
 }
 
@@ -182,7 +182,7 @@ fn c3d_client_mirror_drop_stays_legacy() {
     let mut j = grid_joined("drop-mirror", InventoryMode::Mirror, None);
     j.inv.set_slot(0, Some(mat(MaterialId::Bread, 2)));
     let reg = crate::block::BlockRegistry::new();
-    assert_eq!(route_drop(Some(&mut j.rc), &mut j.ui, &mut j.inv, &mut j.armour, 0, &reg).expect("routed"), None, "Mirror: the legacy drop");
+    assert_eq!(route_drop(Some(&mut j.rc), &mut j.ui, &mut j.inv, &mut j.armour, &mut None, 0, &reg).expect("routed"), None, "Mirror: the legacy drop");
     assert_eq!(j.inv.slot(0).map(|s| s.count), Some(2), "Mirror: the hand untouched here");
     assert!(j.rc.action_journal.as_ref().is_none_or(|journal| journal.len() == 0), "Mirror: nothing reserved");
     j.assert_live("Mirror: never torn down");

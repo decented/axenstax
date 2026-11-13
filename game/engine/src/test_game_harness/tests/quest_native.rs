@@ -135,6 +135,7 @@ impl RemoteSetup {
             &actor.inventory,
             &actor.armour_slots,
             &actor.crafting_ui.cursor_item,
+            &None,
             &actor.crafting_ui.grid,
             &host.server.registry,
         )
@@ -610,6 +611,7 @@ fn game_harness_d2c3_native_portable_quest_uses_restored_original_giver_dialogue
         &rig.game.state.players[0].inventory,
         &rig.game.state.players[0].armour_slots,
         &rig.game.state.players[0].crafting_ui.cursor_item,
+        &None,
         &rig.game.state.players[0].crafting_ui.grid,
         &rig.game.state.registry,
     )
@@ -626,8 +628,9 @@ fn game_harness_d2c3_native_portable_quest_uses_restored_original_giver_dialogue
             &rig.game.state.players[0].inventory,
             &rig.game.state.players[0].armour_slots,
             &rig.game.state.players[0].crafting_ui.cursor_item,
+            &None,
             &rig.game.state.players[0].crafting_ui.grid,
-            &rig.game.state.registry
+            &rig.game.state.registry,
         )
         .slots(),
         before,

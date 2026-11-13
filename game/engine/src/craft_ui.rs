@@ -605,7 +605,7 @@ impl CraftingUi {
     #[cfg(test)]
     fn apply_bag_click(&mut self, inv: &mut Inventory, click: &WindowClick) -> ClickResult {
         let mut no_armour = [None; 4];
-        self.apply_test_click(inv, &mut no_armour, click)
+        self.apply_test_click(inv, &mut no_armour, &mut None, click)
     }
 
     /// Recipe-book auto-fill (`WindowClick::Autofill`). Returns `false` when
@@ -637,7 +637,7 @@ impl CraftingUi {
     #[cfg(test)]
     pub fn click_armour_slot(&mut self, armour_slot_idx: usize, armour_slots: &mut [Option<ArmourItem>; 4]) -> bool {
         let mut unused = Inventory::new();
-        self.apply_test_click(&mut unused, armour_slots, &WindowClick::Armour { slot: armour_slot_idx }).ok()
+        self.apply_test_click(&mut unused, armour_slots, &mut None, &WindowClick::Armour { slot: armour_slot_idx }).ok()
     }
 
     /// Click an inventory slot (`WindowClick::Slot`).
@@ -2411,7 +2411,7 @@ mod tests {
             inv.set_slot(i, Some(ItemStack::new_tool(
                 Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
         }
-        let closed = ui.close(&mut inv, &mut [None; 4]);
+        let closed = ui.close(&mut inv, &mut [None; 4], &mut None);
         assert!(!closed, "can't close into a full inventory");
         assert!(ui.open, "UI stays open so the items aren't stranded");
         assert_eq!(ui.grid[0][0].as_ref().map(|s| s.count), Some(5), "grid item preserved");
@@ -2420,7 +2420,7 @@ mod tests {
 
     /// How many `Close` ops the screen has logged, draining its log.
     fn closes_logged(ui: &mut CraftingUi, inv: &Inventory) -> usize {
-        ui.take_ops(inv, &[None; 4])
+        ui.take_ops(inv, &[None; 4], &None)
             .iter()
             .filter(|l| matches!(l.op, crate::protocol::WireWindowOp::Click(WindowClick::Close)))
             .count()
@@ -2438,14 +2438,14 @@ mod tests {
             inv.set_slot(i, Some(ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
         }
         let mut armour = [None; 4];
-        ui.open_table_crafting([0, 64, 0], &inv, &armour);
+        ui.open_table_crafting([0, 64, 0], &inv, &armour, &None);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 5));
         let _ = closes_logged(&mut ui, &inv); // the open
         // 240 fps against 20 ticks a second: 12 frames to a tick.
         let mut closes = 0;
         for _tick in 0..100 {
             for frame in 0..12 {
-                assert!(!ui.force_close(&mut inv, &mut armour, frame == 0), "the bag is full: it stays open");
+                assert!(!ui.force_close(&mut inv, &mut armour, &mut None, frame == 0), "the bag is full: it stays open");
             }
             closes += closes_logged(&mut ui, &inv);
         }
@@ -2454,9 +2454,9 @@ mod tests {
         // The player makes room for part of it: the window changed, so the
         // next tick's retry goes (and it closes).
         inv.set_slot(0, None);
-        assert!(!ui.force_close(&mut inv, &mut armour, false), "not until a tick has run");
+        assert!(!ui.force_close(&mut inv, &mut armour, &mut None, false), "not until a tick has run");
         assert_eq!(closes_logged(&mut ui, &inv), 0);
-        assert!(ui.force_close(&mut inv, &mut armour, true));
+        assert!(ui.force_close(&mut inv, &mut armour, &mut None, true));
         assert_eq!(closes_logged(&mut ui, &inv), 1);
         assert!(!ui.open);
         // A refusal that moved something is retried on the next tick's change
@@ -2466,14 +2466,14 @@ mod tests {
         for i in 1..36 {
             inv.set_slot(i, Some(ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
         }
-        ui.open_table_crafting([0, 64, 0], &inv, &armour);
+        ui.open_table_crafting([0, 64, 0], &inv, &armour, &None);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 5));
         ui.grid[0][1] = Some(ItemStack::new_block(block::DIRT, 5));
         let _ = closes_logged(&mut ui, &inv);
-        assert!(!ui.force_close(&mut inv, &mut armour, true), "first try: one cell fits, the other stays");
+        assert!(!ui.force_close(&mut inv, &mut armour, &mut None, true), "first try: one cell fits, the other stays");
         assert_eq!(closes_logged(&mut ui, &inv), 1, "the first refused Close is still sent");
         for _ in 0..20 {
-            assert!(!ui.force_close(&mut inv, &mut armour, true), "no change: no retry");
+            assert!(!ui.force_close(&mut inv, &mut armour, &mut None, true), "no change: no retry");
         }
         assert_eq!(closes_logged(&mut ui, &inv), 0);
     }
@@ -2494,7 +2494,7 @@ mod tests {
         }
         ui.update_result();
         let table = ui.result.clone().expect("four planks make a table");
-        assert!(!ui.close(&mut inv, &mut [None; 4]));
+        assert!(!ui.close(&mut inv, &mut [None; 4], &mut None));
         assert!(ui.open);
         assert_ne!(ui.result, Some(table), "the stale table is gone");
         assert_eq!(ui.result, window::recipe_output(&ui.grid, ui.station()));
@@ -2507,7 +2507,7 @@ mod tests {
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 5));
         ui.cursor_item = Some(ItemStack::new_block(block::DIRT, 3));
         let mut inv = Inventory::new();
-        let closed = ui.close(&mut inv, &mut [None; 4]);
+        let closed = ui.close(&mut inv, &mut [None; 4], &mut None);
         assert!(closed);
         assert!(!ui.open);
         assert!(ui.grid[0][0].is_none() && ui.cursor_item.is_none());
@@ -2711,11 +2711,11 @@ mod tests {
         let mut ui = CraftingUi::new();
         assert_eq!(ui.pad_focus, None);
         ui.pad_focus = Some(PadSlot::start());
-        ui.open_player_crafting(&Inventory::new(), &[None; 4]);
+        ui.open_player_crafting(&Inventory::new(), &[None; 4], &None);
         assert_eq!(ui.pad_focus, None, "opening resets the pad cursor");
         ui.pad_focus = Some(Grid(0, 0));
         let mut inv = Inventory::new();
-        assert!(ui.close(&mut inv, &mut [None; 4]));
+        assert!(ui.close(&mut inv, &mut [None; 4], &mut None));
         assert_eq!(ui.pad_focus, None, "closing resets the pad cursor");
     }
 

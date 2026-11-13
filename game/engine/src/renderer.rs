@@ -2955,6 +2955,7 @@ impl Renderer {
         let ps = crate::protocol::PlayerState {
             player_index: 0, x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0,
             health: 20.0, held_kind: 0, held_id: 0, anim_state: 0, flags: 0, skin_key: 0,
+            held_tool: crate::protocol::HeldWire::NO_TOOL, off_kind: 0, off_id: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
         };
         let (skin_verts, _held) =
             crate::entity_model::build_player_avatar_vertices(&ps, 0.0, 0, SKIN_PREVIEW_LAYER, 1.0, registry, arm);

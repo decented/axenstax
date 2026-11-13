@@ -254,9 +254,9 @@ impl HostedServer {
             unreachable!("the real container was read this action")
         };
         real.replace_with(&real_after);
-        let (inv, armour, cursor, grid) = r.after.into_parts();
+        let (inv, armour, offhand, cursor, grid) = r.after.into_parts();
         let sp = &mut self.server.players[i];
-        sp.inventory = inv; sp.armour = armour; sp.cursor = cursor; sp.craft_grid = grid;
+        sp.inventory = inv; sp.armour = armour; sp.offhand = offhand; sp.cursor = cursor; sp.craft_grid = grid;
         // The model of the client's mirror: its own prediction (equal to the
         // real container in every slot this click moved).
         sp.container_sent.seen = Some(MirrorView { cell, kind, contents: predicted });

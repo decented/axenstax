@@ -245,7 +245,7 @@ impl Joined {
     /// arm, then both halves in its world).
     pub(super) fn place_door(&mut self, bottom: [i32; 3], slot: usize, f: Facing) {
         let facing = f.to_bits();
-        let placed = place_door_joined(&mut self.rc, &mut self.ui, &mut self.inv, &mut self.armour, slot, bottom, facing, &self.reg).expect("reserved and sent");
+        let placed = place_door_joined(&mut self.rc, &mut self.ui, &mut self.inv, &mut self.armour, &mut None, slot, bottom, facing, &self.reg).expect("reserved and sent");
         assert_eq!(placed, Some(OAK_DOOR), "the window gave a door");
         for (c, m) in door_halves(bottom, facing).unwrap() {
             self.world.place_player_block(c[0], c[1], c[2], OAK_DOOR);
@@ -261,7 +261,7 @@ impl Joined {
     /// the reach).
     pub(super) fn toggle_from(&mut self, cell: [i32; 3], slot: usize) {
         let expected = self.world.get_block(cell[0], cell[1], cell[2]);
-        toggle_joined(&mut self.rc, &mut self.ui, &self.inv, &self.armour, &self.world, cell, expected, slot).expect("reserved and sent");
+        toggle_joined(&mut self.rc, &mut self.ui, &self.inv, &self.armour, &None, &self.world, cell, expected, slot).expect("reserved and sent");
         for (c, m) in toggle_metas(&self.world, cell, OpenRule::Canonical) { self.world.set_meta((c[0], c[1], c[2]), m); }
     }
 
@@ -270,7 +270,7 @@ impl Joined {
     pub(super) fn break_door(&mut self, cell: [i32; 3], slot: usize) {
         let old = (self.world.get_block(cell[0], cell[1], cell[2]), self.world.meta_at(cell[0], cell[1], cell[2]));
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: AIR, meta: 0 };
-        let routed = crate::strict_edits::route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change, old, &self.reg).expect("reserved and sent");
+        let routed = crate::strict_edits::route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, &mut None, slot, change, old, &self.reg).expect("reserved and sent");
         assert!(routed.is_typed(), "a door break goes typed");
         let pair_y = if crate::block_shape::door_is_top(old.1) { cell[1] - 1 } else { cell[1] + 1 };
         for y in [cell[1], pair_y] { self.world.set_block(cell[0], y, cell[2], AIR); self.world.set_meta((cell[0], y, cell[2]), 0); }
@@ -294,7 +294,7 @@ fn c3d_strict_door_place_is_one_compound_action() {
     let bottom = [41, 80, 40];
     // The refill setting goes first (as before every typed action); then
     // the door is exactly one more reservation.
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("the setting");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("the setting");
     let before = j.rc.action_journal.as_ref().map_or(0, |a| a.len());
     j.place_door(bottom, 0, Facing::East);
     assert_eq!(j.rc.action_journal.as_ref().map(|a| a.len()), Some(before + 1), "one reservation for both halves");
@@ -396,7 +396,7 @@ fn c3d_strict_spruce_door_place_and_break_use_the_held_door() {
     let mut j = joined("spruce-door", &[(0, held)], false);
     let bottom = [41, 80, 40];
     let facing = Facing::West.to_bits();
-    let placed = place_door_joined(&mut j.rc, &mut j.ui, &mut j.inv, &mut j.armour, 0, bottom, facing, &j.reg).expect("reserved and sent");
+    let placed = place_door_joined(&mut j.rc, &mut j.ui, &mut j.inv, &mut j.armour, &mut None, 0, bottom, facing, &j.reg).expect("reserved and sent");
     assert_eq!(placed, Some(spruce), "the window gave the spruce door");
     for (c, m) in door_halves(bottom, facing).unwrap() {
         j.world.place_player_block(c[0], c[1], c[2], spruce);

@@ -153,7 +153,7 @@ mod tests {
             inv: Inventory::new(),
             armour: [None; 4],
             cursor: None,
-            grid: Default::default(),
+            grid: Default::default(), offhand: None,
         };
         crate::starter_kit::grant_fresh_kit(&mut w.inv, "testlab", false, false);
         w.inv.toggle_lock(5);
@@ -182,7 +182,7 @@ mod tests {
                 armour: &mut armour,
                 cursor: &mut cursor,
                 grid: &mut grid,
-                container: None,
+                container: None, offhand: &mut None,
             },
             &packet,
             &crate::block::BlockRegistry::new(),
@@ -225,7 +225,7 @@ mod tests {
             inv: Inventory::new(),
             armour: [None; 4],
             cursor: None,
-            grid: Default::default(),
+            grid: Default::default(), offhand: None,
         };
         w.inv.set_slot(
             2,
@@ -251,7 +251,7 @@ mod tests {
                 armour: &mut armour,
                 cursor: &mut cursor,
                 grid: &mut grid,
-                container: None,
+                container: None, offhand: &mut None,
             },
             &packet(&w, &Default::default(), 3),
             &crate::block::BlockRegistry::new(),
@@ -287,13 +287,13 @@ mod prediction_tests {
             slot: 0,
             cost: Some(Item::Material(crate::item::MaterialId::WheatSeeds)),
             landed: None,
-            made_at: 1,
+            made_at: 1, hand: crate::hands::Hand::Main,
         });
         let w = EffectiveWindow {
             inv: Inventory::new(),
             armour: [None; 4],
             cursor: None,
-            grid: Default::default(),
+            grid: Default::default(), offhand: None,
         };
         let mut inv = Inventory::new();
         let mut ui = crate::craft_ui::CraftingUi::new();
@@ -304,7 +304,7 @@ mod prediction_tests {
                 armour: &mut armour,
                 cursor: &mut ui.cursor_item,
                 grid: &mut ui.grid,
-                container: None,
+                container: None, offhand: &mut None,
             },
             &packet(&w, &Default::default(), 3),
             &crate::block::BlockRegistry::new(),
@@ -317,6 +317,7 @@ mod prediction_tests {
             &mut uses,
             &mut inv,
             &mut ui,
+            &mut None,
             &[crate::protocol::RefusedUse {
                 x: 1,
                 y: 80,
@@ -340,7 +341,7 @@ mod prediction_tests {
                 slot: 0,
                 cost: Some(Item::Plan(body.clone())),
                 landed: None,
-                made_at: 1,
+                made_at: 1, hand: crate::hands::Hand::Main,
             });
             let mut inv = Inventory::new();
             let mut ui = crate::craft_ui::CraftingUi::new();
@@ -353,6 +354,7 @@ mod prediction_tests {
                     &mut uses,
                     &mut inv,
                     &mut ui,
+                    &mut None,
                     &[crate::protocol::RefusedUse {
                         x: 1,
                         y: 80,
@@ -369,13 +371,13 @@ mod prediction_tests {
                 slot: 9,
                 cost: Some(Item::Block(crate::block::STONE)),
                 landed: None,
-                made_at: 2,
+                made_at: 2, hand: crate::hands::Hand::Main,
             });
             let mut w = EffectiveWindow {
                 inv: Inventory::new(),
                 armour: [None; 4],
                 cursor: None,
-                grid: Default::default(),
+                grid: Default::default(), offhand: None,
             };
             w.inv.set_slot(
                 2,
@@ -394,7 +396,7 @@ mod prediction_tests {
                     armour: &mut armour,
                     cursor: &mut ui.cursor_item,
                     grid: &mut ui.grid,
-                    container: None,
+                    container: None, offhand: &mut None,
                 },
                 &packet(&w, &Default::default(), 3),
                 &crate::block::BlockRegistry::new(),
@@ -436,7 +438,7 @@ mod oc_tests {
     }
 
     fn sync_with(owed: Vec<(WireStack, u32)>) -> InventorySyncPacket {
-        let mut w = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        let mut w = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default(), offhand: None };
         w.inv.set_slot(4, Some(ItemStack::new_block(crate::block::DIRT, 9)));
         InventorySyncPacket { owed, ..packet(&w, &Default::default(), 2) }
     }
@@ -449,7 +451,7 @@ mod oc_tests {
         let mut debt = CorrectionDebt::from_entries(vec![(Item::Block(crate::block::DIRT), 5)]).unwrap();
         let (mut armour, mut cursor, mut grid) = ([None; 4], None, Default::default());
         let out = apply(
-            &mut WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None },
+            &mut WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None, offhand: &mut None },
             pkt,
             &crate::block::BlockRegistry::new(),
             &mut crate::use_edits::SentUses::default(),

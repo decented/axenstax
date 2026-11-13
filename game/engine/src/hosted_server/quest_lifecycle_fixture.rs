@@ -235,6 +235,7 @@ impl Room {
             &actor.slot.inventory,
             &actor.slot.armour_slots,
             &actor.slot.crafting_ui.cursor_item,
+            &None,
             &actor.slot.crafting_ui.grid,
             &self.host.server.registry,
         )

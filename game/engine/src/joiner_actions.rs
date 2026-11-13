@@ -1053,12 +1053,12 @@ mod tests {
         let hive = |claim| Asked::UseBlock { cell: [1, 2, 3], kind: UseKind::Hive, claim };
         let mut a = JoinerActions::default();
         assert_eq!(uses(hive(1)), 1);
-        assert!(a.can_afford(&inv, &CraftingUi::new(), hive(1), Some(&bucket)));
-        a.record(Pending { kind: hive(1), mob: None, hotbar_slot: 0, held: Some(bucket.clone()) }, 5);
-        assert!(!a.can_afford(&inv, &CraftingUi::new(), hive(1), Some(&bucket)), "the only bucket is claimed");
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, hive(1), Some(&bucket)));
+        a.record(Pending { kind: hive(1), mob: None, hotbar_slot: 0, held: Some(bucket.clone()), hand: crate::hands::Hand::Main }, 5);
+        assert!(!a.can_afford(&inv, &CraftingUi::new(), &None, hive(1), Some(&bucket)), "the only bucket is claimed");
         let shears = Item::Tool(Tool::new(ToolType::Shears, ToolMaterial::Iron));
         let mut inv = inv_with(2, ItemStack { item: shears.clone(), count: 1 });
-        let req = Pending { kind: hive(0), mob: None, hotbar_slot: 2, held: Some(shears) };
+        let req = Pending { kind: hive(0), mob: None, hotbar_slot: 2, held: Some(shears), hand: crate::hands::Hand::Main };
         let out = |accepted, wear_held| ItemActionOutcomePacket {
             seq: 1,
             accepted,
@@ -1068,10 +1068,10 @@ mod tests {
             wear_held,
             bite_after: 0,
         };
-        assert!(apply_use_wear(&mut inv, &req, &out(false, true)).is_none(), "refused: no wear");
-        assert!(apply_use_wear(&mut inv, &req, &out(true, false)).is_none(), "not told to wear");
-        assert!(apply_use_wear(&mut inv, &req, &out(true, true)).is_some(), "worn");
-        assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &req, &out(true, true)), 0, "nothing taken");
+        assert!(apply_use_wear(&mut inv, &mut None, &req, &out(false, true)).is_none(), "refused: no wear");
+        assert!(apply_use_wear(&mut inv, &mut None, &req, &out(true, false)).is_none(), "not told to wear");
+        assert!(apply_use_wear(&mut inv, &mut None, &req, &out(true, true)).is_some(), "worn");
+        assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &req, &out(true, true)), 0, "nothing taken");
     }
 
     /// C3c-2 — a shot claims its AMMO (one arrow in flight per arrow held),
@@ -1089,7 +1089,7 @@ mod tests {
         let mut a = JoinerActions::default();
         let ui = CraftingUi::new();
         assert!(a.can_afford(&inv, &ui, &None, shoot, Some(&arrow)));
-        let req = Pending { kind: shoot, mob: None, hotbar_slot: 0, held: Some(arrow.clone()) };
+        let req = Pending { kind: shoot, mob: None, hotbar_slot: 0, held: Some(arrow.clone()), hand: crate::hands::Hand::Main };
         a.record(req.clone(), 3);
         assert!(!a.can_afford(&inv, &ui, &None, shoot, Some(&arrow)), "the only arrow is in flight");
         assert!(!a.can_spend(&inv, &ui, &None, &arrow, 1), "and can't be dropped meanwhile");
@@ -1103,11 +1103,11 @@ mod tests {
             bite_after: 0,
         };
         let mut ui = CraftingUi::new();
-        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &req, &out(false)), 0);
-        assert!(apply_use_wear(&mut inv, &req, &out(false)).is_none());
-        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &req, &out(true)), 1);
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &mut None, &req, &out(false)), 0);
+        assert!(apply_use_wear(&mut inv, &mut None, &req, &out(false)).is_none());
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &mut None, &req, &out(true)), 1);
         assert!(inv.slot(20).is_none(), "the arrow, from wherever it is");
-        assert!(apply_use_wear(&mut inv, &req, &out(true)).is_some());
+        assert!(apply_use_wear(&mut inv, &mut None, &req, &out(true)).is_some());
         assert_eq!(durability(&inv, 0), u32::from(bow.durability) - 1, "the bow wore once");
     }
 
@@ -1169,7 +1169,7 @@ mod tests {
         let mut grid: crate::window::CraftGrid = Default::default();
         grid[0][0] = Some(ItemStack::new_tool(worn));
         let mut cursor = Some(ItemStack::new_tool(fresh));
-        assert_eq!(take_owed_window(&mut inv, &mut grid, &mut cursor, 0, &Item::Tool(fresh), 1), 1);
+        assert_eq!(take_owed_window(&mut inv, &mut grid, &mut cursor, &mut None, 0, crate::hands::Hand::Main, &Item::Tool(fresh), 1), 1);
         assert_eq!(cursor, None, "the exact one on the cursor");
         assert!(inv.slot(0).is_some() && grid[0][0].is_some(), "neither worn one was touched");
         // An equipped exact chestplate beats a worn one in the hint slot.
@@ -1179,7 +1179,7 @@ mod tests {
         let mut inv = inv_with(0, ItemStack { item: Item::Armour(worn_plate), count: 1 });
         let mut armour = [None, Some(plate), None, None];
         let (mut grid, mut cursor) = (Default::default(), None);
-        assert_eq!(take_correction(&mut inv, &mut grid, &mut cursor, &mut armour, 0, &Item::Armour(plate), 1), 1);
+        assert_eq!(take_correction(&mut inv, &mut grid, &mut cursor, &mut armour, &mut None, 0, &Item::Armour(plate), 1), 1);
         assert_eq!(armour[1], None, "the exact piece, taken off");
         assert!(inv.slot(0).is_some(), "the worn one in the hint slot stays");
         // No exact one anywhere: the hint slot's kind match pays first.
@@ -1200,9 +1200,9 @@ mod tests {
         let mut grid: crate::window::CraftGrid = Default::default();
         let mut cursor = None;
         let mut armour = [None, Some(plate), None, None];
-        assert_eq!(take_owed_window(&mut inv, &mut grid, &mut cursor, 0, &Item::Armour(plate), 1), 0);
+        assert_eq!(take_owed_window(&mut inv, &mut grid, &mut cursor, &mut None, 0, crate::hands::Hand::Main, &Item::Armour(plate), 1), 0);
         assert_eq!(armour[1], Some(plate));
-        assert_eq!(take_correction(&mut inv, &mut grid, &mut cursor, &mut armour, 0, &Item::Armour(plate), 1), 1);
+        assert_eq!(take_correction(&mut inv, &mut grid, &mut cursor, &mut armour, &mut None, 0, &Item::Armour(plate), 1), 1);
         assert_eq!(armour[1], None, "taken off");
     }
 
@@ -1217,11 +1217,11 @@ mod tests {
     fn the_weapon_wears_only_on_a_confirmed_swing() {
         let mut inv = inv_with(2, ItemStack { item: sword(), count: 1 });
         let before = durability(&inv, 2);
-        let swing = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 2, held: Some(sword()) };
-        let refused = apply_outcome(&mut inv, &mut CraftingUi::new(), &swing, &outcome(1, false, 0));
+        let swing = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 2, held: Some(sword()), hand: crate::hands::Hand::Main };
+        let refused = apply_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &swing, &outcome(1, false, 0));
         assert!(refused.wear.is_none());
         assert_eq!(durability(&inv, 2), before, "a refused swing wears nothing");
-        let confirmed = apply_outcome(&mut inv, &mut CraftingUi::new(), &swing, &outcome(1, true, 0));
+        let confirmed = apply_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &swing, &outcome(1, true, 0));
         assert!(confirmed.wear.is_some());
         assert_eq!(durability(&inv, 2), before - 1);
     }
@@ -1234,11 +1234,11 @@ mod tests {
             kind: Asked::Interact(InteractKind::Feed),
             mob: Some(MobType::Cow),
             hotbar_slot: 0,
-            held: Some(wheat),
+            held: Some(wheat), hand: crate::hands::Hand::Main,
         };
-        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &feed, &outcome(1, false, 1)).consumed, 0);
+        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &feed, &outcome(1, false, 1)).consumed, 0);
         assert_eq!(inv.hotbar_slot(0).unwrap().count, 5);
-        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &feed, &outcome(1, true, 1)).consumed, 1);
+        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &feed, &outcome(1, true, 1)).consumed, 1);
         assert_eq!(inv.hotbar_slot(0).unwrap().count, 4);
     }
 
@@ -1255,13 +1255,13 @@ mod tests {
             kind: Asked::Interact(InteractKind::Milk),
             mob: Some(MobType::Cow),
             hotbar_slot: 3,
-            held: Some(bucket),
+            held: Some(bucket), hand: crate::hands::Hand::Main,
         };
-        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &milk, &outcome(1, true, 1)).consumed, 1);
+        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &milk, &outcome(1, true, 1)).consumed, 1);
         assert_eq!(inv.hotbar_slot(3).unwrap().count, 4, "the bones that took its slot are untouched");
         assert!(inv.slot(20).is_none(), "the bucket went from where it is now");
         // Nothing to take any more: nothing taken, no panic.
-        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &milk, &outcome(1, true, 1)).consumed, 0);
+        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &milk, &outcome(1, true, 1)).consumed, 0);
     }
 
     /// Review D2b LOW-1 — a swing confirmed after the sword moved wears that
@@ -1270,13 +1270,13 @@ mod tests {
     fn a_confirmed_swing_wears_the_sword_where_it_went() {
         let mut inv = inv_with(2, ItemStack::new_material(MaterialId::Wheat, 3));
         inv.set_slot(30, Some(ItemStack { item: sword(), count: 1 }));
-        let swing = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 2, held: Some(sword()) };
+        let swing = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 2, held: Some(sword()), hand: crate::hands::Hand::Main };
         let durability_at = |inv: &Inventory| match &inv.slot(30).unwrap().item {
             Item::Tool(t) => t.durability,
             _ => unreachable!(),
         };
         let before = durability_at(&inv);
-        assert!(apply_outcome(&mut inv, &mut CraftingUi::new(), &swing, &outcome(1, true, 0)).wear.is_some());
+        assert!(apply_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &swing, &outcome(1, true, 0)).wear.is_some());
         assert_eq!(durability_at(&inv), before - 1);
         assert_eq!(inv.hotbar_slot(2).unwrap().count, 3, "the wheat in its old slot is untouched");
     }
@@ -1290,19 +1290,19 @@ mod tests {
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 1));
         let mut a = JoinerActions::default();
         let milk = Asked::Interact(InteractKind::Milk);
-        assert!(a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)));
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)));
         let first = a.record(
-            Pending { kind: milk, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(bucket.clone()) },
+            Pending { kind: milk, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(bucket.clone()), hand: crate::hands::Hand::Main },
             1,
         );
-        assert!(!a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)), "the only bucket is spoken for");
-        assert!(a.can_afford(&inv, &CraftingUi::new(), Asked::Interact(InteractKind::Shear), None), "shearing uses nothing");
+        assert!(!a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)), "the only bucket is spoken for");
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, Asked::Interact(InteractKind::Shear), None), "shearing uses nothing");
         let two = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 2));
-        assert!(a.can_afford(&two, &CraftingUi::new(), milk, Some(&bucket)), "a second bucket is free");
+        assert!(a.can_afford(&two, &CraftingUi::new(), &None, milk, Some(&bucket)), "a second bucket is free");
         // Answered (refused or not): the claim is gone.
         a.take(first);
-        assert!(a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)));
-        assert!(!a.can_afford(&inv, &CraftingUi::new(), milk, None), "an empty hand has nothing to spend");
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)));
+        assert!(!a.can_afford(&inv, &CraftingUi::new(), &None, milk, None), "an empty hand has nothing to spend");
     }
 
     /// Review D2b LOW-1 — a request the server never answered stops claiming
@@ -1315,14 +1315,14 @@ mod tests {
         let mut a = JoinerActions::default();
         let milk = Asked::Interact(InteractKind::Milk);
         let dropped = a.record(
-            Pending { kind: milk, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(bucket.clone()) },
+            Pending { kind: milk, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(bucket.clone()), hand: crate::hands::Hand::Main },
             1,
         );
         let swing =
-            a.record(Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 1, held: None }, 1);
-        assert!(!a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)), "claimed while it might still be answered");
+            a.record(Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 1, held: None, hand: crate::hands::Hand::Main }, 1);
+        assert!(!a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)), "claimed while it might still be answered");
         assert!(a.take(swing).is_some());
-        assert!(a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)), "the server answered past it: it never will be");
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)), "the server answered past it: it never will be");
         assert!(a.take(dropped).is_none(), "forgotten");
         assert_eq!(a.len(), 0);
     }
@@ -1341,38 +1341,38 @@ mod tests {
         let bucket = Item::Material(MaterialId::Bucket);
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 1));
         let milk = Asked::Interact(InteractKind::Milk);
-        let req = || Pending { kind: milk, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(bucket.clone()) };
+        let req = || Pending { kind: milk, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(bucket.clone()), hand: crate::hands::Hand::Main };
         let mut a = JoinerActions::default();
         // Milk A, sent ahead of input 7.
         let cow_a = a.record(req(), 7);
-        assert!(!a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)));
+        assert!(!a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)));
         // 300 ticks: inputs 7..307 go out, the stalled host acknowledges
         // nothing past input 6 (sent before the request).
         for _ in 0..300 {
             a.acknowledged(6);
         }
         assert!(
-            !a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)),
+            !a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)),
             "however long the server is silent, the only bucket stays spoken for"
         );
         // The host resumes: its StateUpdate acknowledges input 7.
         a.acknowledged(7);
-        assert!(a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)), "read and answered: the bucket is free");
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)), "read and answered: the bucket is free");
         // The answer, queued in the same poll, is still applied.
         assert_eq!(a.take(cow_a).map(|p| p.kind), Some(milk));
 
         // A request skipped (never answered) stops claiming the same way.
         let skipped = a.record(req(), 400);
         a.acknowledged(450);
-        assert!(a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)));
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)));
         assert!(a.take(skipped).is_some(), "the entry stays for a late answer");
 
         // Leaving the world (and so every reconnect) forgets every claim.
         let mut a = JoinerActions::default();
         a.record(req(), 1);
-        assert!(!a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)));
+        assert!(!a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)));
         a.clear();
-        assert!(a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)));
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, milk, Some(&bucket)));
         assert_eq!(a.len(), 0);
     }
 
@@ -1386,7 +1386,7 @@ mod tests {
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Bread, 1));
         let ui = CraftingUi::new();
         let mut a = JoinerActions::default();
-        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) }, UNTIL_SENT);
+        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()), hand: crate::hands::Hand::Main }, UNTIL_SENT);
         // A long carry-over: inputs 10..=14 go out ahead of it, and the
         // server acknowledges every one.
         for acked in 10..=14 {
@@ -1417,12 +1417,12 @@ mod tests {
         inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
         let ui = CraftingUi::new();
         let mut a = JoinerActions::default();
-        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) }, UNTIL_SENT);
+        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()), hand: crate::hands::Hand::Main }, UNTIL_SENT);
         let milk = Pending {
             kind: Asked::Interact(InteractKind::Milk),
             mob: Some(MobType::Cow),
             hotbar_slot: 1,
-            held: Some(bucket.clone()),
+            held: Some(bucket.clone()), hand: crate::hands::Hand::Main,
         };
         a.record(milk, UNTIL_SENT);
         assert!(!a.can_spend(&inv, &ui, &None, &bread, 1) && !a.can_spend(&inv, &ui, &None, &bucket, 1));
@@ -1442,11 +1442,11 @@ mod tests {
         let carrot = Item::Material(MaterialId::Carrot);
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Carrot, 1));
         let mut a = JoinerActions::default();
-        assert!(a.can_afford(&inv, &CraftingUi::new(), Asked::Eat, Some(&carrot)));
-        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(carrot.clone()) }, 3);
-        assert!(!a.can_afford(&inv, &CraftingUi::new(), Asked::Eat, Some(&carrot)), "the only carrot is being eaten");
-        assert!(!a.can_afford(&inv, &CraftingUi::new(), Asked::Interact(InteractKind::Feed), Some(&carrot)));
-        assert!(a.can_afford(&inv, &CraftingUi::new(), Asked::Sleep { bed: [0, 64, 0] }, None), "sleeping uses nothing");
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, Asked::Eat, Some(&carrot)));
+        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(carrot.clone()), hand: crate::hands::Hand::Main }, 3);
+        assert!(!a.can_afford(&inv, &CraftingUi::new(), &None, Asked::Eat, Some(&carrot)), "the only carrot is being eaten");
+        assert!(!a.can_afford(&inv, &CraftingUi::new(), &None, Asked::Interact(InteractKind::Feed), Some(&carrot)));
+        assert!(a.can_afford(&inv, &CraftingUi::new(), &None, Asked::Sleep { bed: [0, 64, 0] }, None), "sleeping uses nothing");
         assert_eq!(uses(Asked::Eat), 1);
         assert_eq!(uses(Asked::Sleep { bed: [0, 0, 0] }), 0);
         assert_eq!(uses(Asked::Swing), 0);
@@ -1457,14 +1457,14 @@ mod tests {
     fn an_accepted_eat_takes_the_food_and_a_refused_one_nothing() {
         let bread = Item::Material(MaterialId::Bread);
         let mut inv = inv_with(4, ItemStack::new_material(MaterialId::Bread, 3));
-        let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
+        let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread), hand: crate::hands::Hand::Main };
         let out = |accepted, consume_held| ItemActionOutcomePacket { seq: 1, accepted, consume_held, note: 0, window_event: 0, wear_held: false, bite_after: 0 };
-        assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &eat, &out(false, 0)), 0);
+        assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &eat, &out(false, 0)), 0);
         assert_eq!(inv.hotbar_slot(4).unwrap().count, 3);
-        assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &eat, &out(true, 1)), 1);
+        assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &eat, &out(true, 1)), 1);
         assert_eq!(inv.hotbar_slot(4).unwrap().count, 2);
         // An interaction's answer never pays an item action, nor the reverse.
-        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &eat, &outcome(1, true, 1)).consumed, 0);
+        assert_eq!(apply_outcome(&mut inv, &mut CraftingUi::new(), &mut None, &eat, &outcome(1, true, 1)).consumed, 0);
         assert_eq!(inv.hotbar_slot(4).unwrap().count, 2);
     }
 
@@ -1477,7 +1477,7 @@ mod tests {
                 kind: Asked::Interact(InteractKind::Milk),
                 mob: Some(MobType::Cow),
                 hotbar_slot: 0,
-                held: Some(bucket),
+                held: Some(bucket), hand: crate::hands::Hand::Main,
             },
             1,
         )
@@ -1512,7 +1512,7 @@ mod tests {
         let wheat = Item::Material(MaterialId::Wheat);
         let inv = Inventory::new();
         let mut ui = CraftingUi::new();
-        ui.open_table_crafting([0, 64, 0], &Inventory::new(), &[None; 4]);
+        ui.open_table_crafting([0, 64, 0], &Inventory::new(), &[None; 4], &None);
         for c in 0..3 {
             ui.grid[1][c] = Some(ItemStack::new_material(MaterialId::Wheat, 1));
         }
@@ -1521,7 +1521,7 @@ mod tests {
         let mut a = JoinerActions::default();
         assert!(a.may_craft(&inv, &ui, &None));
         let feed = a.record(
-            Pending { kind: Asked::Interact(InteractKind::Feed), mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(wheat) },
+            Pending { kind: Asked::Interact(InteractKind::Feed), mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(wheat), hand: crate::hands::Hand::Main },
             1,
         );
         assert!(!a.may_craft(&inv, &ui, &None), "crafting would spend the wheat the feed needs");
@@ -1530,7 +1530,7 @@ mod tests {
         assert!(a.may_craft(&spare, &ui, &None));
         // A craft from other items is never gated by the wheat claim.
         let mut planks = CraftingUi::new();
-        planks.open_player_crafting(&Inventory::new(), &[None; 4]);
+        planks.open_player_crafting(&Inventory::new(), &[None; 4], &None);
         for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             planks.grid[r][c] = Some(ItemStack::new_block(crate::block::OAK_PLANKS, 1));
         }
@@ -1567,7 +1567,7 @@ mod tests {
         let bread = Item::Material(MaterialId::Bread);
         let mut inv = Inventory::new();
         let mut ui = CraftingUi::new();
-        ui.open_player_crafting(&Inventory::new(), &[None; 4]);
+        ui.open_player_crafting(&Inventory::new(), &[None; 4], &None);
         // Milk: the bucket was moved into the grid while the request flew.
         ui.grid[1][1] = Some(ItemStack::new_material(MaterialId::Bucket, 1));
         ui.cursor_item = Some(ItemStack::new_material(MaterialId::Bucket, 1));
@@ -1575,24 +1575,24 @@ mod tests {
             kind: Asked::Interact(InteractKind::Milk),
             mob: Some(MobType::Cow),
             hotbar_slot: 0,
-            held: Some(bucket),
+            held: Some(bucket), hand: crate::hands::Hand::Main,
         };
-        assert_eq!(apply_outcome(&mut inv, &mut ui, &milk, &outcome(1, true, 1)).consumed, 1);
+        assert_eq!(apply_outcome(&mut inv, &mut ui, &mut None, &milk, &outcome(1, true, 1)).consumed, 1);
         assert!(ui.grid[1][1].is_none(), "paid from the grid first");
         assert!(ui.cursor_item.is_some(), "the cursor's bucket is untouched");
-        assert_eq!(apply_outcome(&mut inv, &mut ui, &milk, &outcome(1, true, 1)).consumed, 1);
+        assert_eq!(apply_outcome(&mut inv, &mut ui, &mut None, &milk, &outcome(1, true, 1)).consumed, 1);
         assert!(ui.cursor_item.is_none(), "then from the cursor");
-        assert_eq!(apply_outcome(&mut inv, &mut ui, &milk, &outcome(1, true, 1)).consumed, 0, "then nothing");
+        assert_eq!(apply_outcome(&mut inv, &mut ui, &mut None, &milk, &outcome(1, true, 1)).consumed, 0, "then nothing");
 
         // Eat: the bread is on the cursor mid-drag when the outcome lands.
         ui.cursor_item = Some(ItemStack::new_material(MaterialId::Bread, 2));
-        let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
+        let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread), hand: crate::hands::Hand::Main };
         let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0, window_event: 0, wear_held: false, bite_after: 0 };
-        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &mut None, &eat, &out), 1);
         assert_eq!(ui.cursor_item.as_ref().map(|s| s.count), Some(1), "paid from the cursor");
         // With bread back in the 36 slots, they pay first.
         inv.set_slot(20, Some(ItemStack::new_material(MaterialId::Bread, 1)));
-        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &mut None, &eat, &out), 1);
         assert!(inv.slot(20).is_none());
         assert_eq!(ui.cursor_item.as_ref().map(|s| s.count), Some(1));
     }
@@ -1605,15 +1605,15 @@ mod tests {
         let bread = Item::Material(MaterialId::Bread);
         let mut inv = Inventory::new();
         let mut ui = CraftingUi::new();
-        ui.open_player_crafting(&Inventory::new(), &[None; 4]);
+        ui.open_player_crafting(&Inventory::new(), &[None; 4], &None);
         ui.grid[0][1] = Some(ItemStack::new_material(MaterialId::Bread, 2));
-        let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
+        let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread), hand: crate::hands::Hand::Main };
         let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0, window_event: 0, wear_held: false, bite_after: 0 };
-        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &mut None, &eat, &out), 1);
         assert_eq!(ui.grid[0][1].as_ref().map(|s| s.count), Some(1), "one bite taken from the grid cell");
-        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &mut None, &eat, &out), 1);
         assert!(ui.grid[0][1].is_none());
-        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 0, "then nothing");
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &mut None, &eat, &out), 0, "then nothing");
     }
 
     /// Decision 5 — paying from the grid recomputes the result shown.
@@ -1622,14 +1622,14 @@ mod tests {
         let wheat = Item::Material(MaterialId::Wheat);
         let mut inv = Inventory::new();
         let mut ui = CraftingUi::new();
-        ui.open_table_crafting([0, 64, 0], &Inventory::new(), &[None; 4]);
+        ui.open_table_crafting([0, 64, 0], &Inventory::new(), &[None; 4], &None);
         for c in 0..3 {
             ui.grid[1][c] = Some(ItemStack::new_material(MaterialId::Wheat, 1));
         }
         ui.update_result();
         assert!(ui.result.is_some());
-        let feed = Pending { kind: Asked::Interact(InteractKind::Feed), mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(wheat) };
-        assert_eq!(apply_outcome(&mut inv, &mut ui, &feed, &outcome(1, true, 1)).consumed, 1);
+        let feed = Pending { kind: Asked::Interact(InteractKind::Feed), mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(wheat), hand: crate::hands::Hand::Main };
+        assert_eq!(apply_outcome(&mut inv, &mut ui, &mut None, &feed, &outcome(1, true, 1)).consumed, 1);
         assert!(ui.result.is_none(), "two wheat make nothing");
     }
 
@@ -1649,7 +1649,7 @@ mod tests {
     #[test]
     fn pending_requests_are_matched_by_seq_and_bounded() {
         let mut a = JoinerActions::default();
-        let req = |slot| Pending { kind: Asked::Swing, mob: Some(MobType::Pig), hotbar_slot: slot, held: None };
+        let req = |slot| Pending { kind: Asked::Swing, mob: Some(MobType::Pig), hotbar_slot: slot, held: None, hand: crate::hands::Hand::Main };
         let s1 = a.record(req(1), 1);
         let s2 = a.record(req(2), 1);
         assert_ne!(s1, s2);
@@ -1674,8 +1674,8 @@ mod tests {
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Bread, 2));
         let ui = CraftingUi::new();
         let mut a = JoinerActions::default();
-        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) }, UNTIL_SENT);
-        let swing = Pending { kind: Asked::Swing, mob: Some(MobType::Pig), hotbar_slot: 1, held: Some(sword()) };
+        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()), hand: crate::hands::Hand::Main }, UNTIL_SENT);
+        let swing = Pending { kind: Asked::Swing, mob: Some(MobType::Pig), hotbar_slot: 1, held: Some(sword()), hand: crate::hands::Hand::Main };
         let first_swing = a.record(swing.clone(), 7);
         for _ in 0..MAX_PENDING {
             a.record(swing.clone(), 7);
@@ -1692,7 +1692,7 @@ mod tests {
         // go — it evicts a swing, never the queued Eat.
         assert!(a.can_afford(&inv, &ui, &None, Asked::Interact(InteractKind::Feed), Some(&bread)), "the swings claim nothing");
         assert!(a.can_afford(&inv, &ui, &None, Asked::Swing, Some(&sword())), "one that claims nothing may still go");
-        a.record(Pending { kind: Asked::Interact(InteractKind::Feed), mob: Some(MobType::Pig), hotbar_slot: 0, held: Some(bread.clone()) }, 7);
+        a.record(Pending { kind: Asked::Interact(InteractKind::Feed), mob: Some(MobType::Pig), hotbar_slot: 0, held: Some(bread.clone()), hand: crate::hands::Hand::Main }, 7);
         assert_eq!(a.len(), MAX_PENDING);
         assert!(a.eat_in_flight(), "the Eat still claims: a swing went instead");
         assert!(!a.can_spend(&inv, &ui, &None, &bread, 1), "both loaves are claimed now");
@@ -1715,7 +1715,7 @@ mod tests {
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Bread, 1));
         let ui = CraftingUi::new();
         let eat = |a: &mut JoinerActions| {
-            a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) }, UNTIL_SENT)
+            a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()), hand: crate::hands::Hand::Main }, UNTIL_SENT)
         };
         // Sent from the queue ahead of input 12: claims until 12 is read.
         let mut a = JoinerActions::default();
@@ -1781,7 +1781,7 @@ mod tests {
         let ui = CraftingUi::new();
         let rod = Item::Tool(Tool::new(ToolType::FishingRod, ToolMaterial::Wood));
         let firestarter = Item::Material(MaterialId::MagnesiumFirestarter);
-        let eat = || Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) };
+        let eat = || Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()), hand: crate::hands::Hand::Main };
         let mut a = JoinerActions::default();
         for _ in 0..MAX_PENDING {
             a.record(eat(), UNTIL_SENT);
@@ -1793,7 +1793,7 @@ mod tests {
         // A cast recorded first, then 63 Eats: one more Eat may go, and the
         // cast is what it evicts.
         let mut b = JoinerActions::default();
-        let cast = b.record(Pending { kind: Asked::Cast, mob: None, hotbar_slot: 1, held: Some(rod.clone()) }, UNTIL_SENT);
+        let cast = b.record(Pending { kind: Asked::Cast, mob: None, hotbar_slot: 1, held: Some(rod.clone()), hand: crate::hands::Hand::Main }, UNTIL_SENT);
         let mut eats = Vec::new();
         for _ in 0..MAX_PENDING - 1 {
             eats.push(b.record(eat(), UNTIL_SENT));
@@ -1817,7 +1817,7 @@ mod tests {
         let ui = CraftingUi::new();
         let arrow = Item::Material(MaterialId::Arrow);
         let shoot = Asked::Shoot { weapon: ShotWeapon::Bow, material: ToolMaterial::Wood };
-        let shot = || Pending { kind: shoot, mob: None, hotbar_slot: 0, held: Some(arrow.clone()) };
+        let shot = || Pending { kind: shoot, mob: None, hotbar_slot: 0, held: Some(arrow.clone()), hand: crate::hands::Hand::Main };
         let mut last = Tool::new(ToolType::Bow, ToolMaterial::Wood);
         last.durability = 1;
         let mut inv = inv_with(0, ItemStack::new_tool(last));

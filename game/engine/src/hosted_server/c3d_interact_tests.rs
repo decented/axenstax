@@ -38,7 +38,7 @@ fn rig(tag: &str, items: &[(usize, ItemStack)], life: bool) -> Joined {
     let mut j = joined(tag, items, true);
     j.hs.server.animal_life_simulated = life;
     j.hs.server.players[j.i].verified_pubkey = Some([7; 32]);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
     j.assert_honest("the refill setting");
     j
@@ -52,11 +52,11 @@ fn interact(j: &mut Joined, hot: usize, mob: Option<MobType>, entity: u32, kind:
     let item = j.inv.slot(hot).map(|s| s.item.clone());
     let (held_kind, held_id) = item.as_ref().map_or(protocol::ItemRef::Empty.to_wire(), |i| crate::inventory::item_to_ref(i).to_wire());
     let held_full = item.as_ref().map_or(protocol::WireItem::None, crate::inventory::item_to_wire_full);
-    let pending = Pending { kind: Asked::Interact(kind), mob, hotbar_slot: hot, held: item };
-    let packet = protocol::EntityInteractPacket { seq: 0, entity, kind, held_kind, held_id, held_full, hotbar_slot: hot as u8, sneak: false, events_applied: 0 };
-    let window = j.ui.digest(&j.inv, &j.armour);
-    let header = route_interact(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the interaction typed");
-    assert_eq!(j.ui.digest(&j.inv, &j.armour), window, "routing predicted nothing");
+    let pending = Pending { kind: Asked::Interact(kind), mob, hotbar_slot: hot, held: item, hand: crate::hands::Hand::Main };
+    let packet = protocol::EntityInteractPacket { seq: 0, entity, kind, held_kind, held_id, held_full, hotbar_slot: hot as u8, sneak: false, events_applied: 0, hand: crate::hands::Hand::Main };
+    let window = j.ui.digest(&j.inv, &j.armour, &None);
+    let header = route_interact(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the interaction typed");
+    assert_eq!(j.ui.digest(&j.inv, &j.armour, &None), window, "routing predicted nothing");
     header
 }
 
@@ -287,10 +287,10 @@ fn c3d_client_mirror_interaction_stays_the_legacy_request() {
     let item = Item::Material(MaterialId::Bucket);
     let (held_kind, held_id) = crate::inventory::item_to_ref(&item).to_wire();
     let held_full = crate::inventory::item_to_wire_full(&item);
-    let pending = Pending { kind: Asked::Interact(InteractKind::Milk), mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(item) };
-    let packet = protocol::EntityInteractPacket { seq: 0, entity: id, kind: InteractKind::Milk, held_kind, held_id, held_full, hotbar_slot: 0, sneak: false, events_applied: 0 };
+    let pending = Pending { kind: Asked::Interact(InteractKind::Milk), mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(item), hand: crate::hands::Hand::Main };
+    let packet = protocol::EntityInteractPacket { seq: 0, entity: id, kind: InteractKind::Milk, held_kind, held_id, held_full, hotbar_slot: 0, sneak: false, events_applied: 0, hand: crate::hands::Hand::Main };
     let mut actions = JoinerActions::default();
-    let routed = route_interact(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut actions, pending.clone(), packet.clone()).expect("routed");
+    let routed = route_interact(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut actions, pending.clone(), packet.clone()).expect("routed");
     assert_eq!(routed, None, "Mirror: the legacy request");
     assert_eq!(actions.len(), 0, "Mirror: route_interact records nothing");
     assert!(j.rc.action_journal.as_ref().is_none_or(|journal| journal.len() == 0), "Mirror: nothing reserved");

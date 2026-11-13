@@ -615,7 +615,7 @@ mod tests {
         let mut ui = crate::craft_ui::CraftingUi::new();
         let mut armour = [None; 4];
         let mut click = |ui: &mut crate::craft_ui::CraftingUi, slot: usize| {
-            ui.apply_click(inv, &mut armour, &WindowClick::Slot { slot, right: false }, false, glam::Vec3::ZERO, |_| block::AIR);
+            ui.apply_click(inv, &mut armour, &mut None, &WindowClick::Slot { slot, right: false }, false, glam::Vec3::ZERO, |_| block::AIR);
         };
         click(&mut ui, bag_slot);
         click(&mut ui, selected);

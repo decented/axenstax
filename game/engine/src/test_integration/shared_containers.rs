@@ -43,6 +43,7 @@ struct Client {
     ui: CraftingUi,
     inv: Inventory,
     armour: [Option<ArmourItem>; 4],
+    offhand: Option<crate::item::ItemStack>,
     mirror: Option<SharedContainer>,
     /// The last `op_seq` sent.
     seq: u32,
@@ -84,7 +85,7 @@ impl Client {
             unfit: 0,
             actions: 0,
             inputs: 0,
-            block_changes: Vec::new(),
+            block_changes: Vec::new(), offhand: None,
         }
     }
 
@@ -141,25 +142,25 @@ impl Client {
 
     /// Ask to open the container at `cell` (`OpenContainer`).
     fn ask_open(&mut self, cell: [i32; 3]) {
-        self.ui.log_open_container(cell, &self.inv, &self.armour);
+        self.ui.log_open_container(cell, &self.inv, &self.armour, &None);
     }
 
     /// Predict `click` on the mirror and the window, from `eye`.
     fn click(&mut self, click: ContainerClick, eye: Vec3) -> ClickResult {
         let ctx = ClickCtx::new(false, Station::Player, eye, |_| block::AIR).with_shared(true);
         let mirror = self.mirror.as_mut().expect("a container is open");
-        self.ui.apply_container_click(&mut self.inv, &mut self.armour, mirror.as_mut(), &click, &ctx).result
+        self.ui.apply_container_click(&mut self.inv, &mut self.armour, &mut None, mirror.as_mut(), &click, &ctx).result
     }
 
     /// Close the container screen (`Close`, as `tick_shared_container` does).
     fn close(&mut self) {
         self.mirror = None;
-        self.ui.close_container(&mut self.inv, &mut self.armour);
+        self.ui.close_container(&mut self.inv, &mut self.armour, &mut None);
     }
 
     /// Send every logged op, numbered, as the game loop's flush does.
     fn flush(&mut self) {
-        for logged in self.ui.take_ops(&self.inv, &self.armour) {
+        for logged in self.ui.take_ops(&self.inv, &self.armour, &None) {
             self.seq += 1;
             let pkt = logged.packet(self.seq, self.events);
             self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
@@ -171,6 +172,7 @@ impl Client {
             &self.inv,
             &self.armour,
             &self.ui.cursor_item,
+            &None,
             &self.ui.grid,
             Station::Player,
             self.mirror.as_ref().map(|m| m.as_ref()),
@@ -399,7 +401,7 @@ impl Rig {
 
     fn server_digest(&self, n: usize) -> u32 {
         let sp = &self.hs.server.players[self.cs[n].slot];
-        window::digest_with(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station, self.server_container(n))
+        window::digest_with(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station, self.server_container(n))
     }
 
     /// Joiner `n`'s window and container mirror equal the server's, slot for
@@ -458,7 +460,7 @@ impl Rig {
             held_id: id,
             hotbar_slot: Some(0),
             block_changes: vec![protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: placed, meta: 0 }],
-            edit_hands: vec![(0, kind, id)],
+            edit_hands: vec![(0, kind, id, crate::hands::Hand::Main)],
             events_applied: c.events,
             ..Default::default()
         };
@@ -711,7 +713,7 @@ fn a_hosts_own_click_reaches_the_joiner_as_a_change_of_that_slot() {
             armour: &mut armour,
             cursor: &mut cursor,
             grid: &mut grid,
-            container: Some(container_window::ContainerMut::Chest(c)),
+            container: Some(container_window::ContainerMut::Chest(c)), offhand: &mut None,
         };
         let ctx = ClickCtx::new(false, Station::Player, Vec3::ZERO, |_| block::AIR);
         let done = container_window::apply_container(&mut view, &ContainerClick::Deposit { slot: 0, all: true }, &ctx);
@@ -1840,7 +1842,7 @@ fn a_phantom_chestplate_equipped_inside_the_round_trip_is_taken_by_its_correctio
     let at = rig.cs[loser].inv.slots_iter().position(|s| s.is_some_and(|s| s.item == Item::Armour(plate))).expect("the phantom");
     for click in [window::WindowClick::Slot { slot: at, right: false }, window::WindowClick::Armour { slot: 1 }] {
         let c = &mut rig.cs[loser];
-        assert!(c.ui.apply_click(&mut c.inv, &mut c.armour, &click, false, el, |_| block::AIR).ok());
+        assert!(c.ui.apply_click(&mut c.inv, &mut c.armour, &mut None, &click, false, el, |_| block::AIR).ok());
     }
     assert_eq!(rig.cs[loser].armour[1], Some(plate), "worn");
     rig.cs[loser].flush();

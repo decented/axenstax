@@ -704,7 +704,7 @@ pub fn note_correction_short(sp: &mut ServerPlayer, short: &[(Item, u32)], now: 
 /// paid a debt ([`note_correction_paid`], C3b-fix-e L4).
 pub fn apply_own_now(sp: &mut ServerPlayer, own: &crate::container_window::ItemDelta, now: u64) {
     let applied =
-        sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, own);
+        sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &mut sp.offhand, own);
     note_correction_short(sp, &applied.short, now);
     note_correction_paid(sp, &applied.paid);
     note_debt_bounds(sp, applied.saturated);
@@ -968,6 +968,8 @@ pub fn return_unfit(sp: &mut ServerPlayer, event: u32, count: u8, now: u64) -> O
             Some(&mut sp.cursor),
             None,
             None,
+            None,
+            crate::hands::Hand::Main,
             &item,
             give_back,
         )
@@ -1936,7 +1938,7 @@ mod death_replace_tests {
         sp.inventory.toggle_lock(4);
         let stone = ItemStack::new_block(crate::block::STONE, 5);
         let delta = crate::container_window::ItemDelta { take: vec![(0, stone.clone())], give: vec![] };
-        sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &delta);
+        sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &mut None, &delta);
         assert_eq!(sp.window_events.debt.owed(&stone.item), 5);
         let g = queue(&mut sp, WindowEvent::Grant(stone), 0);
         let mut w = effective_window(&sp);

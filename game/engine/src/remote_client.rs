@@ -1736,7 +1736,7 @@ impl RemoteClient {
         // into a later packet if it is trimmed or held back.
         let fresh_edits = std::mem::take(&mut input.block_changes);
         let mut hands = std::mem::take(&mut input.edit_hands);
-        hands.resize(fresh_edits.len(), (u8::MAX, input.held_kind, input.held_id));
+        hands.resize(fresh_edits.len(), (u8::MAX, input.held_kind, input.held_id, crate::hands::Hand::Main));
         // C3b-fix-d (A-L3) — and with its own order stamp (one taken now for
         // an edit the game loop noted none for).
         let mut stamps = std::mem::take(&mut self.next_edit_stamps);
@@ -2835,7 +2835,7 @@ mod tests {
             block_changes: vec![protocol::BlockChange::with_meta(1, 2, 3, 4, 0)],
             ..Default::default()
         };
-        let edits = small.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0), 0)).collect();
+        let edits = small.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0, crate::hands::Hand::Main), 0)).collect();
         let (pkt, trimmed) = serialize_input_within_cap(&mut small, edits);
         assert!(trimmed.is_empty(), "nothing trimmed under the cap");
         assert_eq!(small.block_changes.len(), 1, "a packet under the cap is untouched");
@@ -2847,7 +2847,7 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let edits = big.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0), 0)).collect();
+        let edits = big.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0, crate::hands::Hand::Main), 0)).collect();
         let (pkt, trimmed) = serialize_input_within_cap(&mut big, edits);
         assert!(pkt.len() <= protocol::MAX_WIRE_PACKET_LEN, "{} bytes", pkt.len());
         let (_, payload) = protocol::deserialize_header(&pkt).unwrap();
@@ -3069,7 +3069,7 @@ mod tests {
         let paired = pair_tags_with_edits(
             vec![edit(1, crate::block::AIR), edit(1, 3), edit(2, crate::block::TILLED_SOIL)]
                 .into_iter()
-                .map(|e| (e, (0, 0, 0), 0, None))
+                .map(|e| (e, (0, 0, 0, crate::hands::Hand::Main), 0, None))
                 .collect(),
             vec![tag(1), tag(2), tag(9)],
         );
@@ -3079,7 +3079,7 @@ mod tests {
     }
 
     fn use_tag(x: i32) -> protocol::UseTag {
-        protocol::UseTag { x, y: 64, z: 0, kind: 1, slot: 0, used: None, tool: protocol::WireItem::None, unfit: 0 }
+        protocol::UseTag { x, y: 64, z: 0, kind: 1, slot: 0, used: None, tool: protocol::WireItem::None, unfit: 0, hand: crate::hands::Hand::Main }
     }
 
     /// C3c-1 — send `edits` (each with its use tag, if any) in one input, as
@@ -3102,7 +3102,7 @@ mod tests {
         assert_eq!(sent.use_tags, vec![use_tag(2)]);
         assert!(sent.mined.is_empty());
         let paired = pair_tags_with_edits(
-            vec![(edit(2, crate::block::AIR), (0, 0, 0), 0, Some(use_tag(2)))],
+            vec![(edit(2, crate::block::AIR), (0, 0, 0, crate::hands::Hand::Main), 0, Some(use_tag(2)))],
             vec![protocol::MinedBlock { x: 2, y: 64, z: 0, tool: protocol::WireItem::None }],
         );
         assert_eq!(paired[0].1, Some(protocol::EditTag::Use(use_tag(2))), "the use keeps its own tag");
@@ -3582,16 +3582,16 @@ mod tests {
         inv.auto_refill = true;
         inv.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::STONE, 5)));
         let mut armour = [None; 4];
-        ui.open_joined(&mut rc, None, &mut inv, &mut armour, &registry).unwrap();
+        ui.open_joined(&mut rc, None, &mut inv, &mut armour, &mut None, &registry).unwrap();
         assert!(ui.open);
-        ui.close_joined(&mut rc, &mut inv, &mut armour, &registry).unwrap();
-        ui.open_container_joined(&mut rc, [1, 2, 3], &inv, &armour).unwrap();
+        ui.close_joined(&mut rc, &mut inv, &mut armour, &mut None, &registry).unwrap();
+        ui.open_container_joined(&mut rc, [1, 2, 3], &inv, &armour, &None).unwrap();
         let mut chest = crate::container_window::ContainerData::Chest(crate::chest::ChestData { slots: vec![None; 27], tier: Default::default() });
         let ctx = crate::window::ClickCtx::new(false, crate::window::Station::Player, glam::Vec3::ZERO, |_| crate::block::AIR).with_shared(true);
         let click = crate::container_window::ContainerClick::Deposit { slot: 0, all: true };
-        let applied = ui.apply_container_click_joined(&mut rc, &mut inv, &mut armour, chest.as_mut(), [1, 2, 3], &click, &ctx, &registry).unwrap();
+        let applied = ui.apply_container_click_joined(&mut rc, &mut inv, &mut armour, &mut None, chest.as_mut(), [1, 2, 3], &click, &ctx, &registry).unwrap();
         assert!(applied.result.ok() && inv.slot(0).is_none(), "the deposit was predicted");
-        ui.close_container_joined(&mut rc, &mut inv, &mut armour, &registry).unwrap();
+        ui.close_container_joined(&mut rc, &mut inv, &mut armour, &mut None, &registry).unwrap();
         assert!(ui.ops.first_stamp().is_none(), "nothing logged for the legacy path");
         let mut seen = Vec::new();
         while let Some(pkt) = srv.try_recv_from_client() {
@@ -3633,16 +3633,16 @@ mod tests {
         let mut ui = crate::craft_ui::CraftingUi::new();
         let mut inv = crate::inventory::Inventory::new();
         let mut armour = [None; 4];
-        ui.open_player_crafting(&inv, &armour);
+        ui.open_player_crafting(&inv, &armour, &None);
         // Opening logs its own config op (typed window configuration is a
         // later C3d milestone); this test is about the close.
-        let _ = ui.take_ops(&inv, &armour);
+        let _ = ui.take_ops(&inv, &armour, &None);
         ui.grid[0][0] = Some(crate::item::ItemStack::new_block(crate::block::STONE, 3));
-        let closed = ui.close_joined(&mut rc, &mut inv, &mut armour, &crate::block::BlockRegistry::new()).unwrap();
+        let closed = ui.close_joined(&mut rc, &mut inv, &mut armour, &mut None, &crate::block::BlockRegistry::new()).unwrap();
         assert!(closed, "the close happened");
         assert_eq!(inv.slot(0).map(|s| s.count), Some(3), "the grid returned to the bag");
         assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1, "one action reserved for the close");
-        assert!(ui.take_ops(&inv, &armour).is_empty(), "no legacy window op is logged");
+        assert!(ui.take_ops(&inv, &armour, &None).is_empty(), "no legacy window op is logged");
         let mut actions = 0;
         while let Some(pkt) = srv.try_recv_from_client() {
             match protocol::deserialize_header(&pkt) {
@@ -3683,10 +3683,10 @@ mod tests {
             }
             out
         };
-        for _ in 0..3 { assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour)); }
+        for _ in 0..3 { assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour, &None)); }
         assert!(actions(&srv).is_empty(), "nothing leaves before the join sync applies");
         rc.note_window_event(1);
-        assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour));
+        assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour, &None));
         let sent = actions(&srv);
         assert_eq!(sent.len(), 1, "the setting goes once the sync is applied");
         assert_eq!(sent[0].action.events_applied, 1, "at the sync's boundary");
@@ -3710,11 +3710,11 @@ mod tests {
         let inv = crate::inventory::Inventory::new();
         let armour = [None; 4];
         // Nothing stray: the flush stays.
-        assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour), "a clean flush stays");
+        assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour, &None), "a clean flush stays");
         assert!(rc.is_connected());
-        ui.open_player_crafting(&inv, &armour);
+        ui.open_player_crafting(&inv, &armour, &None);
         assert!(ui.ops.first_stamp().is_some(), "a legacy op is logged (the breach)");
-        assert!(flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour), "the breach leaves");
+        assert!(flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour, &None), "the breach leaves");
         assert!(
             matches!(&rc.state, ConnectionState::Failed(reason) if reason == STRICT_STRAY_CHANGE_REASON),
             "the session ends with the plain reason"

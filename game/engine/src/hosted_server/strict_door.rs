@@ -175,9 +175,9 @@ impl HostedServer {
         // world finish for each half.
         self.apply_edit_world(i, &lower, old, true, false);
         self.apply_edit_world(i, &upper, AIR, true, false);
-        let (inv, armour, cursor, grid) = after.into_parts();
+        let (inv, armour, offhand, cursor, grid) = after.into_parts();
         let sp = &mut self.server.players[i];
-        sp.inventory = inv; sp.armour = armour; sp.cursor = cursor; sp.craft_grid = grid;
+        sp.inventory = inv; sp.armour = armour; sp.offhand = offhand; sp.cursor = cursor; sp.craft_grid = grid;
         #[cfg(test)]
         super::actions::commit_fault::after_commit(sp);
         self.complete_typed_result(i, action, ActionFate::Accepted, result);

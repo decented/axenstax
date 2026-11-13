@@ -28,6 +28,7 @@ pub(super) struct Joined {
     pub(super) i: usize,
     pub(super) inv: crate::inventory::Inventory,
     pub(super) armour: [Option<crate::armour::ArmourItem>; 4],
+    pub(super) offhand: Option<crate::item::ItemStack>,
     pub(super) ui: crate::craft_ui::CraftingUi,
     inbox: crate::window_events::WindowInbox,
     pub(super) reg: crate::block::BlockRegistry,
@@ -114,7 +115,7 @@ fn start(tag: &str, mode: InventoryMode, record: Option<Record>) -> Joined {
     };
     Joined {
         _g: g, hs, rc, i: 0, inv: crate::inventory::Inventory::new(), armour: [None; 4],
-        ui: crate::craft_ui::CraftingUi::new(), inbox: Default::default(), reg: crate::block::BlockRegistry::new(), syncs: 0,
+        ui: crate::craft_ui::CraftingUi::new(), inbox: Default::default(), reg: crate::block::BlockRegistry::new(), syncs: 0, offhand: None,
     }
 }
 
@@ -164,7 +165,7 @@ impl Joined {
         // the personal state may become ready here, and a Mirror window's
         // settings are logged at once.
         super::tests::client_apply_personal(&mut self.rc);
-        self.ui.settle_initial_settings(&mut self.rc, &self.inv, &self.armour);
+        self.ui.settle_initial_settings(&mut self.rc, &self.inv, &self.armour, &None);
     }
 
     /// Mirror: the op log goes out as the game loop sends it with no edit
@@ -172,7 +173,7 @@ impl Joined {
     fn flush(&mut self) {
         if self.rc.inventory_mode == InventoryMode::Mirror {
             for logged in self.ui.ops.take_before(None) { self.rc.send_window_op(logged); }
-            for logged in self.ui.take_ops(&self.inv, &self.armour) { self.rc.send_window_op(logged); }
+            for logged in self.ui.take_ops(&self.inv, &self.armour, &None) { self.rc.send_window_op(logged); }
         }
     }
 
@@ -206,22 +207,22 @@ impl Joined {
     pub(super) fn click(&mut self, click: WindowClick) {
         let eye = self.hs.server.players[self.i].player.eye_pos();
         let ctx = crate::window::ClickCtx::new(false, self.ui.station(), eye, |_| CRAFTING_TABLE);
-        self.ui.apply_joined_click(&mut self.rc, &mut self.inv, &mut self.armour, &click, &ctx, &self.reg).expect("reserved and sent");
+        self.ui.apply_joined_click(&mut self.rc, &mut self.inv, &mut self.armour, &mut None, &click, &ctx, &self.reg).expect("reserved and sent");
     }
 
     /// E (or a table) through the real open: Strict reserves, Mirror logs.
     pub(super) fn open(&mut self, table: Option<[i32; 3]>) -> bool {
         match self.rc.inventory_mode {
-            InventoryMode::Strict => self.ui.open_joined(&mut self.rc, table, &mut self.inv, &mut self.armour, &self.reg).expect("reserved and sent"),
-            InventoryMode::Mirror => self.ui.open_crafting(table, &mut self.inv, &mut self.armour),
+            InventoryMode::Strict => self.ui.open_joined(&mut self.rc, table, &mut self.inv, &mut self.armour, &mut None, &self.reg).expect("reserved and sent"),
+            InventoryMode::Mirror => self.ui.open_crafting(table, &mut self.inv, &mut self.armour, &mut None),
         }
     }
 
     /// E (or Esc) on an open screen: its `Close`. Strict reserves, Mirror logs.
     fn close(&mut self) -> bool {
         match self.rc.inventory_mode {
-            InventoryMode::Strict => self.ui.close_joined(&mut self.rc, &mut self.inv, &mut self.armour, &self.reg).expect("reserved and sent"),
-            InventoryMode::Mirror => self.ui.close(&mut self.inv, &mut self.armour),
+            InventoryMode::Strict => self.ui.close_joined(&mut self.rc, &mut self.inv, &mut self.armour, &mut None, &self.reg).expect("reserved and sent"),
+            InventoryMode::Mirror => self.ui.close(&mut self.inv, &mut self.armour, &mut None),
         }
     }
 
@@ -255,9 +256,9 @@ impl Joined {
     /// copy does once that has applied what the client has.
     pub(super) fn assert_agree(&mut self, what: &str) {
         self.assert_live(what);
-        let mine = self.ui.digest(&self.inv, &self.armour);
+        let mine = self.ui.digest(&self.inv, &self.armour, &None);
         let sp = self.server_settled();
-        let theirs = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station);
+        let theirs = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station);
         assert_eq!(mine, theirs, "{what}: the two windows agree");
     }
 
@@ -287,8 +288,8 @@ impl Joined {
         assert!(grid.iter().flatten().all(Option::is_none), "{what}: the server copy's grid went back too");
         assert_eq!(units(&inv, &item), u32::from(stack.count), "{what}: the server copy's bag holds them");
         assert_eq!(
-            self.ui.digest(&self.inv, &self.armour),
-            crate::window::digest_parts(&inv, &armour, &cursor, &grid, station),
+            self.ui.digest(&self.inv, &self.armour, &None),
+            crate::window::digest_parts(&inv, &armour, &None, &cursor, &grid, station),
             "{what}: the two windows agree"
         );
     }
@@ -337,7 +338,7 @@ fn c3d_strict_grid_close_at_death_then_e_returns_the_grid() {
         // The server runs the death first; the client hears of it (`heard`)
         // or has already sent its Close on the old base.
         if heard { j.pumps(2); } else { j.hs.tick(); }
-        assert!(j.ui.close_joined(&mut j.rc, &mut j.inv, &mut j.armour, &j.reg).expect("reserved"), "{what}: the Close is predicted");
+        assert!(j.ui.close_joined(&mut j.rc, &mut j.inv, &mut j.armour, &mut None, &j.reg).expect("reserved"), "{what}: the Close is predicted");
         j.pumps(3);
         assert_eq!(j.ui.grid[2][2].as_ref().map(|s| s.count), Some(8), "{what}: the correction put the grid back");
         assert!(!j.ui.open, "{what}: behind a closed screen");
@@ -364,14 +365,14 @@ fn c3d_strict_e_to_e_across_a_waiting_correction_ends_at_the_snapshot_station() 
     j.kill();
     j.pumps(2);
     assert_eq!(j.ui.station(), Station::Table { cell: TABLE }, "the death sync carries the table");
-    assert!(j.ui.close_joined(&mut j.rc, &mut j.inv, &mut j.armour, &j.reg).expect("reserved"));
+    assert!(j.ui.close_joined(&mut j.rc, &mut j.inv, &mut j.armour, &mut None, &j.reg).expect("reserved"));
     assert!(j.open(None), "E again, before the correction arrives");
     j.pumps(3);
     let server_station = j.server_settled().station;
     assert_eq!(j.ui.station(), Station::Table { cell: TABLE }, "the client adopted the correction's station");
     assert_eq!(server_station, Station::Table { cell: TABLE }, "the server's copy applied the same station");
     j.respawn();
-    assert!(j.ui.close_joined(&mut j.rc, &mut j.inv, &mut j.armour, &j.reg).expect("reserved"));
+    assert!(j.ui.close_joined(&mut j.rc, &mut j.inv, &mut j.armour, &mut None, &j.reg).expect("reserved"));
     j.pumps(3);
     j.assert_returned(&stone(4), "after the respawn");
 }
@@ -431,8 +432,8 @@ fn c3d_mirror_lock_toggled_before_the_join_sync_reaches_the_server_once_ready() 
     j.place();
     assert_eq!(j.rc.applied_window_boundary(), 0, "the join sync is heard, not applied");
     assert!(!j.rc.personal_ready(), "the personal state isn't installed yet");
-    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot: 3 }, false, glam::Vec3::ZERO, |_| AIR);
-    for logged in j.ui.take_ops(&j.inv, &j.armour) { j.rc.send_window_op(logged); }
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &mut None, &WindowClick::ToggleLock { slot: 3 }, false, glam::Vec3::ZERO, |_| AIR);
+    for logged in j.ui.take_ops(&j.inv, &j.armour, &None) { j.rc.send_window_op(logged); }
     j.hs.tick();
     assert!(!j.hs.server.players[j.i].inventory.is_locked(3), "an op made before the personal state is ready isn't sent");
     j.pumps(3);
@@ -490,7 +491,7 @@ impl Joined {
 #[test]
 fn c3d_mirror_lock_waiting_when_the_personal_state_installs_reaches_the_server_once() {
     let mut j = Joined::heard("lock-waiting", None);
-    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot: 3 }, false, glam::Vec3::ZERO, |_| AIR);
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &mut None, &WindowClick::ToggleLock { slot: 3 }, false, glam::Vec3::ZERO, |_| AIR);
     j.ready_then_flush();
     assert!(j.inv.is_locked(3), "the Mirror client keeps its lock");
     assert!(j.server_settled().inventory.is_locked(3), "the server's copy has the lock, toggled once");
@@ -508,9 +509,9 @@ fn c3d_mirror_two_locks_and_a_content_op_waiting_at_ready_converge() {
     // Before the join sync, the client's own window still holds what it had.
     j.inv.set_slot(0, Some(stone(2)));
     for slot in [3, 7, 12, 12] {
-        j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot }, false, glam::Vec3::ZERO, |_| AIR);
+        j.ui.apply_click(&mut j.inv, &mut j.armour, &mut None, &WindowClick::ToggleLock { slot }, false, glam::Vec3::ZERO, |_| AIR);
     }
-    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::Slot { slot: 0, right: false }, false, glam::Vec3::ZERO, |_| AIR);
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &mut None, &WindowClick::Slot { slot: 0, right: false }, false, glam::Vec3::ZERO, |_| AIR);
     j.ready_then_flush();
     let locked = |inv: &crate::inventory::Inventory| (0..36).filter(|&i| inv.is_locked(i)).collect::<Vec<_>>();
     assert_eq!(locked(&j.inv), vec![3, 7], "the client's locks");

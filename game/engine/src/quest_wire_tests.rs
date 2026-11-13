@@ -44,7 +44,7 @@ fn result() -> QuestResult {
         inv: crate::inventory::Inventory::new(),
         armour: [None; 4],
         cursor: None,
-        grid: Default::default(),
+        grid: Default::default(), offhand: None,
     };
     QuestResult {
         actor_respawns: 0,

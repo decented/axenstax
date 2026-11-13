@@ -489,9 +489,9 @@ impl HostedServer {
         let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, included) else {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Window result history is full"); return false;
         };
-        let (inv, armour, cursor, grid) = staged.raw.after.into_parts();
+        let (inv, armour, offhand, cursor, grid) = staged.raw.after.into_parts();
         let sp = &mut self.server.players[i];
-        sp.inventory = inv; sp.armour = armour; sp.cursor = cursor; sp.craft_grid = grid; sp.station = station;
+        sp.inventory = inv; sp.armour = armour; sp.offhand = offhand; sp.cursor = cursor; sp.craft_grid = grid; sp.station = station;
         sp.last_window_op_seq = op.op_seq;
         // Mirror parity (`window_ops::serve_op`): the client's own close
         // closes its container view, in its order.
@@ -704,7 +704,7 @@ pub(super) mod commit_fault {
         if OWE_AFTER_COMMIT.with(|f| f.get()) {
             let stone = crate::item::ItemStack { item: crate::item::Item::Block(crate::block::STONE), count: 1 };
             let take = crate::container_window::ItemDelta { take: vec![(0, stone)], give: vec![] };
-            sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &take);
+            sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &mut None, &take);
         }
     }
 }

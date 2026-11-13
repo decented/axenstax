@@ -22,7 +22,7 @@ impl Client {
     /// does: recorded as a request in flight, claiming nothing.
     fn site_board_op(&mut self, cell: [i32; 3], op: Op) {
         let seq = self.actions.record(
-            Pending { kind: Asked::SiteBoard { cell }, mob: None, hotbar_slot: 0, held: None },
+            Pending { kind: Asked::SiteBoard { cell }, mob: None, hotbar_slot: 0, held: None, hand: crate::hands::Hand::Main },
             self.input_seq + 1,
         );
         let pkt = protocol::ItemActionPacket {

@@ -876,7 +876,7 @@ fn a_scroll_after_an_edit_in_one_send_window_charges_and_wears_the_edits_own_slo
         let iron = pick(ToolMaterial::Iron);
         let hand = |slot: u8, item: &Item| {
             let (k, i) = crate::inventory::item_to_ref(item).to_wire();
-            (slot, k, i)
+            (slot, k, i, crate::hands::Hand::Main)
         };
         let inv = &mut rig.hs.server.players[rig.slot].inventory;
         inv.set_slot(2, Some(ItemStack::new_block(block::STONE, 3)));

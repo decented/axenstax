@@ -78,7 +78,7 @@ fn owe(sp: &mut crate::server::ServerPlayer, item: crate::item::Item, n: u8) {
     let sent = sp.window_events.last_number();
     crate::window_events::apply_through(sp, sent, 0);
     let take = crate::container_window::ItemDelta { take: vec![(0, crate::item::ItemStack { item, count: n })], give: vec![] };
-    sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &take);
+    sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &mut None, &take);
 }
 
 /// A Mirror session leaves `prepare`'s record behind; a Strict reconnect

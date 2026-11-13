@@ -33,7 +33,7 @@ fn marker_stack(stack: &ItemStack, registry: &crate::block::BlockRegistry) -> Re
 }
 
 fn raw_marker(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Result<MarkerWindow, StrictStageError> {
-    MarkerWindow::try_capture_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, registry).ok_or(StrictStageError::RawUnrepresentable)
+    MarkerWindow::try_capture_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, registry).ok_or(StrictStageError::RawUnrepresentable)
 }
 
 /// Views do not change personal holdings. Replace/correction cannot establish
@@ -68,7 +68,7 @@ fn apply_marker_event(window: &mut MarkerWindow, event: &WindowEvent) -> Result<
             return Err(StrictStageError::AmbiguousWear);
         }
     }
-    let mut parts = Parts { inv: view.inv, armour: view.armour, cursor: view.cursor, grid: view.grid };
+    let mut parts = Parts { inv: view.inv, armour: view.armour, offhand: view.offhand, cursor: view.cursor, grid: view.grid };
     match apply_to(&mut parts, &mut Default::default(), event) {
         Effect::Granted { landed } => Ok(FoldFact::Grant(landed)),
         Effect::Took { taken } => {
@@ -164,7 +164,7 @@ pub fn strict_obligations(sp: &ServerPlayer, registry: &crate::block::BlockRegis
         // across it still can't be established (`admit_staged`).
         if let WindowEvent::Replace { window, debt, .. } = &waiting.event {
             if !debt.is_empty() { return Err(StrictStageError::Debt); }
-            prefix = MarkerWindow::try_capture_parts(&window.inv, &window.armour, &window.cursor, &window.grid, registry).ok_or(StrictStageError::RawUnrepresentable)?;
+            prefix = MarkerWindow::try_capture_parts(&window.inv, &window.armour, &window.offhand, &window.cursor, &window.grid, registry).ok_or(StrictStageError::RawUnrepresentable)?;
             // Run 6 (run-4 review Nit) — one source with the applied
             // `Replace`: its locks, the raw copy's auto-refill.
             prefix.set_auto_refill(sp.inventory.auto_refill);

@@ -249,6 +249,7 @@ impl HostedServer {
             let digest = crate::window::digest_with(
                 &raw.window.inv,
                 &raw.window.armour,
+                &raw.window.offhand,
                 &raw.window.cursor,
                 &raw.window.grid,
                 sp.station,

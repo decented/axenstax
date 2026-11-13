@@ -30,7 +30,7 @@ fn predict(hs: &HostedServer, i: usize, click: &WindowClick) -> (u32, bool) {
     let sp = &hs.server.players[i];
     let (mut inv, mut armour, mut cursor, mut grid) = (sp.inventory.clone(), sp.armour, sp.cursor.clone(), sp.craft_grid.clone());
     let ctx = crate::window::ClickCtx::new(false, sp.station, sp.player.eye_pos(), |_| crate::block::AIR);
-    let mut view = crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None };
+    let mut view = crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None, offhand: &mut None };
     let result = crate::window::apply(&mut view, click, &ctx);
     (crate::window::digest(&view, crate::window::station_after(sp.station, click, &result)), result.ok())
 }

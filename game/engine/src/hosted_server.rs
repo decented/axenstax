@@ -5632,6 +5632,10 @@ impl HostedServer {
                         // inventory is only the server's shadow, C1).
                         sp.held_kind = input.held_kind;
                         sp.held_id = input.held_id;
+                        // v101 — the tool type and the off-hand, relayed for
+                        // drawing only (the shadow's off-hand is `sp.offhand`).
+                        sp.held_tool = input.held_tool;
+                        sp.off_held = crate::protocol::HeldWire { kind: input.off_kind, id: input.off_id, tool: input.off_tool };
                         // MP-D2a — what its client says it wears; soaks the
                         // mob and lava/fire hits the server lands on a
                         // joiner (`GameServer::tick_player_hazards`).
@@ -10190,7 +10194,7 @@ pub(crate) mod tests {
         let (mut armour, mut cursor, mut grid) = ([None; 4], None, Default::default());
         let mut client_debt = crate::container_window::CorrectionDebt::default();
         crate::inventory_sync::apply(
-            &mut crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None },
+            &mut crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None, offhand: &mut None },
             sync,
             &registry,
             &mut crate::use_edits::SentUses::default(),
@@ -10204,7 +10208,7 @@ pub(crate) mod tests {
         let sets: Vec<protocol::WindowSlotSetPacket> = oc_received(&second, protocol::PacketType::WindowSlotSet);
         assert_eq!(sets.len(), 1);
         crate::container_window::apply_slot_set(
-            &mut crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None },
+            &mut crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None, offhand: &mut None },
             &sets[0],
             &registry,
             &mut client_debt,
@@ -10243,7 +10247,7 @@ pub(crate) mod tests {
         let (mut armour, mut cursor, mut grid) = ([None; 4], None, Default::default());
         let mut client_debt = crate::container_window::CorrectionDebt::from_entries(vec![(stone, 1)]).unwrap();
         crate::inventory_sync::apply(
-            &mut crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None },
+            &mut crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None, offhand: &mut None },
             &syncs[0],
             &crate::block::BlockRegistry::new(),
             &mut crate::use_edits::SentUses::default(),

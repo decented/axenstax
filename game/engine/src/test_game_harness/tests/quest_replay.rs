@@ -136,10 +136,10 @@ fn trace(stage: &str, host: &crate::hosted_server::HostedServer, hg: &HeadlessGa
     let client = hg.state.remote_client.as_ref().unwrap();
     let slot = &hg.state.players[0];
     let sp = &host.server.players[i];
-    let raw = crate::staged_window::MarkerWindow::try_capture_parts(&slot.inventory, &slot.armour_slots, &slot.crafting_ui.cursor_item, &slot.crafting_ui.grid, &hg.state.registry).unwrap();
+    let raw = crate::staged_window::MarkerWindow::try_capture_parts(&slot.inventory, &slot.armour_slots, &None, &slot.crafting_ui.cursor_item, &slot.crafting_ui.grid, &hg.state.registry).unwrap();
     let authoritative = crate::window_events::pack_raw_marker(sp, &host.server.registry).unwrap();
     let effective = crate::window_events::effective_window(sp);
-    let effective = crate::staged_window::MarkerWindow::try_capture_parts(&effective.inv, &effective.armour, &effective.cursor, &effective.grid, &host.server.registry).unwrap();
+    let effective = crate::staged_window::MarkerWindow::try_capture_parts(&effective.inv, &effective.armour, &None, &effective.cursor, &effective.grid, &host.server.registry).unwrap();
     let giver = host.server.ecs.query::<(&crate::entity::ProtocolId, &crate::entity::Position)>().iter().find_map(|(_, (id, at))| (id.0 == target).then_some(at.0));
     eprintln!("Quest replay {stage}: mode={:?} connected={} applied={} last_sent={} held={} physical_accepted={} server_accepted={} bag_places={} bread={} client_digest={} raw_digest={} effective_digest={} actor={:?} giver={giver:?} distance={:?} yaw={} result_metadata={:?} inbox_queues={:?} fifo_entries={}", sp.inventory_mode, client.is_connected(), client.applied_window_event(), sp.window_events.last_number(), client.pack_window_inbox_held(), slot.quest_progress.accepted.len(), sp.personal.as_ref().unwrap().record().unwrap().quests.accepted.len(), slot.inventory.slots_iter().flatten().count(), bread(&slot.inventory), raw.digest_with(slot.crafting_ui.station(), None), authoritative.digest_with(sp.station, None), effective.digest_with(sp.station, None), sp.player.pos, giver.map(|at| at.distance(sp.player.pos)), sp.yaw, delivery.lock().unwrap().results, hg.state.window_inbox.diagnostic_event_queues(), client.chunk_queue.len());
 }
@@ -429,7 +429,7 @@ struct PartialRig {
 
 fn physical_window(hg: &HeadlessGame) -> crate::staged_window::MarkerSlots {
     let slot = &hg.state.players[0];
-    crate::staged_window::MarkerWindow::try_capture_parts(&slot.inventory, &slot.armour_slots, &slot.crafting_ui.cursor_item, &slot.crafting_ui.grid, &hg.state.registry).unwrap().slots()
+    crate::staged_window::MarkerWindow::try_capture_parts(&slot.inventory, &slot.armour_slots, &None, &slot.crafting_ui.cursor_item, &slot.crafting_ui.grid, &hg.state.registry).unwrap().slots()
 }
 
 fn partial_setup(mode: InventoryMode, tag: &str, hold_rewards: bool, hold_last: bool) -> PartialRig {

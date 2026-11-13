@@ -68,9 +68,9 @@ impl HostedServer {
         // Every check and the result row precede the effects: raw R, the
         // drop bucket's token, the thrown item, the terminal row.
         let now = self.server.tick_counter;
-        let (inv, armour, cursor, grid) = after.into_parts();
+        let (inv, armour, offhand, cursor, grid) = after.into_parts();
         let sp = &mut self.server.players[i];
-        sp.inventory = inv; sp.armour = armour; sp.cursor = cursor; sp.craft_grid = grid;
+        sp.inventory = inv; sp.armour = armour; sp.offhand = offhand; sp.cursor = cursor; sp.craft_grid = grid;
         #[cfg(test)]
         super::actions::commit_fault::after_commit(sp);
         let _ = sp.drop_bucket.take(now);

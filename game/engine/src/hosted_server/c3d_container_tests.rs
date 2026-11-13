@@ -86,7 +86,7 @@ impl Joiner {
     /// The window's digest now, as the client (in lockstep) holds it.
     pub(super) fn digest(hs: &HostedServer, i: usize) -> u32 {
         let sp = &hs.server.players[i];
-        crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station)
+        crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station)
     }
     /// The client predicts `click` on its mirror (the view it applied) and
     /// its window: the digest it sends, and its own verdict.
@@ -95,7 +95,7 @@ impl Joiner {
         let mut mirror = sp.container_sent.seen.clone().expect("a mirror is open").contents;
         let (mut inv, mut armour, mut cursor, mut grid) = (sp.inventory.clone(), sp.armour, sp.cursor.clone(), sp.craft_grid.clone());
         let ctx = crate::window::ClickCtx::new(false, sp.station, sp.player.eye_pos(), |_| crate::block::AIR).with_shared(true);
-        let mut view = crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: Some(mirror.as_mut()) };
+        let mut view = crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: Some(mirror.as_mut()), offhand: &mut None };
         let applied = crate::container_window::apply_container(&mut view, click, &ctx);
         (crate::window::digest(&view, sp.station), applied.result.ok())
     }
@@ -307,7 +307,7 @@ fn c3d_strict_config_open_shoot_close_and_fabricated_deposit() {
         let sp = &hs.server.players[j.i];
         let mut w = (sp.inventory.clone(), sp.armour, sp.cursor.clone(), sp.craft_grid.clone());
         let ctx = crate::window::ClickCtx::new(false, sp.station, sp.player.eye_pos(), |_| crate::block::AIR);
-        let mut view = crate::window::WindowMut { inv: &mut w.0, armour: &mut w.1, cursor: &mut w.2, grid: &mut w.3, container: None };
+        let mut view = crate::window::WindowMut { inv: &mut w.0, armour: &mut w.1, cursor: &mut w.2, grid: &mut w.3, container: None, offhand: &mut None };
         let result = crate::window::apply(&mut view, &crate::window::WindowClick::Close, &ctx);
         (crate::window::digest(&view, crate::window::station_after(sp.station, &crate::window::WindowClick::Close, &result)), result.ok())
     };

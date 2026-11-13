@@ -217,7 +217,7 @@ mod tests {
         let intent = ActionIntent::Edit {
             source_tick: 5,
             change: protocol::BlockChange { x: 1, y: -2, z: 3, new_block: 0x0102, meta: 9 },
-            hand: (4, 1, 0x0304),
+            hand: (4, 1, 0x0304, crate::hands::Hand::Main),
             mined: Some(protocol::MinedBlock { x: 1, y: -2, z: 3, tool: protocol::WireItem::None }),
             use_tag: None,
             old: (0x0506, 7),

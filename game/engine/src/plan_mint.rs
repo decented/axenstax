@@ -187,8 +187,8 @@ mod tests {
         let held = |inv: &Inventory, k: usize| inv.slot(k).map(|s| s.item.clone());
         assert!(matches!(held(&copy, 4), Some(Item::Plan(p)) if p.same_plan(&latent())), "the placeholder, by marker");
         assert_eq!(
-            crate::window::digest_parts(&copy, &[None; 4], &None, &Default::default(), crate::window::Station::Player),
-            crate::window::digest_parts(&client, &[None; 4], &None, &Default::default(), crate::window::Station::Player),
+            crate::window::digest_parts(&copy, &[None; 4], &None, &None, &Default::default(), crate::window::Station::Player),
+            crate::window::digest_parts(&client, &[None; 4], &None, &None, &Default::default(), crate::window::Station::Player),
             "and it digests like the real one"
         );
     }

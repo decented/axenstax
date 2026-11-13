@@ -3219,7 +3219,7 @@ mod tests {
             held_id: 2,
             anim_state: 1,
             flags: 0b101,
-            skin_key: 0xDEAD_BEEF_CAFE,
+            skin_key: 0xDEAD_BEEF_CAFE, held_tool: crate::protocol::HeldWire::NO_TOOL, off_id: 0, off_kind: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
         };
         let bytes = bincode::serialize(&p).unwrap();
         let back: PlayerState = safe_deserialize(&bytes).unwrap();
@@ -3467,7 +3467,7 @@ mod tests {
                 tool: WireItem::Tool { tool_type: 0, material: 3, durability: 100 },
             }],
             events_applied: 12,
-            edit_hands: vec![(4, item_kind::BLOCK, 3)],
+            edit_hands: vec![(4, item_kind::BLOCK, 3, crate::hands::Hand::Main)],
             use_tags: vec![UseTag {
                 x: 0,
                 y: 65,
@@ -3476,8 +3476,8 @@ mod tests {
                 slot: 4,
                 used: Some(WireStack { item_kind: item_kind::MATERIAL, item_id: 9, count: 1, full_item: WireItem::None }),
                 tool: WireItem::Tool { tool_type: 9, material: 1, durability: 50 },
-                unfit: 1,
-            }],
+                unfit: 1, hand: crate::hands::Hand::Main,
+            }], held_tool: crate::protocol::HeldWire::NO_TOOL, off_id: 0, off_kind: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();
@@ -3528,7 +3528,7 @@ mod tests {
             }),
             mined: vec![MinedBlock { x: 3, y: -4, z: 5, tool: WireItem::None }],
             events_applied: 0x0A0B_0C0D,
-            edit_hands: vec![(2, 0x11, 0x0304)],
+            edit_hands: vec![(2, 0x11, 0x0304, crate::hands::Hand::Main)],
             use_tags: vec![UseTag {
                 x: 6,
                 y: -7,
@@ -3537,7 +3537,7 @@ mod tests {
                 slot: 4,
                 used: Some(WireStack { item_kind: 3, item_id: 0x0506, count: 1, full_item: WireItem::None }),
                 tool: WireItem::None,
-                unfit: 1,
+                unfit: 1, hand: crate::hands::Hand::Main,
             }],
             ..head.clone()
         };
@@ -4157,7 +4157,7 @@ mod tests {
             held_full: WireItem::None,
             hotbar_slot: 4,
             sneak: true,
-            events_applied: 9,
+            events_applied: 9, hand: crate::hands::Hand::Main,
         };
         let bytes = serialize_packet(PacketType::EntityInteract, &interact);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();

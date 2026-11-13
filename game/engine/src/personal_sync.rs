@@ -407,7 +407,7 @@ mod tests {
             inv: crate::inventory::Inventory::new(),
             armour: [None; 4],
             cursor: None,
-            grid: Default::default(),
+            grid: Default::default(), offhand: None,
         };
         window.inv.set_slot(4, Some(crate::item::ItemStack::new_block(crate::block::GLASS, 9)));
         let sync = crate::inventory_sync::packet(&window, &Default::default(), 1);

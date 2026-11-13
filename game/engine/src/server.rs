@@ -449,6 +449,20 @@ pub fn broadcast_held_ref(sp: &ServerPlayer) -> (u8, u16) {
     }
 }
 
+/// v101 — the held item and the off-hand item to broadcast for a player, as
+/// the avatar wire carries them ([`crate::protocol::HeldWire`]): relayed from
+/// the client's input for a server-simulated player, resolved from the live
+/// body for a local one (its off-hand is the slot's own).
+pub fn broadcast_held_wires(sp: &ServerPlayer) -> (crate::protocol::HeldWire, crate::protocol::HeldWire) {
+    use crate::protocol::HeldWire;
+    if sp.server_simulated {
+        (HeldWire { kind: sp.held_kind, id: sp.held_id, tool: sp.held_tool }, sp.off_held)
+    } else {
+        let main = HeldWire::of(sp.inventory.hotbar_slot(sp.hotbar_slot).map(|s| &s.item));
+        (main, HeldWire::of(sp.offhand.as_ref().map(|s| &s.item)))
+    }
+}
+
 /// Locomotion state + flag bits from sim/input. Crouch is a flag, not a
 /// state, so it can combine with idle/walk.
 ///
@@ -507,7 +521,7 @@ pub fn collect_player_state(sp: &ServerPlayer, idx: u32) -> crate::protocol::Pla
     // Phase 2 — real held item + locomotion/flags. Source per player type
     // (remote: client-sent ref; local: live inventory) is encapsulated in
     // broadcast_held_ref.
-    let (held_kind, held_id) = broadcast_held_ref(sp);
+    let (held, off) = broadcast_held_wires(sp);
     // Server-simulated (remote) players have real physics: horizontal velocity
     // + on_ground come from the sim. Local position-trusted players don't run
     // server physics (only pos is overwritten from the InputPacket), so
@@ -539,10 +553,14 @@ pub fn collect_player_state(sp: &ServerPlayer, idx: u32) -> crate::protocol::Pla
         yaw: sp.yaw,
         pitch: sp.pitch,
         health: sp.combat.health,
-        held_kind,
-        held_id,
+        held_kind: held.kind,
+        held_id: held.id,
         anim_state,
         flags,
+        held_tool: held.tool,
+        off_kind: off.kind,
+        off_id: off.id,
+        off_tool: off.tool,
         // The one place a non-zero key flows on the server side: the per-player
         // reference announced at join time, rebroadcast every tick.
         skin_key: sp.skin_key,

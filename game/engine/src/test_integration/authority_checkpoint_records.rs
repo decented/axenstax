@@ -39,7 +39,7 @@ fn bind_and_owe(h: &mut TestHost, slot: usize) {
     sp.personal = Some(BoundPersonal::fresh(GameplayBinding::WorldLocal { scope, player: WorldPlayer::Npub(key) }).unwrap());
     let stack = ItemStack::new_block(crate::block::COBBLESTONE, 12);
     let take = ItemDelta { take: vec![(0, stack)], give: vec![] };
-    sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &take);
+    sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &mut None, &take);
 }
 
 /// The record is the truth until the joiner comes back: an autosave, a shutdown

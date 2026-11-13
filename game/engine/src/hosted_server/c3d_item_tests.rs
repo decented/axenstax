@@ -21,7 +21,7 @@ fn mat(m: MaterialId, n: u8) -> ItemStack { ItemStack::new_material(m, n) }
 
 fn rig(tag: &str, items: &[(usize, ItemStack)]) -> Joined {
     let mut j = joined(tag, items, true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
     j.assert_honest("the refill setting");
     j
@@ -33,29 +33,29 @@ fn eat(j: &mut Joined, hot: usize) -> ActionHeader {
     let item = j.inv.slot(hot).map(|s| s.item.clone());
     let (held_kind, held_id) = item.as_ref().map_or(protocol::ItemRef::Empty.to_wire(), |i| crate::inventory::item_to_ref(i).to_wire());
     let held_full = item.as_ref().map_or(protocol::WireItem::None, crate::inventory::item_to_wire_full);
-    let pending = Pending { kind: Asked::Eat, mob: None, hotbar_slot: hot, held: item };
+    let pending = Pending { kind: Asked::Eat, mob: None, hotbar_slot: hot, held: item, hand: crate::hands::Hand::Main };
     let packet = protocol::ItemActionPacket { seq: 0, action: protocol::ItemAction::Eat { hotbar_slot: hot as u8, held_kind, held_id, held_full }, events_applied: 0, hand: crate::hands::Hand::Main };
-    let window = j.ui.digest(&j.inv, &j.armour);
-    let header = route_item(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the eat typed");
-    assert_eq!(j.ui.digest(&j.inv, &j.armour), window, "routing predicted nothing");
+    let window = j.ui.digest(&j.inv, &j.armour, &None);
+    let header = route_item(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the eat typed");
+    assert_eq!(j.ui.digest(&j.inv, &j.armour, &None), window, "routing predicted nothing");
     header
 }
 
 /// The give `GameState::request_creative_give` builds.
 fn give(j: &mut Joined, stack: &ItemStack) -> ActionHeader {
-    let pending = Pending { kind: Asked::CreativeGive, mob: None, hotbar_slot: 0, held: None };
+    let pending = Pending { kind: Asked::CreativeGive, mob: None, hotbar_slot: 0, held: None, hand: crate::hands::Hand::Main };
     let packet = protocol::ItemActionPacket { seq: 0, action: protocol::ItemAction::CreativeGive { item: crate::inventory::stack_to_wire(stack) }, events_applied: 0, hand: crate::hands::Hand::Main };
-    let window = j.ui.digest(&j.inv, &j.armour);
-    let header = route_item(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the give typed");
-    assert_eq!(j.ui.digest(&j.inv, &j.armour), window, "routing predicted nothing");
+    let window = j.ui.digest(&j.inv, &j.armour, &None);
+    let header = route_item(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the give typed");
+    assert_eq!(j.ui.digest(&j.inv, &j.armour, &None), window, "routing predicted nothing");
     header
 }
 
 /// A right-click on the device at `cell` with hotbar `hot` in hand.
 fn device(j: &mut Joined, cell: [i32; 3], hot: u8) -> ActionHeader {
-    let window = j.ui.digest(&j.inv, &j.armour);
-    let header = route_device(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, cell, hot).expect("routed").expect("a Strict seat sends the right-click typed");
-    assert_eq!(j.ui.digest(&j.inv, &j.armour), window, "routing predicted nothing");
+    let window = j.ui.digest(&j.inv, &j.armour, &None);
+    let header = route_device(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, cell, hot).expect("routed").expect("a Strict seat sends the right-click typed");
+    assert_eq!(j.ui.digest(&j.inv, &j.armour, &None), window, "routing predicted nothing");
     header
 }
 
@@ -250,10 +250,10 @@ fn c3d_client_mirror_eat_give_and_device_stay_legacy() {
     use super::c3d_grid_tests::joined as grid_joined;
     let mut j = grid_joined("item-mirror", InventoryMode::Mirror, None);
     let mut actions = JoinerActions::default();
-    let pending = Pending { kind: Asked::CreativeGive, mob: None, hotbar_slot: 0, held: None };
+    let pending = Pending { kind: Asked::CreativeGive, mob: None, hotbar_slot: 0, held: None, hand: crate::hands::Hand::Main };
     let packet = protocol::ItemActionPacket { seq: 0, action: protocol::ItemAction::CreativeGive { item: crate::inventory::stack_to_wire(&ItemStack::new_block(crate::block::STONE, 1)) }, events_applied: 0, hand: crate::hands::Hand::Main };
-    assert_eq!(route_item(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut actions, pending, packet).expect("routed"), None, "Mirror: the legacy give");
-    assert_eq!(route_device(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, [0, 80, 0], 0).expect("routed"), None, "Mirror: the legacy right-click");
+    assert_eq!(route_item(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut actions, pending, packet).expect("routed"), None, "Mirror: the legacy give");
+    assert_eq!(route_device(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, [0, 80, 0], 0).expect("routed"), None, "Mirror: the legacy right-click");
     assert_eq!(actions.len(), 0, "Mirror: nothing recorded");
     assert!(j.rc.action_journal.as_ref().is_none_or(|journal| journal.len() == 0), "Mirror: nothing reserved");
     j.assert_live("Mirror: never torn down");
@@ -276,7 +276,7 @@ fn c3d_client_strict_seat_sending_a_legacy_packet_is_refused() {
             "device" => j.rc.send_device_interact((cell[0], cell[1], cell[2])),
             "eat" => j.rc.send_item_action(&protocol::ItemActionPacket { seq: 1, action: protocol::ItemAction::Eat { hotbar_slot: 0, held_kind: bk, held_id: bi, held_full: bread_full }, events_applied: 0, hand: crate::hands::Hand::Main }),
             "drop" => j.rc.send_item_action(&protocol::ItemActionPacket { seq: 1, action: protocol::ItemAction::Drop { hotbar_slot: 0, held_kind: bk, held_id: bi, held_full: bread_full }, events_applied: 0, hand: crate::hands::Hand::Main }),
-            _ => j.rc.send_entity_interact(&protocol::EntityInteractPacket { seq: 1, entity: 1, kind: protocol::InteractKind::Feed, held_kind: bk, held_id: bi, held_full: bread_full, hotbar_slot: 0, sneak: false, events_applied: 0 }),
+            _ => j.rc.send_entity_interact(&protocol::EntityInteractPacket { seq: 1, entity: 1, kind: protocol::InteractKind::Feed, held_kind: bk, held_id: bi, held_full: bread_full, hotbar_slot: 0, sneak: false, events_applied: 0, hand: crate::hands::Hand::Main }),
         }
         for _ in 0..3 { j.hs.tick(); j.rc.poll(); }
         assert!(j.hs.slot_is_free(j.i), "{what}: a legacy packet refuses the Strict seat");

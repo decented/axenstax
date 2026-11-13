@@ -30,10 +30,10 @@ impl Client {
     /// slot `hot`, as `GameState::send_use_request` does: claimed, recorded,
     /// sent. `false` when the claim stops it (nothing sent).
     fn request(&mut self, asked: Asked, held: Option<Item>, hot: usize, action: ItemAction) -> bool {
-        if !self.actions.can_afford(&self.inv, &self.ui, &None, asked, held.as_ref()) {
+        if !self.actions.can_afford(&self.inv, &self.ui, &self.offhand, asked, held.as_ref()) {
             return false;
         }
-        let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: hot, held }, self.input_seq + 1);
+        let seq = self.actions.record(Pending { kind: asked, mob: None, hotbar_slot: hot, held, hand: crate::hands::Hand::Main }, self.input_seq + 1);
         let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.events, hand: crate::hands::Hand::Main };
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         true

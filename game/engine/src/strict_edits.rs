@@ -238,7 +238,7 @@ fn reserve(
         // Reserved and unread by the server (`ActionIntent::Edit`).
         source_tick: remote.next_input_seq(),
         change,
-        hand: (slot_u8, kind_id, item_id),
+        hand: (slot_u8, kind_id, item_id, crate::hands::Hand::Main),
         mined,
         use_tag: None,
         old,

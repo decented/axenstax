@@ -47,6 +47,8 @@ struct Client {
     ui: CraftingUi,
     inv: Inventory,
     armour: [Option<ArmourItem>; 4],
+    /// The off-hand (v101).
+    offhand: Option<ItemStack>,
     /// The last `op_seq` sent.
     seq: u32,
     /// `ArmourWorn` hits it was told of.
@@ -126,6 +128,7 @@ impl Rig {
             ui: CraftingUi::new(),
             inv: Inventory::new(),
             armour: [None; 4],
+            offhand: None,
             seq: 0,
             worn: 0,
             events: 2,
@@ -193,7 +196,7 @@ impl Rig {
                 let out: protocol::ItemActionOutcomePacket = protocol::safe_deserialize(payload).unwrap();
                 if let Some(request) = self.c.actions.take(out.seq) {
                     let c = &mut self.c;
-                    crate::joiner_actions::apply_item_outcome(&mut c.inv, &mut c.ui, &request, &out);
+                    crate::joiner_actions::apply_item_outcome(&mut c.inv, &mut c.ui, &mut c.offhand, &request, &out);
                 }
                 out.window_event
             }
@@ -201,7 +204,7 @@ impl Rig {
                 let out: protocol::InteractOutcomePacket = protocol::safe_deserialize(payload).unwrap();
                 if let Some(request) = self.c.actions.take(out.seq) {
                     let c = &mut self.c;
-                    crate::joiner_actions::apply_outcome(&mut c.inv, &mut c.ui, &request, &out);
+                    crate::joiner_actions::apply_outcome(&mut c.inv, &mut c.ui, &mut c.offhand, &request, &out);
                 }
                 out.window_event
             }
@@ -259,7 +262,7 @@ impl Rig {
             held_id: id,
             hotbar_slot: Some(0),
             block_changes: vec![protocol::BlockChange { x: cell.0, y: cell.1, z: cell.2, new_block: placed, meta: 0 }],
-            edit_hands: vec![(0, kind, id)],
+            edit_hands: vec![(0, kind, id, crate::hands::Hand::Main)],
             events_applied: self.c.events,
             ..Default::default()
         };
@@ -279,7 +282,7 @@ impl Rig {
     fn eat(&mut self, slot: usize, held: Item) {
         let (held_kind, held_id) = crate::inventory::item_to_ref(&held).to_wire();
         let held = Some(held);
-        let seq = self.c.actions.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: slot, held }, u64::MAX);
+        let seq = self.c.actions.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: slot, held, hand: crate::hands::Hand::Main }, u64::MAX);
         let action = protocol::ItemAction::Eat {
             hotbar_slot: slot as u8,
             held_kind,
@@ -344,22 +347,22 @@ impl Rig {
             None => &self.hs.server.world,
         };
         let c = &mut self.c;
-        c.ui.apply_click(&mut c.inv, &mut c.armour, &click, false, eye, |p| world.get_block(p[0], p[1], p[2]))
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &mut c.offhand, &click, false, eye, |p| world.get_block(p[0], p[1], p[2]))
     }
 
     fn open_player(&mut self) {
         let c = &mut self.c;
-        c.ui.open_player_crafting(&c.inv, &c.armour);
+        c.ui.open_player_crafting(&c.inv, &c.armour, &c.offhand);
     }
 
     fn open_table(&mut self, cell: [i32; 3]) {
         let c = &mut self.c;
-        c.ui.open_table_crafting(cell, &c.inv, &c.armour);
+        c.ui.open_table_crafting(cell, &c.inv, &c.armour, &c.offhand);
     }
 
     fn close(&mut self) -> bool {
         let c = &mut self.c;
-        c.ui.close(&mut c.inv, &mut c.armour)
+        c.ui.close(&mut c.inv, &mut c.armour, &mut c.offhand)
     }
 
     /// Send every logged op, numbered, as the game loop's flush does, each
@@ -367,7 +370,7 @@ impl Rig {
     /// ops being logged and sent here).
     fn flush(&mut self) -> usize {
         let c = &mut self.c;
-        let ops = c.ui.take_ops(&c.inv, &c.armour);
+        let ops = c.ui.take_ops(&c.inv, &c.armour, &c.offhand);
         let n = ops.len();
         for logged in ops {
             c.seq += 1;
@@ -378,12 +381,12 @@ impl Rig {
     }
 
     fn client_digest(&self) -> u32 {
-        window::digest_parts(&self.c.inv, &self.c.armour, &self.c.ui.cursor_item, &self.c.ui.grid, self.c.ui.station())
+        window::digest_parts(&self.c.inv, &self.c.armour, &self.c.offhand, &self.c.ui.cursor_item, &self.c.ui.grid, self.c.ui.station())
     }
 
     fn server_digest(&self) -> u32 {
         let sp = &self.hs.server.players[self.c.slot];
-        window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station)
+        window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station)
     }
 
     /// The server's window is the client's, slot for slot, and no op has
@@ -393,6 +396,7 @@ impl Rig {
         let slots = |inv: &Inventory| inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>();
         assert_eq!(slots(&sp.inventory), slots(&self.c.inv), "{what}: the 36 slots");
         assert_eq!(sp.armour, self.c.armour, "{what}: the armour");
+        assert_eq!(sp.offhand, self.c.offhand, "{what}: the off-hand");
         assert_eq!(sp.cursor, self.c.ui.cursor_item, "{what}: the cursor");
         assert_eq!(sp.craft_grid, self.c.ui.grid, "{what}: the grid");
         assert_eq!(sp.inventory.auto_refill, self.c.inv.auto_refill, "{what}: auto-refill");
@@ -628,7 +632,7 @@ fn a_table_click_the_client_judged_in_reach_is_accepted_by_the_server_too() {
     let result = {
         let world = &rig.hs.server.world;
         let c = &mut rig.c;
-        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, client_eye, |p| {
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &mut c.offhand, &WindowClick::Result, false, client_eye, |p| {
             world.get_block(p[0], p[1], p[2])
         })
     };
@@ -674,14 +678,14 @@ fn a_result_click_the_client_refused_after_a_stuck_forced_close_is_not_crafted()
     // The screen's forced close is stuck: the bag is full.
     let closed = {
         let c = &mut rig.c;
-        c.ui.force_close(&mut c.inv, &mut c.armour, true)
+        c.ui.force_close(&mut c.inv, &mut c.armour, &mut c.offhand, true)
     };
     assert!(!closed, "stuck");
     // The client clicks Result there; its rule refuses.
     let result = {
         let world = &rig.hs.server.world;
         let c = &mut rig.c;
-        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |p| world.get_block(p[0], p[1], p[2]))
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &mut c.offhand, &WindowClick::Result, false, eye, |p| world.get_block(p[0], p[1], p[2]))
     };
     assert!(!result.ok(), "the client's rule refuses");
     rig.flush();
@@ -739,7 +743,7 @@ fn a_table_that_just_went_is_still_craftable_on_the_server_for_a_few_ticks() {
     let eye = rig.sp().player.eye_pos();
     let client = {
         let c = &mut rig.c;
-        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &mut c.offhand, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
     };
     assert!(matches!(client, ClickResult::Crafted(_)));
     rig.flush();
@@ -770,7 +774,7 @@ fn the_grace_for_a_table_that_went_ends() {
     let eye = rig.sp().player.eye_pos();
     let stale = {
         let c = &mut rig.c;
-        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &mut c.offhand, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
     };
     assert!(matches!(stale, ClickResult::Crafted(_)), "a client that never heard crafts");
     rig.flush();
@@ -1188,7 +1192,7 @@ fn a_lost_op_is_tallied_and_a_lock_divergence_shows_at_once() {
     rig.tick();
     // The lock op is lost on the way.
     rig.click(WindowClick::ToggleLock { slot: 3 });
-    let _ = rig.c.ui.take_ops(&rig.c.inv, &rig.c.armour);
+    let _ = rig.c.ui.take_ops(&rig.c.inv, &rig.c.armour, &rig.c.offhand);
     rig.c.seq += 1;
     rig.click(slot(9, false));
     rig.flush();
@@ -1360,8 +1364,8 @@ fn an_open_at_a_cell_that_is_not_a_table_earns_no_grace() {
     let fill = WindowClick::Autofill { example: example("Iron Pickaxe") };
     let crafted = {
         let c = &mut rig.c;
-        c.ui.apply_click(&mut c.inv, &mut c.armour, &fill, false, eye, |_| block::CRAFTING_TABLE);
-        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &mut c.offhand, &fill, false, eye, |_| block::CRAFTING_TABLE);
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &mut c.offhand, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
     };
     assert!(matches!(crafted, ClickResult::Crafted(_)), "the client crafts at its imagined table");
     rig.flush();
@@ -1385,8 +1389,8 @@ fn craft_at_a_table_the_client_still_sees(rig: &mut Rig, table: [i32; 3]) {
     let fill = WindowClick::Autofill { example: example("Iron Pickaxe") };
     let crafted = {
         let c = &mut rig.c;
-        assert!(c.ui.apply_click(&mut c.inv, &mut c.armour, &fill, false, eye, |_| block::CRAFTING_TABLE).ok());
-        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
+        assert!(c.ui.apply_click(&mut c.inv, &mut c.armour, &mut c.offhand, &fill, false, eye, |_| block::CRAFTING_TABLE).ok());
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &mut c.offhand, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
     };
     assert!(matches!(crafted, ClickResult::Crafted(_)), "the client crafts at the table it still sees");
     rig.flush();

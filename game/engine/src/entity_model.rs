@@ -1365,6 +1365,7 @@ pub fn build_workshop_avatar_vertices(
             anim_state: 0,
             flags: 0,
             skin_key: 0,
+            held_tool: crate::protocol::HeldWire::NO_TOOL, off_kind: 0, off_id: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
         };
         let (mut skin_v, _held) =
             build_player_avatar_vertices_with(&ps, 0.0, 0, 0 /* layer 0 */, 1.0, registry, opts);
@@ -3231,7 +3232,7 @@ mod tests {
             held_id: 0,
             anim_state: 0,
             flags: 0,
-            skin_key: 0,
+            skin_key: 0, held_tool: crate::protocol::HeldWire::NO_TOOL, off_id: 0, off_kind: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
         };
         let opts = SkinRenderOpts { separation: 1.0, edit_inflate: true, ..Default::default() };
         let (verts, _held) =
@@ -3800,6 +3801,10 @@ mod tests {
             anim_state: 1, // walking
             flags,
             skin_key: 0, // avatar-model tests don't exercise the skin reference
+            held_tool: crate::protocol::HeldWire::NO_TOOL,
+            off_kind: 0,
+            off_id: 0,
+            off_tool: crate::protocol::HeldWire::NO_TOOL,
         }
     }
 

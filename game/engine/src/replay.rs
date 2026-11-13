@@ -249,7 +249,7 @@ mod tests {
             held_id: 0,
             anim_state: 0,
             flags: 0,
-            skin_key: 0,
+            skin_key: 0, held_tool: crate::protocol::HeldWire::NO_TOOL, off_id: 0, off_kind: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
         }
     }
     fn block(x: i32, b: u16) -> BlockChange {

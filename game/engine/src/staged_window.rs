@@ -130,6 +130,9 @@ pub fn stage_with(raw: &MarkerWindow, click: &WindowClick, station: window::Stat
             if let Some(i) = at(WindowSlot::Grid(*row, *col)) { need[i] = true; need[CURSOR] = true; }
         }
         WindowClick::Armour { slot } if *slot < 4 => { need[36 + *slot] = true; need[CURSOR] = true; }
+        WindowClick::Offhand { .. } => { need[OFFHAND] = true; need[CURSOR] = true; }
+        WindowClick::SwapHands { slot } if *slot < 9 => { need[*slot] = true; need[OFFHAND] = true; }
+        WindowClick::SwapHands { .. } => {}
         WindowClick::Result if matches!(result, ClickResult::Crafted(_)) => {
             for i in 41..50 {
                 sources[i] = before[i].clone().map(|mut s| { s.count = 1; s });
@@ -258,7 +261,7 @@ mod tests {
         let mut pending = raw.clone();
         // This is the SAME owed search used by window_events, not a substitute
         // total-count model. Only source0 is removed, genuine source1 remains.
-        let taken = crate::joiner_actions::take_owed_window(&mut pending.inv, &mut pending.grid, &mut pending.cursor, 0, &Item::Block(crate::block::STONE), 1);
+        let taken = crate::joiner_actions::take_owed_window(&mut pending.inv, &mut pending.grid, &mut pending.cursor, &mut None, 0, crate::hands::Hand::Main, &Item::Block(crate::block::STONE), 1);
         assert_eq!(taken, 1);
         let mut backing = SourceBacking::new(raw.slots());
         backing.observe_prefix(&pending.slots());

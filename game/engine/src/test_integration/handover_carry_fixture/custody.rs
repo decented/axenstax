@@ -279,12 +279,13 @@ fn grant(source: &mut HeadlessGame, peer: &mut HeadlessGame, stack: ItemStack, s
         &mut slot.crafting_ui,
         &slot.inventory,
         &slot.armour_slots,
+        &None,
         &mut state.joiner_actions,
         crate::joiner_actions::Pending {
             kind: crate::joiner_actions::Asked::CreativeGive,
             mob: None,
             hotbar_slot: 0,
-            held: None,
+            held: None, hand: crate::hands::Hand::Main,
         },
         crate::protocol::ItemActionPacket {
             seq: 0,
@@ -414,15 +415,17 @@ pub(in crate::test_integration) fn seed_authored(
             &slot.inventory,
             &slot.armour_slots,
             &slot.crafting_ui.cursor_item,
+            &None,
             &slot.crafting_ui.grid,
-            slot.crafting_ui.station()
+            slot.crafting_ui.station(),
         ),
         crate::window::digest_parts(
             &sp.inventory,
             &sp.armour,
             &sp.cursor,
+            &None,
             &sp.craft_grid,
-            sp.station
+            sp.station,
         ),
         "actual recipient/backed window places disagree"
     );

@@ -205,7 +205,7 @@ impl Rig {
                     self.c.changes.extend(state.block_changes);
                     // C3c-2-fix (F-M1) — the game loop's own undo: newest first.
                     let c = &mut self.c;
-                    let undone = crate::use_edits::undo_refused(&mut c.uses, &mut c.inv, &mut c.ui, &state.refused_uses);
+                    let undone = crate::use_edits::undo_refused(&mut c.uses, &mut c.inv, &mut c.ui, &mut None, &state.refused_uses);
                     c.undone += undone.iter().filter(|(_, u)| u.is_some()).count() as u32;
                     self.c.refused.extend(state.refused_uses);
                     self.c.uses.acknowledged(state.last_acked_input);
@@ -291,11 +291,11 @@ impl Rig {
             slot: hot,
             cost,
             landed,
-            made_at: self.c.input_seq + 1,
+            made_at: self.c.input_seq + 1, hand: crate::hands::Hand::Main,
         });
         let (slot, (k, id)) = self.hand_now();
         let edit = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta };
-        (tag, edit, (slot as u8, k, id), leftover)
+        (tag, edit, (slot as u8, k, id, crate::hands::Hand::Main), leftover)
     }
 
     /// The server's copy is the client's window, slot for slot.
@@ -303,8 +303,8 @@ impl Rig {
         let sp = &self.hs.server.players[self.c.slot];
         let slots = |inv: &Inventory| inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>();
         assert_eq!(slots(&sp.inventory), slots(&self.c.inv), "{what}: the 36 slots");
-        let client = window::digest_parts(&self.c.inv, &self.c.armour, &self.c.ui.cursor_item, &self.c.ui.grid, self.c.ui.station());
-        let server = window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station);
+        let client = window::digest_parts(&self.c.inv, &self.c.armour, &None, &self.c.ui.cursor_item, &self.c.ui.grid, self.c.ui.station());
+        let server = window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station);
         assert_eq!(server, client, "{what}: the digests");
     }
 
@@ -537,7 +537,7 @@ fn a_joiners_door_reaches_the_server_and_another_joiner_whole() {
     let top_meta = crate::use_edits::door_top_meta(0);
     let tag = crate::use_edits::tag(UseKind::DoorUpper, top, 0, crate::hands::Hand::Main, None);
     let upper = protocol::BlockChange { x: top[0], y: top[1], z: top[2], new_block: block::OAK_DOOR, meta: top_meta };
-    let hand = (slot as u8, k, id);
+    let hand = (slot as u8, k, id, crate::hands::Hand::Main);
     rig.send_input(vec![bottom, upper.clone()], vec![hand, hand], vec![tag]);
     rig.tick();
     assert_eq!(rig.block(ABOVE), block::OAK_DOOR);
@@ -578,7 +578,7 @@ fn water_poured_from_an_empty_bucket_is_tallied_and_still_applied() {
     let tag = crate::use_edits::tag(UseKind::BucketEmpty, ABOVE, 0, crate::hands::Hand::Main, Some(&mat(MaterialId::Bucket)));
     let pour = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::WATER, meta: 0 };
     let hand = rig.hand_now();
-    rig.send_input(vec![pour], vec![(0, hand.1 .0, hand.1 .1)], vec![tag]);
+    rig.send_input(vec![pour], vec![(0, hand.1 .0, hand.1 .1, crate::hands::Hand::Main)], vec![tag]);
     rig.tick();
     assert_eq!(rig.block(ABOVE), block::WATER, "log-only: applied");
     let t = rig.tally();
@@ -647,15 +647,15 @@ fn a_window_op_between_two_uses_lands_between_them_on_the_server() {
     // Use 1: a tap (Rubber to the first empty slot, 2).
     rig.use_at(UseKind::TapRubber, ABOVE, block::RUBBER_LOG_TAPPED, 0);
     // The op: the stone from slot 1 to slot 20 (slot 1 is now the first empty).
-    rig.c.ui.open_player_crafting(&rig.c.inv, &rig.c.armour);
+    rig.c.ui.open_player_crafting(&rig.c.inv, &rig.c.armour, &None);
     for click in [WindowClick::Slot { slot: 1, right: false }, WindowClick::Slot { slot: 20, right: false }] {
         let c = &mut rig.c;
-        let r = c.ui.apply_click(&mut c.inv, &mut c.armour, &click, false, Vec3::ZERO, |_| block::AIR);
+        let r = c.ui.apply_click(&mut c.inv, &mut c.armour, &mut None, &click, false, Vec3::ZERO, |_| block::AIR);
         assert!(r.ok());
     }
     assert!(rig.c.ui.cursor_item.is_none(), "the stone is down");
     let c = &mut rig.c;
-    for logged in c.ui.take_ops(&c.inv, &c.armour) {
+    for logged in c.ui.take_ops(&c.inv, &c.armour, &None) {
         c.seq += 1;
         let pkt = logged.packet(c.seq, c.events);
         c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
@@ -729,7 +729,7 @@ fn through_the_real_send_path_uses_keep_their_tags_and_their_order() {
     assert!(inv.add_item(ItemStack::new_material(MaterialId::WaterBucket, 1)).is_none());
     pending.push_use(protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 }, fill_tag);
     let send = |rc: &mut crate::remote_client::RemoteClient, pending: &mut crate::window_ops::PendingEdits, cut: Option<u64>| {
-        let (edits, hands, stamps, uses) = pending.take((0, 0, 0));
+        let (edits, hands, stamps, uses) = pending.take((0, 0, 0, crate::hands::Hand::Main));
         rc.note_edit_stamps(stamps);
         rc.note_edit_uses(uses);
         rc.note_order_cut(cut);
@@ -766,9 +766,9 @@ fn through_the_real_send_path_uses_keep_their_tags_and_their_order() {
     let tap_tag = crate::use_edits::tag(UseKind::TapRubber, log, 5, crate::hands::Hand::Main, inv.slot(5).map(|s| &s.item));
     assert_eq!(client_steps(&mut inv, UseKind::TapRubber, 5, block::RUBBER_LOG), None);
     pending.push_use(protocol::BlockChange { x: log[0], y: log[1], z: log[2], new_block: block::RUBBER_LOG_TAPPED, meta: 0 }, tap_tag);
-    ui.open_player_crafting(&inv, &armour);
+    ui.open_player_crafting(&inv, &armour, &None);
     for click in [WindowClick::Slot { slot: 1, right: false }, WindowClick::Slot { slot: 20, right: false }] {
-        assert!(ui.apply_click(&mut inv, &mut armour, &click, false, Vec3::ZERO, |_| block::AIR).ok());
+        assert!(ui.apply_click(&mut inv, &mut armour, &mut None, &click, false, Vec3::ZERO, |_| block::AIR).ok());
     }
     let erase_tag = crate::use_edits::tag(UseKind::Erase, paper, 6, crate::hands::Hand::Main, inv.slot(6).map(|s| &s.item));
     assert_eq!(client_steps(&mut inv, UseKind::Erase, 6, block::BLUEPRINT_PAPER), None);
@@ -877,7 +877,7 @@ fn a_modified_clients_unfit_claims_stop_at_the_believed_bound() {
         tag.unfit = 1;
         let edit = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 };
         let (k, id) = crate::inventory::item_to_ref(&bucket).to_wire();
-        rig.send_input(vec![edit], vec![(0, k, id)], vec![tag]);
+        rig.send_input(vec![edit], vec![(0, k, id, crate::hands::Hand::Main)], vec![tag]);
         rig.tick();
     }
     let secs = (rig.hs.server.tick_counter - start).div_ceil(20) as usize;
@@ -1025,7 +1025,7 @@ fn a_door_top_half_over_air_is_refused() {
     let tag = crate::use_edits::tag(UseKind::DoorUpper, top, 0, crate::hands::Hand::Main, None);
     let upper = protocol::BlockChange { x: top[0], y: top[1], z: top[2], new_block: block::OAK_DOOR, meta: crate::use_edits::door_top_meta(0) };
     let (_, (k, id)) = rig.hand_now();
-    rig.send_input(vec![upper], vec![(0, k, id)], vec![tag]);
+    rig.send_input(vec![upper], vec![(0, k, id, crate::hands::Hand::Main)], vec![tag]);
     rig.tick();
     rig.tick();
     assert_eq!(rig.block(top), block::AIR, "no floating half");
@@ -1049,7 +1049,7 @@ fn a_door_top_half_over_a_top_half_is_refused() {
     let tag = crate::use_edits::tag(UseKind::DoorUpper, third, 0, crate::hands::Hand::Main, None);
     let upper = protocol::BlockChange { x: third[0], y: third[1], z: third[2], new_block: block::OAK_DOOR, meta: crate::use_edits::door_top_meta(0) };
     let (_, (k, id)) = rig.hand_now();
-    rig.send_input(vec![upper], vec![(0, k, id)], vec![tag]);
+    rig.send_input(vec![upper], vec![(0, k, id, crate::hands::Hand::Main)], vec![tag]);
     rig.tick();
     rig.tick();
     assert_eq!(rig.block(third), block::AIR, "no door top over a door top");
@@ -1091,7 +1091,7 @@ fn a_door_broken_at_the_reach_edge_breaks_whole_on_the_server() {
         // A legacy/modified packet sends the far untagged half first;
         // accepting the near primary must still remove the matching pair.
         block_changes: vec![air(bottom), air(top)],
-        edit_hands: vec![(0, k, id), (0, k, id)],
+        edit_hands: vec![(0, k, id, crate::hands::Hand::Main), (0, k, id, crate::hands::Hand::Main)],
         mined: vec![mined],
         events_applied: rig.c.events,
         ..Default::default()
@@ -1173,7 +1173,7 @@ fn a_joiner_breaking_either_half_of_a_door_takes_the_whole_door_everywhere() {
             held_kind: k,
             held_id: id,
             block_changes: vec![air(broken)],
-            edit_hands: vec![(0, k, id)],
+            edit_hands: vec![(0, k, id, crate::hands::Hand::Main)],
             mined: vec![mined],
             events_applied: rig.c.events,
             ..Default::default()
@@ -1221,7 +1221,7 @@ fn a_tag_that_cant_explain_its_edit_falls_back_to_the_ordinary_check() {
     let tag = crate::use_edits::tag(UseKind::Till, ABOVE, 0, crate::hands::Hand::Main, rig.c.inv.slot(0).map(|s| &s.item));
     let place = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::STONE, meta: 0 };
     let (_, (k, id)) = rig.hand_now();
-    rig.send_input(vec![place], vec![(0, k, id)], vec![tag]);
+    rig.send_input(vec![place], vec![(0, k, id, crate::hands::Hand::Main)], vec![tag]);
     rig.tick();
     assert_eq!(rig.block(ABOVE), block::STONE);
     rig.assert_lockstep("the placement charged");
@@ -1346,7 +1346,7 @@ impl Rig {
     /// The client's window ops so far, sent.
     fn send_ops(&mut self) {
         let c = &mut self.c;
-        for logged in c.ui.take_ops(&c.inv, &c.armour) {
+        for logged in c.ui.take_ops(&c.inv, &c.armour, &None) {
             c.seq += 1;
             let pkt = logged.packet(c.seq, c.events);
             c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
@@ -1359,8 +1359,8 @@ impl Rig {
         let sp = &self.hs.server.players[self.c.slot];
         let c = &self.c;
         (
-            window::digest_parts(&c.inv, &c.armour, &c.ui.cursor_item, &c.ui.grid, c.ui.station()),
-            window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station),
+            window::digest_parts(&c.inv, &c.armour, &None, &c.ui.cursor_item, &c.ui.grid, c.ui.station()),
+            window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station),
         )
     }
 }
@@ -1504,14 +1504,14 @@ fn a_joiners_art_capture_lands_its_marker_where_the_client_did_and_moves_in_lock
     let (client, server) = rig.digests();
     assert_eq!(server, client, "it digests like the real one");
     // The Plan moves: slot 2 → slot 20 → hotbar slot 7.
-    rig.c.ui.open_player_crafting(&rig.c.inv, &rig.c.armour);
+    rig.c.ui.open_player_crafting(&rig.c.inv, &rig.c.armour, &None);
     for slot in [2, 20, 20, 7] {
         let c = &mut rig.c;
-        let r = c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Slot { slot, right: false }, false, Vec3::ZERO, |_| block::AIR);
+        let r = c.ui.apply_click(&mut c.inv, &mut c.armour, &mut None, &WindowClick::Slot { slot, right: false }, false, Vec3::ZERO, |_| block::AIR);
         assert!(r.ok(), "click {slot}");
     }
     let c = &mut rig.c;
-    assert!(c.ui.close(&mut c.inv, &mut c.armour));
+    assert!(c.ui.close(&mut c.inv, &mut c.armour, &mut None));
     rig.send_ops();
     let t = rig.tally();
     assert!(t.window_ops >= 6, "the open, four clicks and the close were mirrored: {}", t.window_ops);
@@ -1578,7 +1578,7 @@ fn smallfix_two_mined_door_halves_yield_one_door_and_recover_both_wallpapers_onc
         x: rig.sp().player.pos.x, y: rig.sp().player.pos.y, z: rig.sp().player.pos.z, health: 20.0,
         held_kind: k, held_id: id,
         block_changes: [ABOVE, top].map(|c| protocol::BlockChange { x: c[0], y: c[1], z: c[2], new_block: block::AIR, meta: 0 }).to_vec(),
-        edit_hands: vec![(0, k, id); 2],
+        edit_hands: vec![(0, k, id, crate::hands::Hand::Main); 2],
         mined: [ABOVE, top].map(|c| protocol::MinedBlock { x: c[0], y: c[1], z: c[2], tool: protocol::WireItem::None }).to_vec(),
         events_applied: rig.c.events, ..Default::default() };
     rig.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
@@ -1602,7 +1602,7 @@ fn smallfix_air_erase_never_mints_copy_or_real_unfit_sheet() {
         tag.unfit = u8::from(full);
         let (hot, (k, id)) = rig.hand_now();
         let edit = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 };
-        for _ in 0..2 { rig.send_input(vec![edit.clone()], vec![(hot as u8, k, id)], vec![tag.clone()]); rig.tick(); }
+        for _ in 0..2 { rig.send_input(vec![edit.clone()], vec![(hot as u8, k, id, crate::hands::Hand::Main)], vec![tag.clone()]); rig.tick(); }
         assert_eq!(units(&rig.sp().inventory, &mat(MaterialId::PapyrusSheet)), 0);
         assert!(rig.ground_items().iter().all(|s| s.item != mat(MaterialId::PapyrusSheet)));
     }
@@ -1623,7 +1623,7 @@ fn smallfix_refused_primary_restores_both_standing_door_halves() {
             x: rig.sp().player.pos.x, y: rig.sp().player.pos.y, z: rig.sp().player.pos.z, health: 20.0,
             held_kind: k, held_id: id,
             block_changes: vec![protocol::BlockChange { x: primary[0], y: primary[1], z: primary[2], new_block: block::AIR, meta: 0 }],
-            edit_hands: vec![(0, k, id)],
+            edit_hands: vec![(0, k, id, crate::hands::Hand::Main)],
             mined: vec![protocol::MinedBlock { x: primary[0], y: primary[1], z: primary[2], tool: protocol::WireItem::None }],
             events_applied: rig.c.events, ..Default::default() };
         rig.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
@@ -1642,7 +1642,7 @@ fn smallfix_creative_untagged_primary_removes_whole_door_without_yield() {
     rig.set(ABOVE, block::OAK_DOOR); rig.set(top, block::OAK_DOOR);
     rig.world().set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
     let (_, (k, id)) = rig.hand_now();
-    rig.send_input(vec![protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 }], vec![(0, k, id)], vec![]);
+    rig.send_input(vec![protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 }], vec![(0, k, id, crate::hands::Hand::Main)], vec![]);
     for _ in 0..3 { rig.tick(); }
     assert_eq!((rig.block(ABOVE), rig.block(top)), (block::AIR, block::AIR));
     assert_eq!(units(&rig.c.inv, &Item::Block(block::OAK_DOOR)), 0);

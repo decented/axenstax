@@ -115,7 +115,7 @@ fn c3d_s1_drift_with_a_suffix_supersedes_the_rest_with_one_replace() {
     }
     let eye = j.sp().player.eye_pos();
     let ctx = crate::window::ClickCtx::new(false, j.ui.station(), eye, |_| AIR);
-    j.ui.apply_joined_click(&mut j.rc, &mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot: 5 }, &ctx, &j.reg).expect("reserved and sent");
+    j.ui.apply_joined_click(&mut j.rc, &mut j.inv, &mut j.armour, &mut None, &WindowClick::ToggleLock { slot: 5 }, &ctx, &j.reg).expect("reserved and sent");
     actions.push(j.newest_header());
     j.hs.tick();
     let fates: Vec<_> = actions.iter().map(|a| fate(&j, *a)).collect();
@@ -180,12 +180,12 @@ fn c3d_s1_mirror_op_log_mismatch_is_tallied_never_refused() {
     let mut j = grid_joined("s1-mirror", InventoryMode::Mirror, None);
     j.give(0, stone(4));
     let eye = j.hs.server.players[j.i].player.eye_pos();
-    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot: 3 }, false, eye, |_| AIR);
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &mut None, &WindowClick::ToggleLock { slot: 3 }, false, eye, |_| AIR);
     j.pumps(3);
     assert_eq!(j.hs.server.players[j.i].possession.window_mismatch, 0, "the matching first op is the baseline");
     j.hs.server.players[j.i].inventory.set_slot(7, Some(stone(3)));
     let before = j.hs.server.players[j.i].window_events.last_number();
-    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::Slot { slot: 0, right: false }, false, eye, |_| AIR);
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &mut None, &WindowClick::Slot { slot: 0, right: false }, false, eye, |_| AIR);
     assert!(j.rc.action_journal.as_ref().is_none_or(|journal| journal.len() == 0), "Mirror reserves no typed action");
     j.pumps(3);
     j.assert_live("Mirror: the seat is kept");
@@ -293,14 +293,14 @@ fn c3d_s1_a_refusal_every_tick_is_torn_down_at_the_ninth_correction() {
 #[test]
 fn c3d_s1_refused_auto_refill_setting_is_corrected_then_resent() {
     let mut j = joined("s1-refill", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
     j.assert_honest("the session's setting");
     j.hs.server.players[j.i].inventory.set_slot(7, Some(ItemStack::new_block(COBBLESTONE, 3)));
     let server_refill = j.sp().inventory.auto_refill;
     j.inv.auto_refill = !j.inv.auto_refill;
     let before = j.sp().window_events.last_number();
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     let action = j.newest_header();
     j.pump();
     assert_eq!(fate(&j, action), Some(ActionFate::Refused), "the typed refusal stands");
@@ -310,7 +310,7 @@ fn c3d_s1_refused_auto_refill_setting_is_corrected_then_resent() {
     assert_eq!(counters(&j), (0, 1));
     j.pump();
     assert!(j.rc.refill_refused, "the Refused receipt retired: the setting goes again");
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("resent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("resent");
     let resent = j.newest_header();
     assert_ne!(resent, action, "a new setting action");
     j.pump();
@@ -329,14 +329,14 @@ fn c3d_s1_refused_auto_refill_setting_is_corrected_then_resent() {
 #[test]
 fn c3d_s1_a_click_between_the_replace_and_its_receipt_is_served() {
     let mut j = joined("s1-refill-gap", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
-    assert!(j.ui.open_joined(&mut j.rc, None, &mut j.inv, &mut j.armour, &j.reg).expect("reserved and sent"), "E opens");
+    assert!(j.ui.open_joined(&mut j.rc, None, &mut j.inv, &mut j.armour, &mut None, &j.reg).expect("reserved and sent"), "E opens");
     j.assert_honest("the session's setting and the open screen");
     j.hs.server.players[j.i].inventory.set_slot(7, Some(ItemStack::new_block(COBBLESTONE, 3)));
     j.inv.auto_refill = !j.inv.auto_refill;
     let before = j.sp().window_events.last_number();
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     let refused = j.newest_header();
     j.pump_outcomes_only();
     assert_eq!(fate(&j, refused), Some(ActionFate::Refused), "the setting is refused");
@@ -346,7 +346,7 @@ fn c3d_s1_a_click_between_the_replace_and_its_receipt_is_served() {
     // The gap: a click on the corrected window.
     let eye = j.sp().player.eye_pos();
     let ctx = crate::window::ClickCtx::new(false, j.ui.station(), eye, |_| crate::block::CRAFTING_TABLE);
-    j.ui.apply_joined_click(&mut j.rc, &mut j.inv, &mut j.armour, &WindowClick::Slot { slot: 0, right: false }, &ctx, &j.reg).expect("reserved and sent");
+    j.ui.apply_joined_click(&mut j.rc, &mut j.inv, &mut j.armour, &mut None, &WindowClick::Slot { slot: 0, right: false }, &ctx, &j.reg).expect("reserved and sent");
     let click = j.newest_header();
     j.pump_intake();
     j.pump();
@@ -367,7 +367,7 @@ fn c3d_s1_a_click_between_the_replace_and_its_receipt_is_served() {
 #[test]
 fn c3d_s1_a_refill_resend_refused_again_ends_at_the_rate_bound() {
     let mut j = joined("s1-refill-loop", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
     j.assert_honest("the session's setting");
     let server_refill = j.sp().inventory.auto_refill;
@@ -382,7 +382,7 @@ fn c3d_s1_a_refill_resend_refused_again_ends_at_the_rate_bound() {
         j.hs.server.players[j.i].inventory.set_slot(7, Some(ItemStack::new_block(COBBLESTONE, round)));
         if round > 1 { assert!(j.rc.refill_refused, "round {round}: the Refused receipt retired, so the setting goes again"); }
         let before = j.sp().window_events.last_number();
-        j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+        j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
         let action = j.newest_header();
         sent += 1;
         j.pump();
@@ -432,7 +432,7 @@ fn c3d_s1_live_correction_never_takes_the_death_flag() {
 #[test]
 fn c3d_s1_raw_unrepresentable_placement_is_refused_then_torn_down() {
     let mut j = joined("s1-raw-place", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
     j.assert_honest("the refill setting");
     let mut tool = Tool::new(ToolType::Pickaxe, ToolMaterial::Stone);

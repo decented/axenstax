@@ -173,7 +173,7 @@ impl Joiner {
             held_full,
             hotbar_slot: 0,
             sneak: false,
-            events_applied: u32::MAX,
+            events_applied: u32::MAX, hand: crate::hands::Hand::Main,
         };
         self.client
             .send_to_server(&protocol::serialize_packet(protocol::PacketType::EntityInteract, &pkt));
@@ -1301,8 +1301,8 @@ fn a_select_and_swing_in_one_tick_wears_the_same_sword_on_both_sides() {
     rig.tick(1);
     let outcome = rig.joiners[0].inbox.outcome(seq).clone();
     assert!(outcome.accepted);
-    let request = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 3, held: Some(sword()) };
-    apply_outcome(&mut inv, &mut ui, &request, &outcome);
+    let request = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 3, held: Some(sword()), hand: crate::hands::Hand::Main };
+    apply_outcome(&mut inv, &mut ui, &mut None, &request, &outcome);
     rig.report();
     let fresh = match sword() {
         Item::Tool(t) => t.durability,
@@ -1340,11 +1340,11 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
     let mut armour = [None; 4];
     // The player opens its inventory and moves the sword from hotbar slot 0
     // into the bag (slot 9); the ops reach the server.
-    ui.open_player_crafting(&inv, &armour);
+    ui.open_player_crafting(&inv, &armour, &None);
     for click in [crate::window::WindowClick::Slot { slot: 0, right: false }, crate::window::WindowClick::Slot { slot: 9, right: false }] {
-        ui.apply_click(&mut inv, &mut armour, &click, false, Vec3::ZERO, |_| block::AIR);
+        ui.apply_click(&mut inv, &mut armour, &mut None, &click, false, Vec3::ZERO, |_| block::AIR);
     }
-    for (n, logged) in ui.take_ops(&inv, &armour).into_iter().enumerate() {
+    for (n, logged) in ui.take_ops(&inv, &armour, &None).into_iter().enumerate() {
         let pkt = logged.packet(n as u32 + 1, u32::MAX);
         rig.joiners[0].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
     }
@@ -1357,8 +1357,8 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
     rig.tick(1);
     let outcome = rig.joiners[0].inbox.outcome(seq).clone();
     assert!(outcome.accepted);
-    let request = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(sword()) };
-    assert!(apply_outcome(&mut inv, &mut ui, &request, &outcome).wear.is_some(), "the client wore it in slot 9");
+    let request = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(sword()), hand: crate::hands::Hand::Main };
+    assert!(apply_outcome(&mut inv, &mut ui, &mut None, &request, &outcome).wear.is_some(), "the client wore it in slot 9");
     rig.report();
     let fresh = match sword() {
         Item::Tool(t) => t.durability,
@@ -1373,8 +1373,8 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
     assert_eq!(rig.hs.server.players[slot].possession.wear_mismatch, 0);
     let sp = &rig.hs.server.players[slot];
     assert_eq!(
-        crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station),
-        crate::window::digest_parts(&inv, &armour, &ui.cursor_item, &ui.grid, ui.station()),
+        crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station),
+        crate::window::digest_parts(&inv, &armour, &None, &ui.cursor_item, &ui.grid, ui.station()),
         "the windows agree"
     );
 }

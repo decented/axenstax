@@ -169,7 +169,7 @@ mod tests {
 
     fn result(action: ActionHeader, life: u32) -> PackResult {
         let registry = crate::block::BlockRegistry::new();
-        let window = crate::window_events::EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        let window = crate::window_events::EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default(), offhand: None };
         PackResult { actor_respawns: life, action, fate: ActionFate::Accepted, note: crate::pack_wire::PackNote::Done, window_event: 2, window: crate::pack_wire::PackWindow::capture(&window, &Default::default(), &registry).unwrap(), view: None }
     }
 

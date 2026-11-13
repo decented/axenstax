@@ -28,7 +28,7 @@ fn mount(hs: &mut HostedServer, i: usize, client: &ChannelClientTransport, accep
     sp.pitch = towards.y.asin();
     let boundary = sp.window_events.last_number();
     let (held_kind, held_id) = protocol::ItemRef::Empty.to_wire();
-    let req = protocol::EntityInteractPacket { seq: 1, entity: id, kind: protocol::InteractKind::Mount, held_kind, held_id, held_full: protocol::WireItem::None, hotbar_slot: 0, sneak: false, events_applied: boundary };
+    let req = protocol::EntityInteractPacket { seq: 1, entity: id, kind: protocol::InteractKind::Mount, held_kind, held_id, held_full: protocol::WireItem::None, hotbar_slot: 0, sneak: false, events_applied: boundary, hand: crate::hands::Hand::Main };
     let bytes = match mode {
         InventoryMode::Mirror => protocol::serialize_packet(protocol::PacketType::EntityInteract, &req),
         InventoryMode::Strict => protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action: ActionHeader { session: accept.action_session, epoch: 0, life: accept.action_life, seq: 1, events_applied: boundary }, intent: ActionIntent::Interact(req) }),

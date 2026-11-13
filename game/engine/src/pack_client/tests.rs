@@ -3,7 +3,7 @@ use super::*;
 use crate::{action_identity::InventoryMode, container_window::CorrectionDebt, pack_wire::PackWindow, window_events::EffectiveWindow};
 
 fn empty() -> EffectiveWindow {
-    EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: Default::default(), cursor: None, grid: Default::default() }
+    EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: Default::default(), cursor: None, grid: Default::default(), offhand: None }
 }
 fn apply(window: &mut EffectiveWindow, packet: &PackWindow, uses: &crate::use_edits::SentUses, debt: &mut CorrectionDebt, mode: InventoryMode) -> Result<(), String> {
     apply_canonical_window(&mut WindowMut { inv: &mut window.inv, armour: &mut window.armour, offhand: &mut window.offhand, cursor: &mut window.cursor, grid: &mut window.grid, container: None }, packet, &crate::block::BlockRegistry::new(), uses, debt, mode)
@@ -31,7 +31,7 @@ fn d2c2_canonical_pack_moves_held_body_and_retains_pending_use_body_in_both_mode
         pending.name = "Pending use remains owned across pack fence".into();
         let pending_encoded = bincode::serialize(&pending).unwrap();
         let pending_marker = crate::plan::marker(&pending);
-        history.record(crate::use_edits::UseRecord { cell: [1, 2, 3], kind: 0, slot: 0, cost: Some(Item::Plan(pending)), landed: None, made_at: 1 });
+        history.record(crate::use_edits::UseRecord { cell: [1, 2, 3], kind: 0, slot: 0, cost: Some(Item::Plan(pending)), landed: None, made_at: 1, hand: crate::hands::Hand::Main });
         let mut canonical = empty();
         canonical.cursor = Some(ItemStack { item: Item::Plan(crate::plan::PlanData::marker_placeholder(marker, true)), count: 1 });
         let packet = PackWindow::capture(&canonical, &CorrectionDebt::default(), &crate::block::BlockRegistry::new()).unwrap();

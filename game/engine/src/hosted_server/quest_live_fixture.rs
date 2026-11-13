@@ -135,6 +135,7 @@ impl Rig {
             &self.actor.inventory,
             &self.actor.armour_slots,
             &self.actor.crafting_ui.cursor_item,
+            &None,
             &self.actor.crafting_ui.grid,
             &self.host.server.registry,
         )

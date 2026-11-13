@@ -51,7 +51,7 @@ fn edit(r: &mut Rig, cell: (i32, i32, i32), new: u16, slot: u8, claimed: Option<
         tool: tool.map_or(protocol::WireItem::None, |t| crate::inventory::item_to_wire_full(&Item::Tool(t))),
     });
     let old = (r.hs.server.world.get_block(cell.0, cell.1, cell.2), r.hs.server.world.meta_at(cell.0, cell.1, cell.2));
-    r.send(action, ActionIntent::Edit { source_tick: 0, change, hand: (slot, kind, id), mined, use_tag: None, old });
+    r.send(action, ActionIntent::Edit { source_tick: 0, change, hand: (slot, kind, id, crate::hands::Hand::Main), mined, use_tag: None, old });
     action
 }
 
@@ -309,7 +309,7 @@ fn mined_edit(r: &mut Rig, cell: (i32, i32, i32), claimed: Tool) -> (ActionHeade
     let (kind, id) = crate::inventory::item_to_ref(&Item::Tool(claimed)).to_wire();
     let mined = Some(protocol::MinedBlock { x: cell.0, y: cell.1, z: cell.2, tool: crate::inventory::item_to_wire_full(&Item::Tool(claimed)) });
     let old = (r.hs.server.world.get_block(cell.0, cell.1, cell.2), r.hs.server.world.meta_at(cell.0, cell.1, cell.2));
-    (r.next(), ActionIntent::Edit { source_tick: 0, change, hand: (0, kind, id), mined, use_tag: None, old })
+    (r.next(), ActionIntent::Edit { source_tick: 0, change, hand: (0, kind, id, crate::hands::Hand::Main), mined, use_tag: None, old })
 }
 
 /// C3d run 10 (run-6 review LOW-4) — an `Edit` sent twice under one
@@ -387,7 +387,7 @@ fn c3d_strict_five_edits_in_a_tick_meet_the_budget() {
     for (x, y, z) in cells {
         let action = r.next();
         let change = protocol::BlockChange { x, y, z, new_block: STONE, meta: 0 };
-        let intent = ActionIntent::Edit { source_tick: 0, change, hand: (0, kind, id), mined: None, use_tag: None, old: (r.hs.server.world.get_block(x, y, z), r.hs.server.world.meta_at(x, y, z)) };
+        let intent = ActionIntent::Edit { source_tick: 0, change, hand: (0, kind, id, crate::hands::Hand::Main), mined: None, use_tag: None, old: (r.hs.server.world.get_block(x, y, z), r.hs.server.world.meta_at(x, y, z)) };
         r.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &crate::action_wire::ActionPacket { action, intent }));
         actions.push(action);
     }
@@ -456,7 +456,7 @@ fn crop_claim(r: &mut Rig, seen_meta: u8) -> ActionHeader {
     let change = protocol::BlockChange { x: ABOVE.0, y: ABOVE.1, z: ABOVE.2, new_block: crate::block::DIRT, meta: 0 };
     let mined = Some(protocol::MinedBlock { x: ABOVE.0, y: ABOVE.1, z: ABOVE.2, tool: protocol::WireItem::None });
     let seen = (crate::block::WHEAT_STAGE_3, server_meta.wrapping_add(seen_meta));
-    r.send(action, ActionIntent::Edit { source_tick: 0, change, hand: (0, protocol::item_kind::EMPTY, 0), mined, use_tag: None, old: seen });
+    r.send(action, ActionIntent::Edit { source_tick: 0, change, hand: (0, protocol::item_kind::EMPTY, 0, crate::hands::Hand::Main), mined, use_tag: None, old: seen });
     action
 }
 

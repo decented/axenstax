@@ -56,7 +56,7 @@ fn swing_of(inv: &crate::inventory::Inventory, hot: usize, entity: u32) -> (Pend
     let item = inv.slot(hot).map(|s| s.item.clone());
     let (held_kind, held_id) = item.as_ref().map_or(protocol::ItemRef::Empty.to_wire(), |i| crate::inventory::item_to_ref(i).to_wire());
     let held_full = item.as_ref().map_or(protocol::WireItem::None, crate::inventory::item_to_wire_full);
-    let pending = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: hot, held: item };
+    let pending = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: hot, held: item, hand: crate::hands::Hand::Main };
     let packet = protocol::EntityAttackPacket { seq: 0, entity, held_kind, held_id, held_full, sprint: false, sneak: false, hotbar_slot: hot as u8, events_applied: 0 };
     (pending, packet)
 }
@@ -65,7 +65,7 @@ fn swing_of(inv: &crate::inventory::Inventory, hot: usize, entity: u32) -> (Pend
 /// game loop does.
 pub(super) fn attack(j: &mut Joined, hot: usize, entity: u32) -> ActionHeader {
     let (pending, packet) = swing_of(&j.inv, hot, entity);
-    route_attack(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the attack typed")
+    route_attack(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the attack typed")
 }
 
 pub(super) fn fate(j: &Joined, action: ActionHeader) -> Option<ActionFate> {
@@ -80,7 +80,7 @@ pub(super) fn durability(inv: &crate::inventory::Inventory, slot: usize) -> Opti
 /// blocks ahead of the joiner.
 pub(super) fn rig(tag: &str, items: &[(usize, ItemStack)], cow_blocks: f32) -> (Joined, hecs::Entity, u32, Vec3) {
     let mut j = joined(tag, items, true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
     j.assert_honest("the refill setting");
     let at = ahead(j.sp().player.pos, cow_blocks);
@@ -129,7 +129,7 @@ fn c3d_client_strict_hit_is_served_from_the_server_item() {
 fn c3d_client_strict_attacker_killed_by_the_nostrich_kick_back_conserves_the_worn_sword() {
     let iron = sword(ToolMaterial::Iron);
     let mut j = joined("attack-kick", &[(0, held(iron))], true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
     j.assert_honest("the refill setting");
     let at = ahead(j.sp().player.pos, 1.5);
@@ -249,9 +249,9 @@ fn c3d_client_strict_nine_misses_in_100_ticks_never_tear_down() {
     let before = j.sp().window_events.last_number();
     let start = j.hs.server.tick_counter;
     for n in 1..=9 {
-        let window = j.ui.digest(&j.inv, &j.armour);
+        let window = j.ui.digest(&j.inv, &j.armour, &None);
         let action = attack(&mut j, 0, id);
-        assert_eq!(j.ui.digest(&j.inv, &j.armour), window, "swing {n}: routing predicted nothing");
+        assert_eq!(j.ui.digest(&j.inv, &j.armour, &None), window, "swing {n}: routing predicted nothing");
         // Attack held: a swing every `ATTACK_COOLDOWN` ticks, each answer
         // applied before the next (the run-15 review's own-pet / reach-edge
         // case: nine refusals in about 81 ticks).
@@ -377,7 +377,7 @@ fn c3d_client_mirror_attack_stays_the_legacy_request() {
     let (max, _, _) = cow_state(&j.hs, cow);
     let mut actions = JoinerActions::default();
     let (pending, packet) = swing_of(&j.inv, 0, id);
-    let routed = route_attack(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut actions, pending.clone(), packet.clone()).expect("routed");
+    let routed = route_attack(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut actions, pending.clone(), packet.clone()).expect("routed");
     assert_eq!(routed, None, "Mirror: the legacy request");
     assert_eq!(actions.len(), 0, "Mirror: route_attack records nothing");
     assert!(j.rc.action_journal.as_ref().is_none_or(|journal| journal.len() == 0), "Mirror: nothing reserved");
@@ -524,13 +524,13 @@ fn c3d_strict_no_prediction_guard_trips_on_a_predicted_swing_wear() {
     use crate::strict_requests::NoPrediction;
     let iron = sword(ToolMaterial::Iron);
     let (mut j, _cow, id, _at) = rig("attack-guard", &[(0, held(iron))], 2.0);
-    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, "swing").expect("a Strict seat is guarded");
+    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, &None, "swing").expect("a Strict seat is guarded");
     attack(&mut j, 0, id);
-    assert_eq!(guard.end(&j.ui, &j.inv, &j.armour), Ok(()), "an honest swing predicts nothing");
-    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, "swing").expect("guarded");
+    assert_eq!(guard.end(&j.ui, &j.inv, &j.armour, &None), Ok(()), "an honest swing predicts nothing");
+    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, &None, "swing").expect("guarded");
     attack(&mut j, 0, id);
     j.inv.use_hotbar_tool(0);
-    let error = guard.end(&j.ui, &j.inv, &j.armour).expect_err("a predicted wear trips the guard");
+    let error = guard.end(&j.ui, &j.inv, &j.armour, &None).expect_err("a predicted wear trips the guard");
     assert!(error.contains("Strict swing changed the joined window"), "{error}");
 }
 

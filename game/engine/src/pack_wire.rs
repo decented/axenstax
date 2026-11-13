@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn d2c2_pack_result_carries_exact_window_debt_and_marker_view_without_a_plan_body() {
         let registry = crate::block::BlockRegistry::new();
-        let mut window = EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        let mut window = EffectiveWindow { inv: crate::inventory::Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default(), offhand: None };
         window.inv.set_slot(3, Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Bread, 2)));
         window.inv.toggle_lock(3);
         let debt = crate::container_window::CorrectionDebt::from_entries(vec![(crate::item::Item::Block(crate::block::STONE), 4)]).unwrap();

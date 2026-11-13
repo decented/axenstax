@@ -21,7 +21,7 @@ fn exact_debt(debt: &crate::container_window::CorrectionDebt, registry: &crate::
 
 /// Actual raw places, without global Strict's debt/history requirements.
 pub fn pack_raw_marker(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Result<MarkerWindow, PackStageError> {
-    MarkerWindow::try_capture_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, registry).ok_or(PackStageError::Unrepresentable)
+    MarkerWindow::try_capture_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, registry).ok_or(PackStageError::Unrepresentable)
 }
 
 fn holding_event<'a>(event: &'a WindowEvent, registry: &crate::block::BlockRegistry) -> Result<Cow<'a, WindowEvent>, PackStageError> {
@@ -84,7 +84,7 @@ fn slot_effects(before: &MarkerSlots, after: &MarkerSlots) -> Vec<(usize, crate:
 fn fold(window: &mut MarkerWindow, debt: &mut crate::container_window::CorrectionDebt, event: &WindowEvent) -> (Effect, Vec<(usize, crate::protocol::WireSlot, crate::protocol::WireSlot)>) {
     let before = window.slots();
     let view = window.view();
-    let effect = apply_to(&mut Parts { inv: view.inv, armour: view.armour, cursor: view.cursor, grid: view.grid }, debt, event);
+    let effect = apply_to(&mut Parts { inv: view.inv, armour: view.armour, offhand: view.offhand, cursor: view.cursor, grid: view.grid }, debt, event);
     (effect, slot_effects(&before, &window.slots()))
 }
 
@@ -128,7 +128,7 @@ pub fn pack_canonical_window(sp: &ServerPlayer, registry: &crate::block::BlockRe
                 let prefs = window.view().inv;
                 let refill = prefs.auto_refill;
                 let locks = prefs.locked_indices();
-                window = MarkerWindow::try_capture_parts(&replaced.inv, &replaced.armour, &replaced.cursor, &replaced.grid, registry).ok_or(PackStageError::Unrepresentable)?;
+                window = MarkerWindow::try_capture_parts(&replaced.inv, &replaced.armour, &replaced.offhand, &replaced.cursor, &replaced.grid, registry).ok_or(PackStageError::Unrepresentable)?;
                 let prefs = window.view().inv;
                 prefs.auto_refill = refill;
                 if sp.inventory_mode == crate::action_identity::InventoryMode::Mirror { prefs.set_locked_from(&locks); }

@@ -31,7 +31,7 @@ fn shot_of(inv: &crate::inventory::Inventory, hot: usize) -> (Pending, protocol:
         weapon, hotbar_slot: hot as u8, held_kind, held_id, held_full: crate::inventory::item_to_wire_full(&item),
         yaw: 0.0, pitch: 0.0, charge: crate::shot::max_charge(weapon),
     };
-    let pending = Pending { kind: Asked::Shoot { weapon, material: tool.material }, mob: None, hotbar_slot: hot, held: Some(Item::Material(crate::shot::ammo_for(weapon))) };
+    let pending = Pending { kind: Asked::Shoot { weapon, material: tool.material }, mob: None, hotbar_slot: hot, held: Some(Item::Material(crate::shot::ammo_for(weapon))), hand: crate::hands::Hand::Main };
     (pending, action)
 }
 
@@ -44,7 +44,7 @@ fn send_legacy(rc: &mut RemoteClient, actions: &mut JoinerActions, pending: Pend
 /// Shoot from hotbar `hot` on the Strict rig, routed as the game loop does.
 pub(super) fn shoot(j: &mut Joined, hot: usize) -> Option<ActionHeader> {
     let (pending, action) = shot_of(&j.inv, hot);
-    match route_shot(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut j.actions, pending.clone(), &action).expect("routed") {
+    match route_shot(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut j.actions, pending.clone(), &action).expect("routed") {
         ShotRoute::Typed(header) => Some(header),
         ShotRoute::Legacy => { send_legacy(&mut j.rc, &mut j.actions, pending, action); None }
         ShotRoute::Unaffordable => panic!("the ammo is there"),
@@ -126,7 +126,7 @@ fn c3d_client_strict_shot_without_server_ammo_is_corrected() {
     let mut j = joined("shot-refused", &[(0, ItemStack { item: Item::Tool(bow()), count: 1 }), (1, arrows(8))], true);
     // The session's refill setting goes first, on agreeing windows (its own
     // refusal is corrected and resent since run 14: `c3d_s1_refused_auto_refill_setting_is_corrected_then_resent`).
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.assert_honest("the refill setting");
     j.hs.server.players[j.i].inventory.set_slot(1, None);
     let before = j.sp().window_events.last_number();
@@ -156,7 +156,7 @@ fn c3d_client_mirror_shot_stays_the_legacy_request() {
     j.pumps(3);
     let mut actions = JoinerActions::default();
     let (pending, action) = shot_of(&j.inv, 0);
-    let routed = route_shot(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut actions, pending.clone(), &action).expect("routed");
+    let routed = route_shot(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut actions, pending.clone(), &action).expect("routed");
     assert_eq!(routed, ShotRoute::Legacy, "Mirror: the legacy request");
     assert_eq!(actions.len(), 0, "Mirror: route_shot records nothing");
     assert!(j.rc.action_journal.as_ref().is_none_or(|journal| journal.len() == 0), "Mirror: nothing reserved");
@@ -177,7 +177,7 @@ fn c3d_client_mirror_shot_stays_the_legacy_request() {
 #[test]
 fn c3d_client_strict_shot_on_a_raw_unrepresentable_window_is_refused_then_torn_down() {
     let mut j = joined("shot-raw", &[(0, ItemStack { item: Item::Tool(bow()), count: 1 }), (1, arrows(8))], true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.pump();
     j.assert_honest("the refill setting");
     let mut tool = Tool::new(ToolType::Pickaxe, ToolMaterial::Stone);
@@ -202,7 +202,7 @@ fn c3d_client_strict_shot_on_a_raw_unrepresentable_window_is_refused_then_torn_d
 #[test]
 fn c3d_client_strict_early_shot_is_refused_uncorrected() {
     let mut j = joined("shot-early", &[(0, ItemStack { item: Item::Tool(bow()), count: 1 }), (1, arrows(8))], true);
-    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour, &None).expect("reserved and sent");
     j.assert_honest("the refill setting");
     let before = j.sp().window_events.last_number();
     let first = shoot(&mut j, 0).expect("typed");
@@ -229,10 +229,10 @@ fn c3d_client_strict_early_shot_is_refused_uncorrected() {
 fn c3d_strict_no_prediction_guard_trips_on_a_predicted_shot() {
     use crate::strict_requests::NoPrediction;
     let mut j = joined("shot-guard", &[(0, ItemStack { item: Item::Tool(bow()), count: 1 }), (1, arrows(8))], true);
-    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, "shot").expect("a Strict seat is guarded");
+    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, &None, "shot").expect("a Strict seat is guarded");
     shoot(&mut j, 0).expect("typed");
-    assert_eq!(guard.end(&j.ui, &j.inv, &j.armour), Ok(()), "an honest shot predicts nothing");
-    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, "shot").expect("guarded");
+    assert_eq!(guard.end(&j.ui, &j.inv, &j.armour, &None), Ok(()), "an honest shot predicts nothing");
+    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, &None, "shot").expect("guarded");
     j.inv.set_slot(1, Some(arrows(7)));
-    assert!(guard.end(&j.ui, &j.inv, &j.armour).is_err(), "a predicted ammo take trips the guard");
+    assert!(guard.end(&j.ui, &j.inv, &j.armour, &None).is_err(), "a predicted ammo take trips the guard");
 }

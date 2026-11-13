@@ -927,12 +927,13 @@ pub fn undo_refused(
     uses: &mut SentUses,
     inv: &mut Inventory,
     ui: &mut crate::craft_ui::CraftingUi,
+    offhand: &mut Option<ItemStack>,
     refused: &[crate::protocol::RefusedUse],
 ) -> Vec<(crate::protocol::RefusedUse, Option<Undone>)> {
     refused
         .iter()
         .rev()
-        .map(|r| (*r, uses.take([r.x, r.y, r.z], r.kind).map(|rec| undo(inv, ui, &mut uses.parked, &rec))))
+        .map(|r| (*r, uses.take([r.x, r.y, r.z], r.kind).map(|rec| undo(inv, ui, offhand, &mut uses.parked, &rec))))
         .collect()
 }
 
@@ -1014,17 +1015,17 @@ mod tests {
     #[test]
     fn a_tag_carries_what_the_use_spends_and_wears() {
         let meal = mat(MaterialId::Bonemeal);
-        let t = tag(UseKind::GrowCrop, [1, 2, 3], 4, Some(&meal));
+        let t = tag(UseKind::GrowCrop, [1, 2, 3], 4, crate::hands::Hand::Main, Some(&meal));
         assert_eq!((t.x, t.y, t.z, t.kind, t.slot), (1, 2, 3, 5, 4));
         let used = t.used.expect("one bone meal");
         assert_eq!(used.count, 1);
         assert_eq!(t.tool, WireItem::None);
         let mut hoe = Tool::new(ToolType::Hoe, ToolMaterial::Stone);
         hoe.durability -= 3;
-        let t = tag(UseKind::Till, [0, 0, 0], 2, Some(&Item::Tool(hoe)));
+        let t = tag(UseKind::Till, [0, 0, 0], 2, crate::hands::Hand::Main, Some(&Item::Tool(hoe)));
         assert_eq!(t.used, None, "a hoe consumes nothing");
         assert_eq!(t.tool, crate::inventory::item_to_wire_full(&Item::Tool(hoe)));
-        let t = tag(UseKind::TapRubber, [0, 0, 0], 0, Some(&mat(MaterialId::Bucket)));
+        let t = tag(UseKind::TapRubber, [0, 0, 0], 0, crate::hands::Hand::Main, Some(&mat(MaterialId::Bucket)));
         assert_eq!((t.used, t.tool), (None, WireItem::None), "a tap keeps its bucket");
     }
 
@@ -1096,7 +1097,7 @@ mod tests {
         client.set_slot(1, Some(ItemStack::new_material(MaterialId::Bucket, 3)));
         let mut copy = client.clone();
         let held = client.hotbar_slot(1).map(|s| s.item.clone());
-        let t = tag(UseKind::BucketFill, [0, 70, 0], 1, held.as_ref());
+        let t = tag(UseKind::BucketFill, [0, 70, 0], 1, crate::hands::Hand::Main, held.as_ref());
         // The client's fill (`fill_bucket_at`).
         assert!(client.consume_one_material(1, MaterialId::Bucket));
         assert!(client.add_item(ItemStack::new_material(MaterialId::WaterBucket, 1)).is_none());
@@ -1104,7 +1105,7 @@ mod tests {
             .map(|s| s.item);
         let w = World::new();
         let j = judge(UseKind::BucketFill, used.as_ref(), &bc(0, 70, 0, block::AIR), before(block::WATER), &w);
-        let s = settle(&mut copy, UseKind::BucketFill, &t, used.as_ref(), &j);
+        let s = settle(&mut copy, &mut None, UseKind::BucketFill, &t, used.as_ref(), &j);
         assert_eq!((s.miss, s.copy_overflow, s.unfit), (None, 0, None));
         for k in 0..36 {
             assert_eq!(copy.slot(k), client.slot(k), "slot {k}");
@@ -1117,7 +1118,7 @@ mod tests {
     fn the_mirror_never_makes_an_item_from_nothing() {
         let w = World::new();
         let bucket = mat(MaterialId::Bucket);
-        let t = tag(UseKind::BucketFill, [0, 70, 0], 0, Some(&bucket));
+        let t = tag(UseKind::BucketFill, [0, 70, 0], 0, crate::hands::Hand::Main, Some(&bucket));
         let mut inv = Inventory::new();
         inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
         let stone = judge(UseKind::BucketFill, Some(&bucket), &bc(0, 70, 0, block::AIR), before(block::STONE), &w);
@@ -1125,11 +1126,11 @@ mod tests {
         // (the client saw water there), but which bucket it filled isn't on
         // the tag: the cost is mirrored, no product.
         assert_eq!(stone.verdict, Verdict::Drift);
-        let s = settle(&mut inv, UseKind::BucketFill, &t, Some(&bucket), &stone);
+        let s = settle(&mut inv, &mut None, UseKind::BucketFill, &t, Some(&bucket), &stone);
         assert_eq!(s.miss, Some(UseMiss::Drift));
         assert!(inv.slots_iter().all(|s| s.is_none()), "the bucket is spent, nothing made");
         let water = judge(UseKind::BucketFill, Some(&bucket), &bc(0, 70, 0, block::AIR), before(block::WATER), &w);
-        let s = settle(&mut inv, UseKind::BucketFill, &t, Some(&bucket), &water);
+        let s = settle(&mut inv, &mut None, UseKind::BucketFill, &t, Some(&bucket), &water);
         assert_eq!(s.miss, Some(UseMiss::NothingToTake));
         assert!(inv.slots_iter().all(|s| s.is_none()), "no bucket to fill: no water bucket");
     }
@@ -1142,10 +1143,10 @@ mod tests {
         let eraser = Item::Tool(Tool::new(ToolType::Eraser, ToolMaterial::Wood));
         let mut inv = Inventory::new();
         inv.set_slot(3, Some(ItemStack { item: eraser.clone(), count: 1 }));
-        let t = tag(UseKind::Erase, [0, 70, 0], 3, Some(&eraser));
+        let t = tag(UseKind::Erase, [0, 70, 0], 3, crate::hands::Hand::Main, Some(&eraser));
         let j = judge(UseKind::Erase, None, &bc(0, 70, 0, block::AIR), before(block::BLUEPRINT_PAPER), &w);
         assert!(j.legal());
-        let s = settle(&mut inv, UseKind::Erase, &t, None, &j);
+        let s = settle(&mut inv, &mut None, UseKind::Erase, &t, None, &j);
         assert_eq!(s.miss, None);
         let worn = match inv.slot(3).map(|s| &s.item) {
             Some(Item::Tool(t)) => t.durability,
@@ -1154,7 +1155,7 @@ mod tests {
         assert_eq!(worn + 1, Tool::new(ToolType::Eraser, ToolMaterial::Wood).durability);
         assert_eq!(inv.slot(0), Some(&ItemStack::new_material(MaterialId::PapyrusSheet, 1)));
         // From the wrong slot: no wear, no sheet.
-        let s = settle(&mut inv, UseKind::Erase, &tag(UseKind::Erase, [0, 70, 0], 5, Some(&eraser)), None, &j);
+        let s = settle(&mut inv, &mut None, UseKind::Erase, &tag(UseKind::Erase, [0, 70, 0], 5, crate::hands::Hand::Main, Some(&eraser)), None, &j);
         assert_eq!(s.miss, Some(UseMiss::NoTool));
         assert_eq!(inv.slot(0).map(|s| s.count), Some(1));
     }
@@ -1171,11 +1172,11 @@ mod tests {
         assert!(!judge(UseKind::TapRubber, None, &tap, before(block::RUBBER_LOG_TAPPED), &World::new()).legal());
         let mut inv = Inventory::new();
         let j = judge(UseKind::TapRubber, None, &tap, before(block::RUBBER_LOG), &World::new());
-        let t = tag(UseKind::TapRubber, [4, 70, 4], 0, Some(&mat(MaterialId::Bucket)));
-        assert_eq!(settle(&mut inv, UseKind::TapRubber, &t, None, &j).miss, Some(UseMiss::NothingToTake));
+        let t = tag(UseKind::TapRubber, [4, 70, 4], 0, crate::hands::Hand::Main, Some(&mat(MaterialId::Bucket)));
+        assert_eq!(settle(&mut inv, &mut None, UseKind::TapRubber, &t, None, &j).miss, Some(UseMiss::NothingToTake));
         assert!(inv.slots_iter().all(|s| s.is_none()));
         inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
-        assert_eq!(settle(&mut inv, UseKind::TapRubber, &t, None, &j).miss, None);
+        assert_eq!(settle(&mut inv, &mut None, UseKind::TapRubber, &t, None, &j).miss, None);
         assert_eq!(inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)), "the bucket is kept");
         assert_eq!(inv.slot(1), Some(&ItemStack::new_material(MaterialId::Rubber, 1)));
     }
@@ -1303,9 +1304,9 @@ mod tests {
         let bucket = mat(MaterialId::Bucket);
         let mut inv = Inventory::new();
         inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
-        let t = tag(UseKind::BucketFill, [0, 70, 0], 0, Some(&bucket));
+        let t = tag(UseKind::BucketFill, [0, 70, 0], 0, crate::hands::Hand::Main, Some(&bucket));
         let j = judge(UseKind::BucketFill, Some(&bucket), &bc(0, 70, 0, block::AIR), Before { old: block::LAVA, source: false }, &w);
-        let s = settle(&mut inv, UseKind::BucketFill, &t, Some(&bucket), &j);
+        let s = settle(&mut inv, &mut None, UseKind::BucketFill, &t, Some(&bucket), &j);
         assert_eq!(s.miss, Some(UseMiss::Drift));
         assert_eq!(inv.slot(0).map(|s| s.count), Some(1));
         assert_eq!(inv.slot(1), Some(&ItemStack::new_material(MaterialId::LavaBucket, 1)));
@@ -1325,27 +1326,27 @@ mod tests {
         let bucket = mat(MaterialId::Bucket);
         let fill = bc(0, 70, 0, block::AIR);
         let j = judge(UseKind::BucketFill, Some(&bucket), &fill, before(block::WATER), &w);
-        let mut t = tag(UseKind::BucketFill, [0, 70, 0], 0, Some(&bucket));
+        let mut t = tag(UseKind::BucketFill, [0, 70, 0], 0, crate::hands::Hand::Main, Some(&bucket));
         t.unfit = 1;
         let water = ItemStack::new_material(MaterialId::WaterBucket, 1);
         // A full copy that holds the buckets: corroborated, nothing added.
         let mut full = Inventory::new();
         full.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
         full_of_stone(&mut full, 1);
-        let s = settle(&mut full, UseKind::BucketFill, &t, Some(&bucket), &j);
+        let s = settle(&mut full, &mut None, UseKind::BucketFill, &t, Some(&bucket), &j);
         assert_eq!(s.unfit, Some(Unfit { stack: water.clone(), corroborated: true }));
         assert_eq!((s.miss, s.copy_overflow), (None, 0));
         assert_eq!(full.slot(0).map(|s| s.count), Some(1));
         // An EMPTY copy (empty at attach): it can't pay, so it can't say the
         // bag was full: believed.
         let mut empty = Inventory::new();
-        let s = settle(&mut empty, UseKind::BucketFill, &t, Some(&bucket), &j);
+        let s = settle(&mut empty, &mut None, UseKind::BucketFill, &t, Some(&bucket), &j);
         assert_eq!(s.unfit, Some(Unfit { stack: water.clone(), corroborated: false }));
         assert!(empty.slots_iter().all(|s| s.is_none()), "nothing added");
         // A copy with room: believed.
         let mut roomy = Inventory::new();
         roomy.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
-        let s = settle(&mut roomy, UseKind::BucketFill, &t, Some(&bucket), &j);
+        let s = settle(&mut roomy, &mut None, UseKind::BucketFill, &t, Some(&bucket), &j);
         assert_eq!(s.unfit, Some(Unfit { stack: water, corroborated: false }));
         assert!(roomy.slots_iter().flatten().all(|s| s.item == bucket), "the unfit part never lands on the copy");
         // A copy FULLER than the client (unfit 0): its overflow is counted,
@@ -1354,16 +1355,16 @@ mod tests {
         let mut fuller = Inventory::new();
         fuller.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
         full_of_stone(&mut fuller, 1);
-        let s = settle(&mut fuller, UseKind::BucketFill, &t, Some(&bucket), &j);
+        let s = settle(&mut fuller, &mut None, UseKind::BucketFill, &t, Some(&bucket), &j);
         assert_eq!((s.copy_overflow, s.unfit), (1, None));
         // A use that makes nothing has no unfit part, whatever the tag says.
         let meal = mat(MaterialId::Bonemeal);
-        let mut g = tag(UseKind::GrowCrop, [0, 70, 0], 0, Some(&meal));
+        let mut g = tag(UseKind::GrowCrop, [0, 70, 0], 0, crate::hands::Hand::Main, Some(&meal));
         g.unfit = 1;
         let mut inv = Inventory::new();
         inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bonemeal, 2)));
         let gj = judge(UseKind::GrowCrop, Some(&meal), &bc(0, 70, 0, block::WHEAT_STAGE_1), before(block::WHEAT_STAGE_0), &w);
-        assert_eq!(settle(&mut inv, UseKind::GrowCrop, &g, Some(&meal), &gj).unfit, None);
+        assert_eq!(settle(&mut inv, &mut None, UseKind::GrowCrop, &g, Some(&meal), &gj).unfit, None);
     }
 
     fn record(cell: [i32; 3], kind: UseKind, made_at: u64) -> UseRecord {
@@ -1421,7 +1422,7 @@ mod tests {
             landed: Some(ItemStack::new_material(MaterialId::LavaBucket, 1)),
             made_at: 1,
         };
-        assert_eq!(undo(&mut inv, &mut ui, &mut Vec::new(), &rec), Undone::default());
+        assert_eq!(undo(&mut inv, &mut ui, &mut None, &mut Vec::new(), &rec), Undone::default());
         for k in 0..36 {
             assert_eq!(inv.slot(k), before_use.slot(k), "slot {k}");
         }
@@ -1432,7 +1433,7 @@ mod tests {
         // never above it).
         let mut gone = Inventory::new();
         gone.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
-        assert_eq!(undo(&mut gone, &mut ui, &mut Vec::new(), &rec), Undone { short: 1, ..Default::default() });
+        assert_eq!(undo(&mut gone, &mut ui, &mut None, &mut Vec::new(), &rec), Undone { short: 1, ..Default::default() });
         assert_eq!(gone.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)), "one bucket, not two");
         assert!(gone.slots_iter().skip(1).all(|s| s.is_none()));
         // A tap's rubber is taken back, the kept bucket untouched.
@@ -1445,7 +1446,7 @@ mod tests {
         let mut inv = Inventory::new();
         inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
         inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Rubber, 1)));
-        assert_eq!(undo(&mut inv, &mut ui, &mut Vec::new(), &tap), Undone::default());
+        assert_eq!(undo(&mut inv, &mut ui, &mut None, &mut Vec::new(), &tap), Undone::default());
         assert_eq!(inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)));
         assert!(inv.slot(1).is_none());
     }
@@ -1476,7 +1477,7 @@ mod tests {
         // The cursor is empty: the Plan rides it.
         let (mut inv, mut ui, mut uses) = (full(), crate::craft_ui::CraftingUi::new(), SentUses::default());
         uses.record(rec.clone());
-        let out = undo_refused(&mut uses, &mut inv, &mut ui, &[notice]);
+        let out = undo_refused(&mut uses, &mut inv, &mut ui, &mut None, &[notice]);
         assert_eq!(out[0].1, Some(Undone { parked: 1, ..Default::default() }), "not lost");
         assert_eq!(ui.cursor_item, Some(ItemStack { item: Item::Plan(plan.clone()), count: 1 }));
         assert_eq!(uses.parked_len(), 0);
@@ -1484,7 +1485,7 @@ mod tests {
         let (mut inv, mut ui, mut uses) = (full(), crate::craft_ui::CraftingUi::new(), SentUses::default());
         ui.cursor_item = Some(ItemStack::new_block(block::DIRT, 3));
         uses.record(rec);
-        let out = undo_refused(&mut uses, &mut inv, &mut ui, &[notice]);
+        let out = undo_refused(&mut uses, &mut inv, &mut ui, &mut None, &[notice]);
         assert_eq!(out[0].1, Some(Undone { parked: 1, ..Default::default() }));
         assert_eq!(uses.parked_len(), 1);
         assert_eq!(uses.reseat_parked(&mut inv), 0, "no room yet");
@@ -1507,7 +1508,7 @@ mod tests {
         use crate::plan::{marker, DevelopState, PlanData};
         let developed = PlanData::debug_3x3_stone();
         let latent = PlanData { develop_state: DevelopState::Latent { exposure_ticks: 0 }, ..developed.clone() };
-        let t = tag(UseKind::HangPrint, [5, 71, 5], 2, Some(&Item::Plan(developed.clone())));
+        let t = tag(UseKind::HangPrint, [5, 71, 5], 2, crate::hands::Hand::Main, Some(&Item::Plan(developed.clone())));
         assert_eq!(t.kind, 11);
         let used = crate::inventory::stack_from_wire(t.used.as_ref().expect("the Plan"), &crate::block::BlockRegistry::new(), crate::inventory::PlanDecode::Marker)
             .map(|s| s.item);
@@ -1532,11 +1533,11 @@ mod tests {
         let mut copy = Inventory::new();
         copy.set_slot(2, Some(ItemStack { item: latent_used.clone(), count: 1 }));
         copy.set_slot(20, Some(ItemStack { item: Item::Plan(PlanData::marker_placeholder(m, true)), count: 1 }));
-        let s = settle(&mut copy, UseKind::HangPrint, &t, used.as_ref(), &j);
+        let s = settle(&mut copy, &mut None, UseKind::HangPrint, &t, used.as_ref(), &j);
         assert_eq!((s.miss, s.copy_overflow, s.unfit), (None, 0, None));
         assert!(copy.slot(20).is_none(), "the hung Plan went");
         assert_eq!(copy.slot(2).map(|s| s.item.clone()), Some(latent_used), "the other stayed");
-        let s = settle(&mut copy, UseKind::HangPrint, &t, used.as_ref(), &j);
+        let s = settle(&mut copy, &mut None, UseKind::HangPrint, &t, used.as_ref(), &j);
         assert_eq!(s.miss, Some(UseMiss::NothingToTake), "no second one to hang");
         assert_eq!(t.unfit, 0, "a hang makes nothing, so nothing is unfit");
     }
@@ -1577,7 +1578,7 @@ mod tests {
             made_at: 1,
         });
         let notice = |c: [i32; 3], k: UseKind| crate::protocol::RefusedUse { x: c[0], y: c[1], z: c[2], kind: k.to_wire(), note: 0 };
-        let undone = undo_refused(&mut uses, &mut inv, &mut ui, &[notice(pond, UseKind::BucketFill), notice(edge, UseKind::BucketEmpty)]);
+        let undone = undo_refused(&mut uses, &mut inv, &mut ui, &mut None, &[notice(pond, UseKind::BucketFill), notice(edge, UseKind::BucketEmpty)]);
         assert_eq!(undone.len(), 2);
         assert_eq!(undone[0].0.kind, UseKind::BucketEmpty.to_wire(), "the newest first");
         assert!(undone.iter().all(|(_, u)| *u == Some(Undone::default())), "{undone:?}");
@@ -1599,7 +1600,7 @@ mod tests {
             let before = (inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>(), ui.grid.clone(), ui.cursor_item.clone());
             let record = UseRecord { hand: crate::hands::Hand::Main, cell: [0, 70, 0], kind: UseKind::BucketFill.to_wire(), slot: 0,
                 cost: Some(mat(MaterialId::Bucket)), landed: Some(ItemStack::new_material(MaterialId::LavaBucket, 2)), made_at: 1 };
-            let out = undo(&mut inv, &mut ui, &mut Vec::new(), &record);
+            let out = undo(&mut inv, &mut ui, &mut None, &mut Vec::new(), &record);
             assert_eq!(out.short, 1);
             assert_eq!((inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>(), ui.grid.clone(), ui.cursor_item.clone()), before,
                 "a partial product take cannot consume a real holding or return the cost");
@@ -1617,11 +1618,11 @@ mod tests {
         uses.record(UseRecord { hand: crate::hands::Hand::Main, cell: [1, 70, 0], kind: UseKind::BucketEmpty.to_wire(), slot: 0,
             cost: Some(mat(MaterialId::LavaBucket)), landed: Some(ItemStack::new_material(MaterialId::Bucket, 1)), made_at: 2 });
         let notice = |x, kind: UseKind| crate::protocol::RefusedUse { x, y: 70, z: 0, kind: kind.to_wire(), note: 0 };
-        undo_refused(&mut uses, &mut inv, &mut ui, &[notice(0, UseKind::BucketFill)]);
-        undo_refused(&mut uses, &mut inv, &mut ui, &[notice(1, UseKind::BucketEmpty)]);
+        undo_refused(&mut uses, &mut inv, &mut ui, &mut None, &[notice(0, UseKind::BucketFill)]);
+        undo_refused(&mut uses, &mut inv, &mut ui, &mut None, &[notice(1, UseKind::BucketEmpty)]);
         assert_eq!(inv.slot(0).unwrap().item, mat(MaterialId::LavaBucket), "the real descendant cost survives");
         assert_eq!(inv.slot(0).unwrap().count, 1);
-        undo_refused(&mut uses, &mut inv, &mut ui, &[notice(0, UseKind::BucketFill)]);
+        undo_refused(&mut uses, &mut inv, &mut ui, &mut None, &[notice(0, UseKind::BucketFill)]);
         assert_eq!(inv.slot(0).unwrap().item, mat(MaterialId::LavaBucket), "a terminal short record cannot revive");
     }
 

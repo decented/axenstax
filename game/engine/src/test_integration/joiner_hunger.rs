@@ -684,7 +684,7 @@ fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_
     let mut ui = crate::craft_ui::CraftingUi::new(); // C2b: the holdings' grid and cursor, empty
     let mut ja = JoinerActions::default();
     let next_input = 1_u64; // the first input of the session
-    let ask = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread()) };
+    let ask = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread()), hand: crate::hands::Hand::Main };
     assert!(ja.can_afford(&inv, &ui, &None, Asked::Eat, Some(&bread())));
     let seq = ja.record(ask, next_input);
     assert_eq!(rig.eat(&bread()), seq, "the request goes out under the seq it was recorded with");
@@ -730,7 +730,7 @@ fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_
         match (arrived, outcome) {
             (Arrived::Outcome { seq }, Some(o)) => {
                 let pending = ja.take(*seq).expect("still waiting for it");
-                assert_eq!(apply_item_outcome(&mut inv, &mut ui, &pending, o), 1);
+                assert_eq!(apply_item_outcome(&mut inv, &mut ui, &mut None, &pending, o), 1);
                 paid_before_ack = true;
             }
             (Arrived::State { acked }, _) => {
