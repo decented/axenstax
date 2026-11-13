@@ -188,17 +188,17 @@ fn parts(tool: ToolType, material: ToolMaterial) -> Vec<Part> {
         ],
         // A long blade, a crossguard and a grip.
         ToolType::Sword => vec![
-            part(0.0, -0.245, 0.07, 0.12, 0.07, 0.0, grip()),
-            part(0.0, -0.31, 0.11, 0.04, 0.11, 0.0, steel),
-            part(0.0, -0.165, 0.30, 0.05, 0.09, 0.0, steel),
-            part(0.0, 0.065, 0.10, 0.42, 0.045, 0.0, head),
-            part(0.0, 0.30, 0.06, 0.06, 0.04, 0.0, head),
+            part(0.0, -0.17, 0.07, 0.12, 0.07, 0.0, grip()),
+            part(0.0, -0.24, 0.11, 0.04, 0.11, 0.0, steel),
+            part(0.0, -0.09, 0.30, 0.05, 0.09, 0.0, steel),
+            part(0.0, 0.125, 0.13, 0.38, 0.045, 0.0, head),
+            part(0.0, 0.33, 0.08, 0.06, 0.04, 0.0, head),
         ],
         // A broad flat blade on a long shaft with a T grip.
         ToolType::Shovel => vec![
             part(0.0, -0.06, 0.06, 0.50, 0.06, 0.0, grip()),
             part(0.0, -0.31, 0.15, 0.04, 0.06, 0.0, grip()),
-            part(0.0, 0.20, 0.19, 0.22, 0.05, 0.0, head),
+            part(0.0, 0.20, 0.16, 0.24, 0.05, 0.0, head),
             part(0.0, 0.325, 0.11, 0.05, 0.05, 0.0, head),
         ],
         // A thin head reaching out to one side, with a short blade turned down.
