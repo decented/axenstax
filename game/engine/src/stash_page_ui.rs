@@ -37,6 +37,10 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &mut MenuState, m: &Metrics, keys: 
         if let Some(def) = official(ui, m, &icons, keys) {
             action = MenuAction::PlayScenario { def: Box::new(def) };
         }
+        // The other games from the same makers: native only (the web taster
+        // carries no external links).
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::more_games_ui::section(ui, m);
         #[cfg(target_arch = "wasm32")]
         look_up(ui, state, m, &mut action);
         ui.add_space(m.px(GAP));

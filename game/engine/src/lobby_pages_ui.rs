@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn play_together_has_its_sections_and_more_to_play_its_two_games() {
+    fn play_together_has_its_sections_and_more_to_play_its_official_games_and_the_other_makers_games() {
         let names = |page: LobbyPage| {
             let (out, _) = draw_page(page, 1920.0, 1080.0, true);
             texts_with_size(&out).into_iter().map(|(t, _, _)| t).collect::<Vec<_>>()
@@ -253,6 +253,83 @@ mod tests {
         }
         // Look up a creator is web only.
         assert!(!more.iter().any(|t| t.contains("Look up")), "{more:?}");
+        // The other makers' games are native only: the web taster has no
+        // external links (this test runs native, so it expects the section).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            for want in [
+                "More games",
+                "From the people who make Axe'n'Stax. Android phones and tablets.",
+                "Stampede",
+                "Twang Thang",
+                "Cluster Flock",
+                "Android",
+                "See it",
+            ] {
+                assert!(more.iter().any(|t| t == want), "no {want:?} on More to play: {more:?}");
+            }
+            // The tile's own lead is unchanged.
+            assert_eq!(crate::worlds_ui::words::MORE_TO_PLAY_LEAD, "Official games and things people share");
+            // Three "See it" pills, one per game.
+            assert_eq!(more.iter().filter(|t| *t == "See it").count(), 3, "{more:?}");
+        }
+        #[cfg(target_arch = "wasm32")]
+        assert!(!more.iter().any(|t| t == "More games" || t == "See it" || t == "Cluster Flock"), "{more:?}");
+    }
+
+    /// Press a card on the page and collect the links the frame asks the host to open.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn press_and_collect_links(w: f32, h: f32, name: &str) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut state = MenuState::new();
+        crate::fixture_together(&mut state);
+        state.go(LobbyPage::Stash);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+        let run = |ctx: &egui::Context, state: &mut MenuState, events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            ctx.run(input, |ctx| {
+                let _ = crate::menu::draw_main_menu(ctx, state);
+            })
+        };
+        let mut out = Default::default();
+        for _ in 0..4 {
+            out = run(&ctx, &mut state, vec![]);
+        }
+        let at = texts_with_size(&out)
+            .into_iter()
+            .find(|(t, _, _)| t == name)
+            .unwrap_or_else(|| panic!("no {name:?} on the page"))
+            .1
+            .center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        run(&ctx, &mut state, vec![egui::Event::PointerMoved(at)]);
+        run(&ctx, &mut state, vec![button(true)]);
+        let out = run(&ctx, &mut state, vec![button(false)]);
+        out.platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pressing_a_more_games_card_opens_the_website_page_at_that_game_and_nothing_else() {
+        for (name, anchor) in [("Stampede", "stampede"), ("Twang Thang", "twang-thang"), ("Cluster Flock", "cluster-flock")] {
+            // Wide (two across) and phone width (one across); tall, so every card is on screen.
+            for (w, h) in [(1920.0, 2400.0), (390.0, 2400.0)] {
+                let links = press_and_collect_links(w, h, name);
+                assert_eq!(links, [format!("https://axenstax.com/more-games#{anchor}")], "{name} at {w}x{h}");
+            }
+        }
     }
 
     #[test]

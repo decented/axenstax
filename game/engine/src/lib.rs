@@ -410,6 +410,10 @@ mod world_picture;
 mod lobby_pages_ui;
 mod play_together_ui;
 mod stash_page_ui;
+#[cfg(not(target_arch = "wasm32"))]
+mod more_games;
+#[cfg(not(target_arch = "wasm32"))]
+mod more_games_ui;
 mod trials_island_layout;
 mod trials_unlock;
 mod ravine_gen;
