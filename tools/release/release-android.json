@@ -1,7 +1,7 @@
 {
   "channel": "axenstax-android-apk",
   "package": "com.axenstax.game",
-  "expected_cert_sha256": "3028ea4442a52c66e7af787fb3074969484a14da552d59c1da8f684e8aad2ba3",
+  "expected_cert_sha256": "d27f95670c4c69720dc4b679b82cc54b0ad62b0e34b68a917a1e72ae88a1c642",
   "release_pubkey": "ca43e7218d03a50e20b07f54fad58a7cf4ef9ac1a883e3a0104255a46600e502",
   "key_file_env": "AXENSTAX_RELEASE_KEY_FILE",
   "key_file": "~/.axenstax-release/release-key.hex",

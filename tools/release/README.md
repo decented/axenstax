@@ -212,11 +212,13 @@ from the AppImage channel above because the catalogue requires `version_code` an
   `tools/publish-release.mjs`, pinned to revision `1c16b3e` and run through
   `publish-android.sh` (it refuses a kit checkout at another revision or with local
   changes). Needs `npm ci` once in the kit's `tools/`.
-- `expected_cert_sha256` pins the certificate the APK is signed with. It is currently the
-  certificate of the local DEBUG keystore (`tools/packaging/android/debug.keystore`,
-  git-ignored; the owner accepted that for now). Moving to the permanent release
-  keystore changes the certificate: installed copies cannot update across it, so the pin
-  and the signing key change together, deliberately.
+- `expected_cert_sha256` pins the certificate the APK is signed with: the permanent
+  release keystore (`CN=AxeNStax, O=AxeNStax, C=GB`, kept outside the repo and passed to
+  `build-apk.sh` with `ANDROID_KEYSTORE` and `ANDROID_KEYSTORE_PASS_FILE`), the same key
+  that signed the earlier Android releases. A build signed with the throwaway debug key
+  carries another certificate, and the publisher refuses it. The other games that list
+  this channel pin this certificate, so it never changes; changing it would strand every
+  installed copy and every game that lists it.
 
 ```bash
 # Dry run: signs with a throwaway key, uploads and publishes nothing (it only reads the relays).
