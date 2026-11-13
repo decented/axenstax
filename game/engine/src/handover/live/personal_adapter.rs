@@ -327,7 +327,8 @@ fn scan_bound_in(directory: &Path, imported_only: bool) -> Result<bool, String> 
             continue;
         }
         let bytes = read_regular(&entry.path(), crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
-        if matches!(bytes.first(), Some(3..=5)) && JoinerSave::decode(&bytes)?.personal.is_some_and(|p| !imported_only || p.binding.imported().is_some()) {
+        // v3..=v6: v6 (off-hand plan, slice 2) is what `JoinerSave` writes now.
+        if matches!(bytes.first(), Some(3..=6)) && JoinerSave::decode(&bytes)?.personal.is_some_and(|p| !imported_only || p.binding.imported().is_some()) {
             return Ok(true);
         }
     }

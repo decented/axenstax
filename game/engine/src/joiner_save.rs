@@ -1461,7 +1461,7 @@ mod oc_tests {
         assert!(next.players[0].window_events.debt.is_empty());
         next.save_joiner(0).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes[0], 5, "the mutable writer writes v5; legacy readers have separate fixtures");
+        assert_eq!(bytes[0], 6, "the mutable writer writes v6; legacy readers have separate fixtures");
         let resaved = JoinerSave::decode(&bytes).unwrap();
         assert_eq!(resaved.history(), ObligationHistory::Incomplete(IncompleteCause::LegacyV1), "Incomplete is sticky");
         assert!(!next.players[0].obligations_proven_zero());
@@ -1900,7 +1900,7 @@ mod quest_codec_tests {
         let bytes = encode_delivered_v3(&original).unwrap();
         assert_eq!(bytes[0], 3);
         let back = JoinerSave::decode(&bytes).unwrap();
-        assert_eq!(back.version, 5);
+        assert_eq!(back.version, 6);
         assert_eq!(bincode::serialize(&back.slots).unwrap(), bincode::serialize(&original.slots).unwrap());
         assert_eq!(bincode::serialize(&back.owed).unwrap(), bincode::serialize(&original.owed).unwrap());
         assert_eq!(back.obligation_history, original.obligation_history);

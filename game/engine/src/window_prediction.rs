@@ -4,7 +4,7 @@ use crate::{armour::ArmourItem, inventory::Inventory, item::Item, window::{Click
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct WindowRecipe {
     pub click: WindowClick,
-    pub sources: crate::action_wire::BoundedList<crate::protocol::WireSlot, 50>,
+    pub sources: crate::action_wire::BoundedList<crate::protocol::WireSlot, { crate::staged_window::PLAYER_PLACES }>,
 }
 
 /// Bodies stay in live holdings; the journal retains only immutable markers.

@@ -1998,7 +1998,7 @@ mod tests {
     /// grid (pinned): FNV-1a over fifty empty-slot bytes (36 + 4 + cursor +
     /// 9), the setting's 1, eight zero bytes of lock mask and the station's 0
     /// (C3a-fix-1 added the last two).
-    const EMPTY_WINDOW_DIGEST: u32 = 2_574_539_244;
+    const EMPTY_WINDOW_DIGEST: u32 = 206_750_118; // v101: the off-hand is hashed after the armour (was 2_574_539_244)
 
     // ── C3a-2a: armour wear ─────────────────────────────────────────────
 

@@ -158,7 +158,7 @@ mod tests {
         crate::starter_kit::grant_fresh_kit(&mut w.inv, "testlab", false, false);
         w.inv.toggle_lock(5);
         let packet = packet(&w, &Default::default(), 1);
-        assert_eq!(packet.slots.len(), 50);
+        assert_eq!(packet.slots.len(), 51, "36 slots, 4 armour, the off-hand, the cursor and 9 grid cells");
         let mut inv = Inventory::new();
         // A pre-existing body-less stub must not shadow the built-in body.
         inv.set_slot(

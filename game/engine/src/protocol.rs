@@ -3583,6 +3583,8 @@ mod tests {
         tail.extend_from_slice(&1u64.to_le_bytes());
         tail.extend_from_slice(&[2, 0x11]);
         tail.extend_from_slice(&0x0304u16.to_le_bytes());
+        // v101: each edit's hand closes it (`Hand` is a u32 variant index, Main = 0).
+        tail.extend_from_slice(&0u32.to_le_bytes());
         // v80 (C3c-1): use_tags (u64 length + entries: x, y, z i32, kind u8,
         // slot u8, used (`Some` tag, then item_kind u8, item_id u16, count
         // u8, full_item's u32 variant tag), tool's u32 variant tag, and
@@ -3598,12 +3600,17 @@ mod tests {
         tail.extend_from_slice(&0u32.to_le_bytes());
         // v82 (C3c-1-fix): each use tag closes with `unfit` u8.
         tail.push(1);
+        // v101: each use tag then carries its hand (Main = 0).
+        tail.extend_from_slice(&0u32.to_le_bytes());
+        // v101: held_tool u8, off_kind u8, off_id u16, off_tool u8 close the
+        // packet (all zero in a default-built one).
+        tail.extend_from_slice(&[0, 0, 0, 0, 0]);
         // Everything before the appended fields is unchanged, and the
         // appended fields close the packet in append order (`None` is one
         // `0` byte).
         let prefix = bytes.len() - tail.len();
         assert_eq!(&bytes[prefix..], &tail[..]);
-        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8 + 4 + 8 + 8)]);
+        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8 + 4 + 8 + 8 + 5)]);
     }
 
     #[test]
@@ -4271,8 +4278,9 @@ mod tests {
         assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), eat);
         // The enum's variant index leads the action: Eat = 0.
         assert_eq!(&payload[4..8], &0u32.to_le_bytes());
-        // v76 — events_applied closes the packet.
-        assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes());
+        // v76 — events_applied, then (v101) the hand, close the packet (Main = 0).
+        assert_eq!(&payload[payload.len() - 8..payload.len() - 4], &0x0102_0304u32.to_le_bytes());
+        assert_eq!(&payload[payload.len() - 4..], &0u32.to_le_bytes());
 
         let sleep =
             ItemActionPacket { seq: 12, action: ItemAction::Sleep { bed: [-5, 70, 1_000_000] }, events_applied: 0, hand: crate::hands::Hand::Main };
@@ -4449,7 +4457,8 @@ mod tests {
         assert_eq!((payload[20], payload[21], payload[22]), (5, 6, item_kind::BLOCK), "the face, the hotbar slot, the held kind");
         assert_eq!(&payload[23..25], &0x0203u16.to_le_bytes(), "the held id");
         assert_eq!(&payload[25..29], &0u32.to_le_bytes(), "held_full: None");
-        assert_eq!(&payload[29..], &7u32.to_le_bytes(), "events_applied closes it");
+        assert_eq!(&payload[29..33], &7u32.to_le_bytes(), "events_applied");
+        assert_eq!(&payload[33..], &0u32.to_le_bytes(), "and the hand (v101) closes it");
         let detach = ItemActionPacket { seq: 23, action: ItemAction::Detach { x: -1, y: 2, z: -3, face: 0 }, events_applied: 8, hand: crate::hands::Hand::Main };
         let bytes = serialize_packet(PacketType::ItemAction, &detach);
         let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -4895,7 +4904,7 @@ mod tests {
         tail.push(0); // None
         tail.push(0); // client_ok: false
         assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..], "digest, events_applied, touched, claims, client_ok");
-        assert_eq!(MAX_WINDOW_SLOTS, 72 + 36 + 4 + 1 + 9);
+        assert_eq!(MAX_WINDOW_SLOTS, 72 + 36 + 4 + 1 + 1 + 9, "v101 added the off-hand");
 
         // ContainerOpened = 65: every kind, a refusal, the slot bound.
         let stone = Some(WireStack { item_kind: item_kind::BLOCK, item_id: 1, count: 5, full_item: WireItem::None });

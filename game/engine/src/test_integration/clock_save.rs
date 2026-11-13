@@ -182,7 +182,7 @@ fn a_joiner_who_left_at_an_unsafe_spot_rejoins_at_its_spawn() {
     hs.server.players[i].player.pos = p;
     hs.server.save_joiner(i).unwrap();
     hs.server.try_save().unwrap();
-    assert_eq!(std::fs::read(record_path(name, pk)).unwrap()[0], 5, "the record carries the position");
+    assert_eq!(std::fs::read(record_path(name, pk)).unwrap()[0], 6, "the record carries the position");
     drop(client);
     drop(hs);
 
@@ -229,7 +229,7 @@ fn a_v4_sidecar_still_loads_and_its_joiner_rejoins_at_spawn() {
     let bytes = SIDECAR_V4;
     assert_eq!(bytes[0], 4);
     let saved = JoinerSave::decode(bytes).expect("the old record is read");
-    assert_eq!(saved.encode().unwrap()[0], 5, "its next write is the new layout");
+    assert_eq!(saved.encode().unwrap()[0], 6, "its next write is the new layout");
 
     let name = "v4";
     let mut hs = start(name);

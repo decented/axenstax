@@ -2852,9 +2852,10 @@ mod tests {
         assert!(pkt.len() <= protocol::MAX_WIRE_PACKET_LEN, "{} bytes", pkt.len());
         let (_, payload) = protocol::deserialize_header(&pkt).unwrap();
         let back: protocol::InputPacket = protocol::safe_deserialize(payload).unwrap();
-        // C3a-fix-1 — each edit is 19 bytes on the wire now: its 15-byte
-        // block change and its 4-byte hand (`edit_hands`).
-        let per_edit = 15 + 4;
+        // C3a-fix-1 — each edit is 19 bytes on the wire: its 15-byte block
+        // change and its 4-byte hand (`edit_hands`); v101: the hand it was
+        // made with adds a 4-byte variant index (23 bytes).
+        let per_edit = 15 + 4 + 4;
         assert!(
             back.block_changes.len() >= protocol::MAX_WIRE_PACKET_LEN / per_edit - 16,
             "only the overflow is trimmed: {} kept",

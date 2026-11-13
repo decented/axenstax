@@ -177,7 +177,7 @@ pub struct EditRecipe {
     /// The digest of the window the edit predicts (after its window half).
     pub digest: u32,
     /// The initial sources of the places the window half changes.
-    pub sources: crate::action_wire::BoundedList<protocol::WireSlot, 50>,
+    pub sources: crate::action_wire::BoundedList<protocol::WireSlot, { crate::staged_window::PLAYER_PLACES }>,
 }
 
 impl EditRecipe {

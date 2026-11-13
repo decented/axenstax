@@ -37,7 +37,8 @@ impl<'de> Deserialize<'de> for LocalPersonalSave {
                     }
                     bytes.push(byte);
                 }
-                if !matches!(bytes.first(), Some(3..=5)) {
+                // v3..=v6: v6 (off-hand plan, slice 2) is what `JoinerSave` writes now.
+                if !matches!(bytes.first(), Some(3..=6)) {
                     return Err(serde::de::Error::custom(
                         "personal snapshot has an unsupported canonical version",
                     ));

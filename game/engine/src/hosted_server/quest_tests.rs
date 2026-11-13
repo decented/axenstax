@@ -142,7 +142,7 @@ fn d2c3_empty_fresh_signed_and_guest_receive_real_sync1_before_personal_fence() 
             assert!(accepted.has_personal_state);
             let sync = sync.expect("empty fresh bag still receives actual Sync1");
             assert_eq!(sync.window_event, 1);
-            assert_eq!(sync.slots.len(), 50);
+            assert_eq!(sync.slots.len(), 51, "36 slots, 4 armour, the off-hand, the cursor and 9 grid cells");
             let snapshot = personal.expect("progression has its genuine subsequent fence");
             assert_eq!(snapshot.window_event, 2);
             let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);

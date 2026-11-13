@@ -10120,7 +10120,7 @@ pub(crate) mod tests {
             if kind == protocol::PacketType::InventorySync { sync = Some(protocol::safe_deserialize::<protocol::InventorySyncPacket>(bytes).unwrap()); }
         }
         assert_eq!(sync.unwrap(), expected, "the same window, off-hand included");
-        assert_eq!(hs.server.players[i].offhand, Some(torch), "and the server's copy holds it again");
+        assert_eq!(crate::window_events::effective_window(&hs.server.players[i]).offhand, Some(torch), "and the server's copy holds it again, once the sync is acknowledged");
     }
 
     /// A returning joiner whose saved spawn point needs a fix-up (a bed under
