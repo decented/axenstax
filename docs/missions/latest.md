@@ -1,10 +1,10 @@
-# Axe'n'Stax test missions: build 0.2.36
+# Axe'n'Stax test missions: build 0.2.37
 
 This is the test guide for the current build. A tester, or a chat assistant co-hosting their session, reads it for what to type, exact numbers, what success looks like, and why something might not work.
 
-Everything in this file was checked against the game's code for build 0.2.36. If the game and this guide disagree, that is worth reporting.
+Everything in this file was checked against the game's code for build 0.2.37. If the game and this guide disagree, that is worth reporting.
 
-- **Build:** 0.2.36 (desktop app, Linux)
+- **Build:** 0.2.37 (desktop app, Linux)
 - **This session:** first the "Ask first" questions, then the "Fixed since last time" re-checks (Mission 0), then any of the missions "On your own"
 - **Coming next:** missions at a village, and missions with a friend
 
@@ -24,17 +24,19 @@ Last time, the whole inventory disappeared during a fight with brigands. Brigand
 
 ## Fixed since last time (re-check these first)
 
-These were found in the last playtest (build 0.2.34) and are fixed in 0.2.36 (some first came out in 0.2.35). Check each one and say whether it now works. Mission 0 below walks through them.
+These were found in the last playtest (build 0.2.34) and are fixed in 0.2.37 (some first came out in 0.2.35 or 0.2.36). Check each one and say whether it now works. Mission 0 below walks through them.
 
 1. **A torch in an item frame looks right.** It lies flat on the frame showing the whole torch, from the front, the side and above, with no black box round it.
-2. **A torch dropped on the ground, or held in your hand, is a flat torch, not a dark cube.** To see what you are holding, press **F5** for the camera behind you. The same goes for flowers, saplings, rails and tall grass.
+2. **A torch dropped on the ground, or held in your hand, is a flat torch, not a dark cube.** The same goes for flowers, saplings, rails and tall grass.
 3. **Blighted crops are grey.** A blighted crop is ash grey and half the size of a healthy one, so it is easy to spot next to yellow wheat.
 4. **Respawning without a bed puts you on dry land**, near where the world started. Before, it could drop you from the sky into the sea. Worlds made before this build are fixed when they load, unless you set a spawn with a bed or `/sp`.
 5. **Satoshi's house is built on dry ground near where you start, and shows up at once.** Before, it could float on the sea and stay invisible until you broke a block nearby. It is never built on top of anything you placed. A house that was already built stays where it is.
 6. **Respawning at a bed puts you next to the bed**, inside the room, not on the roof.
 7. **Thunder is softer.** It rumbles in just after the flash instead of hitting at full volume, and a bolt far away sounds quieter than one close by. To turn thunder down on its own, press **Esc**, then **Settings**, and move the **Thunder** slider in the sound settings.
+8. **You can see what you are holding.** In first person your hand and the item in it now show in the bottom right of the screen, like Minecraft. Before, they sat below the edge of the screen.
+9. **Chat starts empty in each world.** Opening a world, or the same world again, no longer shows chat or commands from before.
 
-**New in 0.2.36:**
+**New in 0.2.37:**
 
 - **Bigger chat text.** Chat and commands are 1.5 times bigger. To make them bigger still, press **Esc**, then **Settings**, then move the **Chat text size** slider (100% to 300%).
 - **The Esc menu button that used to say "Graphics" now says "Settings".**
@@ -45,7 +47,7 @@ These were found in the last playtest (build 0.2.34) and are fixed in 0.2.36 (so
 
 **Known, not fixed yet** (if one of these happens, it is already known):
 
-- In first person, your hand sits mostly below the screen, so you cannot see what you are holding. Press **F5** to see it.
+- Tools (pickaxes, swords, axes and so on) look like plain grey slabs in your hand. Their proper shapes are coming.
 - The world is split into columns 16 by 16 blocks wide. A sealed room built across the edge of one of those columns can stay lit like daytime inside at night, even with no torch.
 - A Satoshi house that was already built over the sea stays there.
 
@@ -68,7 +70,7 @@ These were found in the last playtest (build 0.2.34) and are fixed in 0.2.36 (so
 2. **Press T** (or /) to open chat and type a command. Press **Tab** to finish a command or an item name.
 3. **Type `/gm c`** to switch to Creative so you can fly. Find **flat, open grass with no trees**. Missions 1 to 3 all happen there.
 4. **Type `/gm s`** to switch back to Survival. The game must reply **"Switched to survival"** (or "already in survival").
-5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.36**. Use that number in the feedback.
+5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.37**. Use that number in the feedback.
 
 **Good to know:** hunger drops 1 point (half an icon on the hunger bar) every 30 seconds, whatever you are doing. A full bar lasts about 10 minutes, so take some food (berries, bread or cooked meat), or use `/give bread 16` in a test world.
 
@@ -76,21 +78,22 @@ These were found in the last playtest (build 0.2.34) and are fixed in 0.2.36 (so
 
 ---
 
-## Mission 0: Re-checks for 0.2.36
+## Mission 0: Re-checks for 0.2.37
 
 **What it tests:** the fixes in "Fixed since last time".
 
 1. **Item frame:** type `/give item_frame` and `/give torch 4`. Place the frame on a wall, then right-click the frame with the torch in your hand to put it in. Look at it from the front, from the side and from above.
-2. **Dropped and held torch:** press **Q** with a torch selected to drop one, and look at it on the ground. Then press **F5** to see yourself holding a torch (press F5 again to go back).
+2. **Dropped and held torch:** press **Q** with a torch selected to drop one, and look at it on the ground. Look at the torch in your hand in the bottom right of the screen, then press **F5** to see yourself holding it (press F5 again to go back).
 3. **Blight:** if you still have a giant wheat field from last time, look for grey plants. Otherwise do Mission 2 and check the colour.
 4. **Respawn:** in your test world, with no bed, type `/kill` or let something defeat you, then respawn. Say where you came back.
 5. **Chat:** type `/gi` and press **Tab**. Then try `/give tor` and **Tab**, and **Tab** again. Then change **Esc, Settings, Chat text size** and see the chat get bigger.
 6. **Thunder and weather:** type `/weather storm` and wait for lightning (a bolt comes about every 15 seconds in a storm, sometimes sooner or later). Say whether the thunder still makes you jump. Then type `/weather clear` and check the rain stops.
+7. **Chat:** type a few lines, leave to the lobby, open the same world again, and check the chat is empty.
 
-**Success:** the framed torch is a flat torch from every side with no black box; the dropped and held torch are flat torches; blighted wheat is grey; you respawn standing on dry land; Tab finishes the words and the chat text size changes; the thunder rumbles in after the flash and is not a jump scare; `/weather clear` stops the storm.
+**Success:** the framed torch is a flat torch from every side with no black box; the dropped and held torch are flat torches; blighted wheat is grey; you respawn standing on dry land; Tab finishes the words and the chat text size changes; the thunder rumbles in after the flash and is not a jump scare; `/weather clear` stops the storm; you see the torch in your hand; the chat is empty after reopening the world.
 
 **If it does not work:**
-- Anything still looks like the old build: check the build number at the bottom of Settings says **v0.2.36**.
+- Anything still looks like the old build: check the build number at the bottom of Settings says **v0.2.37**.
 - Tab does nothing: Tab only completes lines that start with `/`.
 
 ---
