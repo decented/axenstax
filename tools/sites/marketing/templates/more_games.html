@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="referrer" content="no-referrer">
     <title>More games — Axe'n'Stax</title>
-    <meta name="description" content="Two more games we make, for Android phones: Stampede and Twang Thang. Download the APK.">
+    <meta name="description" content="Three more games we make, for Android phones: Stampede, Twang Thang and Cluster Flock. Download the APK.">
     <link rel="stylesheet" href="/static/style.css">
     <link rel="stylesheet" href="/static/marketing.css">
     <link rel="icon" type="image/svg+xml" href="/static/brand/axenstax-favicon.svg">
@@ -30,12 +30,12 @@
 
     <header class="hero hero-marketing">
         <h1>More games.</h1>
-        <p class="tagline">Two more games we make, for Android phones.</p>
+        <p class="tagline">Three more games we make, for Android phones.</p>
     </header>
 
     <section class="features-grid">
         {% for g in games %}
-        <div class="feature-card">
+        <div class="feature-card" id="{{ g.slug }}">
             <img src="{{ g.icon }}" alt="" width="72" height="72" style="border-radius:16px;margin-bottom:0.9rem;">
             <h3>{{ g.name }}</h3>
             <p>{{ g.tagline }}</p>

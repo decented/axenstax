@@ -1,13 +1,13 @@
 # More games: automatic release downloads
 
 The marketing site's `/more-games` page follows the published Android releases
-of Stampede and Twang Thang. A game release no longer requires editing the
+of Stampede, Twang Thang and Cluster Flock. A game release no longer requires editing the
 website or deploying it again.
 
 `tools/sites/marketing/releases.py` owns the catalogue. The FastAPI lifespan
 starts a background refresh immediately and repeats it every five minutes.
 One bounded, anonymous request per public relay asks for kind 30063 events
-from the two pinned release keys on their respective `d` channels. Requests
+from the three pinned release keys on their respective `d` channels. Requests
 from website visitors only read the in-memory catalogue; their addresses,
 identities and browsing activity are never passed to a relay. There is no
 browser relay connection or additional JavaScript.
@@ -52,5 +52,5 @@ mock download streams, persistence/restart checks and the rendered page:
 .venv/bin/python -m pytest -q
 ```
 
-This directory lists the two vendor games' public installers only. It does not
+This directory lists the three vendor games' public installers only. It does not
 index player-run servers, host game traffic, or collect player data.

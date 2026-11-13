@@ -62,6 +62,21 @@ def test_real_published_stampede_event_verifies_with_the_pinned_key():
     assert release["sha256"] == "1dbc3656b7e14b2bab82b131a571949830840f8347e9299ead2960dcef4c972e"
 
 
+def test_real_published_cluster_flock_event_verifies_with_the_pinned_key():
+    game = next(g for g in releases.MORE_GAMES if g["name"] == "Cluster Flock")
+    event = json.loads((Path(__file__).parent / "fixtures/gameflock-release.json").read_text())
+    release = releases.parse_release(event, game)
+    assert release and release["version"] == game["version"] == "0.2.1"
+    assert release["version_code"] == game["version_code"] == 2001
+    assert release["sha256"] == game["sha256"]
+    assert release["size_bytes"] == game["size_bytes"]
+    assert game["url"] == release["urls"][0]
+
+
+def test_relays_are_the_ones_the_games_publish_on():
+    assert releases.RELAYS == ("wss://relay.damus.io", "wss://relay.ditto.pub", "wss://relay.primal.net")
+
+
 def test_signed_release_parses():
     result = parse(signed())
     assert result["version_code"] == 4015 and result["size_bytes"] == len(BODY)

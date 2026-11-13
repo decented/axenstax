@@ -1,4 +1,4 @@
-"""The /more-games page lists Stampede and Twang Thang with APK downloads.
+"""The /more-games page lists Stampede, Twang Thang and Cluster Flock with APK downloads.
 
 Run: cd tools/sites/marketing && .venv/bin/python -m pytest test_more_games.py -q
 """
@@ -19,7 +19,7 @@ def test_more_games_page_exists():
     assert client.get("/more-games").status_code == 200
 
 
-def test_more_games_lists_both_apks_with_their_checksums():
+def test_more_games_lists_every_apk_with_their_checksums():
     text = client.get("/more-games").text
     for game in appmod.MORE_GAMES:
         assert game["name"] in text
@@ -28,6 +28,13 @@ def test_more_games_lists_both_apks_with_their_checksums():
         assert game["url"].endswith(game["sha256"] + ".apk")
         assert game["version"] in text
     assert "Download APK" in text
+
+
+def test_more_games_lists_the_three_games_with_anchors_the_lobby_links_to():
+    text = client.get("/more-games").text
+    assert [g["name"] for g in appmod.MORE_GAMES] == ["Stampede", "Twang Thang", "Cluster Flock"]
+    for slug in ("stampede", "twang-thang", "cluster-flock"):
+        assert text.count(f'id="{slug}"') == 1, slug
 
 
 def test_more_games_footer_links_privacy():

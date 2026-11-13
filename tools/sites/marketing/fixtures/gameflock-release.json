@@ -1,0 +1,38 @@
+{
+  "content": "Fixes reopening the game getting stuck on the splash screen. Updates, More games and the daily run's Bitcoin seed now come from shared ForgeSworn libraries.",
+  "created_at": 1794385772,
+  "id": "29fe2ea5e263180b6a4a93672e2c70250d360ce105da4fdb908e7f2fe7266a38",
+  "kind": 30063,
+  "pubkey": "01b0f270e290f5cd48aa537392de04e4b22124c16d696de96158395a60343b0f",
+  "sig": "a0a1da3c7d88f8007ded2eac5073ff10140bafb444a64abbfaa813f95f462731a632b771f3dffa1f3472e5fa9f83c4771f84bb5e1c255e7f17985a4889426864",
+  "tags": [
+    [
+      "d",
+      "gameflock-android-apk"
+    ],
+    [
+      "version",
+      "0.2.1"
+    ],
+    [
+      "version_code",
+      "2001"
+    ],
+    [
+      "x",
+      "893218af0edef806a192535cda51b8b6eba695673ea13fe3a10457fa75a61849"
+    ],
+    [
+      "size",
+      "10931051"
+    ],
+    [
+      "cert",
+      "46fd4f7a80b700cd7d951c04e38fa3344405759d53d161de3e4dd06120fb3ace"
+    ],
+    [
+      "url",
+      "https://nostr.download/893218af0edef806a192535cda51b8b6eba695673ea13fe3a10457fa75a61849.apk"
+    ]
+  ]
+}
