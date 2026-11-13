@@ -20,7 +20,9 @@
 //!   material with no background to cut away ([`FULL_TILE_BLOCKS`]): a sprite
 //!   of them would be a square card, so they keep the small cube.
 //!
-//! Tools, materials, plans and armour keep their slab and cube looks.
+//! Materials, plans and armour keep their cube looks. A tool is a thin slab when
+//! its type is unknown, and its own box model otherwise (`held_tool_model`, in
+//! the hand only; a dropped tool is still its tier's cube).
 //!
 //! Users: the item frame (`mesh`, a sprite lies flat on the plate), the held
 //! item (the first-person `viewmodel` and the third-person avatar hand in

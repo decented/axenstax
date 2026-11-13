@@ -1415,10 +1415,21 @@ first-person viewmodel (§7.5), and it reuses the authoritative
     a sixth of the screen tall or more. Wider than 16:9 keeps the 16:9 depth.
     The game loop passes the viewport's aspect to `build_viewmodel_vertices`
     and to `Renderer::update_viewmodel_camera`.
-  - **Hand side.** The slot takes a `HandSide`; the left hand is the same layout
-    mirrored in x (the yaw, the lean and the x offset negate, the pitch does
-    not). Only the right hand is drawn; Spec 05's off-hand is not built. A unit
-    test pins the mirror.
+  - **Hand side and the off-hand (as built, 2026-11-13).** The slot takes a
+    `HandSide`; the left hand is the same layout mirrored in x (the yaw, the lean
+    and the x offset negate, the pitch does not), built from the LEFT arm part
+    (`LEFT_ARM_INDEX` 2, its own skin rects) and mirrored translations and tilts,
+    never a negative scale (that flips winding and normals). When the off-hand
+    holds an item (`PlayerSlot.offhand`), `viewmodel::build_viewmodel_hands` adds
+    the left arm and that item in the lower-left quadrant; an empty off-hand adds
+    no vertices at all. The hands swing on their own timers: mining, attacking
+    and a main-hand use swing the right (`local_swing`); a right-click that routes
+    to the off-hand (`hands::use_hand` is `Hand::Off`; `hands::swing_hands`) swings
+    the left only (`local_off_swing`). Both hands go through the same two uploads
+    (skin verts, item verts). The layout tests (1) to (6) below run for both
+    hands (the left's numbers are the right's with x negated), plus: with both
+    hands full neither enters the centre +-5% box, the left item's centre is in
+    the lower-left quadrant, and an empty off-hand yields no left vertices.
   - **The #15 guard.** #15 (2026-05) moved the first slot (+0.45, -0.32, -0.9)
     to (+0.58, -0.60, -0.9) because its shoulder sat near the centre and the
     upper arm read as "too far forward / in front of the face"; that slot
@@ -1426,8 +1437,8 @@ first-person viewmodel (§7.5), and it reuses the authoritative
     rule is: **the shoulder end of the arm never shows, and the fist and the item
     do.** `viewmodel::layout_tests` project the real vertices through
     `viewmodel_projection` at 16:9, 16:10, 4:3 and 9:16 (rest, bob 0, swing 0,
-    classic and slim arm): (1) every vertex of a torch, iron tool, stone block
-    and oak sapling inside NDC +-0.98; (2) the item's on-screen box at least 12%
+    classic and slim arm): (1) every vertex of a torch, every tool type (iron),
+    stone block and oak sapling inside NDC +-0.98; (2) the item's on-screen box at least 12%
     of the viewport height (15% for the torch, tool and sapling) with its centre
     in the lower-right quadrant (x > 0.15, y < -0.15); (3) the four corners of
     the arm's hand end inside the viewport; (4) all four shoulder corners beyond
@@ -1466,6 +1477,34 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   another as an item. A placed micro-model draws its shell in the world; its
   item follows the block's class. Tools, materials, plans and armour keep
   their slab and cubes.
+- **Held tools (as built, 2026-11-13).** A tool held in the hand is no longer
+  one grey slab: each `ToolType` is its own small box model
+  (`held_tool_model.rs`: pickaxe, axe, sword, shovel, hoe, bow, flint and steel,
+  shears, fishing rod, slingshot, eraser, drafting stamp), the tier's colour on
+  the head or blade and a stick handle, about 0.6 tall with the grip at the
+  origin. It is boxes and not Minecraft's extruded icon because a tool has no
+  per-type icon layer: the tier layer (`tool_texture`) is one generic tile for
+  every type, and the web build's texture array is exactly full (512), so no
+  layer was added. Each box face carries ONE texel (the same uv on all four
+  corners, so mip level 0 and a flat colour): the tier's head colour is the wedge
+  texel (11, 5) of its tier tile (Satori: the middle of the gem icon), the
+  handle the stick's ground, the rest string, flint, leather and wool texels; a
+  test pins every texel opaque. The mesh takes a `HandSide` and mirrors a
+  one-sided feature (an axe's blade) to that hand's own side; first person builds
+  it for the opposite hand so the blade points in toward the screen centre. The
+  hand's item is an `item_model::HeldItem { item: ItemRef, tool: Option<ToolType> }`:
+  the local player builds it from the real `Item`; a remote avatar from the
+  `HeldWire { kind, id, tool }` of the avatar wire (`tool_type()`); an unknown or
+  missing tool byte (a newer peer, a non-tool) draws the plain tier slab, never a
+  guess. `held_tool_model::parts` is an exhaustive `match`: the shield
+  (`ToolType::Shield`, off-hand plan slice 5) fails to compile there until it has
+  a shape.
+- **The avatar's two hands.** `entity_model::build_player_avatar_vertices_with`
+  holds the main-hand item (`held_*`) at the right arm's hand anchor and the
+  off-hand item (`off_*`) at the left arm's (index 2), each through the same
+  swing-about-the-pivot, yaw and translate; the left arm does not swing (a remote
+  peer's off-hand use is not on the wire). The own F5 avatar and every remote
+  avatar share the builder, so both show both hands.
 - **The sprite** (Minecraft's item look) is the block's inventory icon
   (`tex_top`) as a flat picture 1/16 of its width thick (`SPRITE_DEPTH`). The
   front and back show the whole icon. Each edge is one quad per run of opaque
@@ -1476,7 +1515,7 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   The torch is 12 quads. Widths: held 0.6, dropped 0.4 (standing up, spinning
   and bobbing like the cube, its foot as high), framed 0.5. A held sprite sits
   beside the fist on the outside and a little up (`HELD_SPRITE_OFFSET`, 0.25
-  out and 0.1 up from the hand), so a torch's art clears the 0.25-wide arm
+  out and 0.1 up from the hand; "out" is -X on the left hand, `item_model::sprite_offset`), so a torch's art clears the 0.25-wide arm
   instead of hiding its flame in the forearm; a held cube stays centred on the
   hand.
 - **The cutout bit.** `mesh::CUTOUT_FLAG` is bit 17 of `Vertex.tex_layer` (bit
