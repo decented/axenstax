@@ -193,3 +193,34 @@ Covers `release-helpers.mjs`'s pure builders (tag order and shape,
 malformed-input rejection, canonical-URL matching, filename version
 parsing, numeric version comparison, and event-authenticity filtering).
 None of it touches the network.
+
+## The Android channel (`axenstax-android-apk`)
+
+A second kind-30063 channel, for the Android APK, so the other games' "More games"
+catalogue (nostr-release-kit, `parse_release`) can offer Axe'n'Stax. It is separate
+from the AppImage channel above because the catalogue requires `version_code` and
+`cert`, which the AppImage events don't carry.
+
+- Kind `30063`, `d = axenstax-android-apk`, signed by the same pinned release key
+  as the AppImage channel (`RELEASE_PUBKEY_HEX`).
+- Tags: `version` (e.g. `0.2.35`), `version_code` (`major*1e6 + minor*1e3 + patch`,
+  `0.2.35` -> `2035`, as `tools/packaging/android/build-apk.sh` stamps it into the APK),
+  `x` (APK sha256), `size`, `cert` (sha256 of the APK's signing certificate, read from
+  the APK by `apksigner`), and one `url` per Blossom mirror
+  (`https://nostr.download/<sha256>.apk`).
+- Config: `release-android.json`. Publisher: nostr-release-kit's
+  `tools/publish-release.mjs`, pinned to revision `1c16b3e` and run through
+  `publish-android.sh` (it refuses a kit checkout at another revision or with local
+  changes). Needs `npm ci` once in the kit's `tools/`.
+- `expected_cert_sha256` pins the certificate the APK is signed with. It is currently the
+  certificate of the local DEBUG keystore (`tools/packaging/android/debug.keystore`,
+  git-ignored; the owner accepted that for now). Moving to the permanent release
+  keystore changes the certificate: installed copies cannot update across it, so the pin
+  and the signing key change together, deliberately.
+
+```bash
+# Dry run: signs with a throwaway key, uploads and publishes nothing (it only reads the relays).
+tools/release/publish-android.sh <apk> --version 0.2.35 --notes "..." --dry-run
+# Real: uploads the APK to the Blossom mirror, then publishes to the relays in release-android.json.
+tools/release/publish-android.sh <apk> --version 0.2.35 --notes "..."
+```
