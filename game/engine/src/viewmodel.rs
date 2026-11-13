@@ -212,11 +212,7 @@ pub fn arm_transform(aspect: f32, side: HandSide, bob: f32, swing: f32) -> Mat4 
 fn item_lift(held: ItemRef, registry: &BlockRegistry) -> f32 {
     match held {
         ItemRef::Tool(_) => 0.2,
-        ItemRef::Block(id)
-            if matches!(item_model::block_look(id, registry), item_model::ItemLook::Sprite { .. }) =>
-        {
-            0.2
-        }
+        other if item_model::held_is_sprite(other, registry) => 0.2,
         _ => 0.15,
     }
 }
@@ -311,8 +307,7 @@ pub fn build_viewmodel_vertices(
         // tool is built for the OTHER hand so its feature points in toward the
         // centre of the screen.
         let mesh_side = side.opposite();
-        let is_sprite = matches!(held.item, ItemRef::Block(id)
-            if matches!(item_model::block_look(id, registry), item_model::ItemLook::Sprite { .. }));
+        let is_sprite = item_model::held_is_sprite(held.item, registry);
         let offset = item_model::sprite_offset(mesh_side);
         let mut item_verts = item_model::held_item_mesh(held, registry, mesh_side);
         for v in &mut item_verts {

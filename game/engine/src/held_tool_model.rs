@@ -186,13 +186,16 @@ fn parts(tool: ToolType, material: ToolMaterial) -> Vec<Part> {
             part(0.10, 0.22, 0.20, 0.20, 0.10, 0.0, head),
             part(0.21, 0.21, 0.05, 0.26, 0.10, 0.0, head),
         ],
-        // A long blade, a crossguard and a grip.
+        // A long, narrow, pointed blade (three steps taper to the tip), a
+        // crossguard wider than the blade, and a short grip. The blade fills
+        // the hand envelope's height: grip -0.34..-0.235, guard to -0.195,
+        // point at 0.35.
         ToolType::Sword => vec![
-            part(0.0, -0.17, 0.07, 0.12, 0.07, 0.0, grip()),
-            part(0.0, -0.24, 0.11, 0.04, 0.11, 0.0, steel),
-            part(0.0, -0.09, 0.30, 0.05, 0.09, 0.0, steel),
-            part(0.0, 0.125, 0.13, 0.38, 0.045, 0.0, head),
-            part(0.0, 0.32, 0.08, 0.06, 0.04, 0.0, head),
+            part(0.0, -0.285, 0.06, 0.10, 0.06, 0.0, grip()),
+            part(0.0, -0.215, 0.27, 0.04, 0.08, 0.0, steel),
+            part(0.0, -0.005, 0.075, 0.38, 0.04, 0.0, head),
+            part(0.0, 0.255, 0.055, 0.14, 0.035, 0.0, head),
+            part(0.0, 0.335, 0.03, 0.02, 0.03, 0.0, head),
         ],
         // A broad flat blade on a long shaft with a T grip.
         ToolType::Shovel => vec![
@@ -215,17 +218,22 @@ fn parts(tool: ToolType, material: ToolMaterial) -> Vec<Part> {
             part(0.06, 0.0, 0.075, 0.09, 0.08, 0.0, Paint { layer: TEX_ITEM_LEATHER, texel: (8, 8) }),
             part(-0.03, 0.0, 0.015, 0.60, 0.015, 0.0, centre_paint(TEX_ITEM_STRING)),
         ],
-        // A long, slightly leaning rod, a reel and a hanging line.
+        // A long, slightly leaning rod, a reel, and a line hanging from the
+        // tip with a small red float and a hook below it.
         ToolType::FishingRod => {
             let tilt: f32 = 9.0;
             let (sin, cos) = tilt.to_radians().sin_cos();
             // The rod's tip (half its length from its centre, along the tilt).
             let tip = (0.0 - 0.32 * sin, 0.02 + 0.32 * cos);
+            let line_len = 0.22;
+            let line_cy = tip.1 - line_len / 2.0;
             vec![
                 part(0.0, 0.02, 0.04, 0.66, 0.04, tilt, grip()),
                 part(0.0, -0.19, 0.075, 0.15, 0.075, tilt, Paint { layer: TEX_ITEM_LEATHER, texel: (8, 8) }),
                 part(0.065, -0.10, 0.075, 0.075, 0.075, 0.0, steel),
-                part(tip.0, tip.1 - 0.13, 0.014, 0.26, 0.014, 0.0, centre_paint(TEX_ITEM_STRING)),
+                part(tip.0, line_cy, 0.022, line_len, 0.022, 0.0, centre_paint(TEX_ITEM_STRING)),
+                part(tip.0, tip.1 - 0.15, 0.05, 0.05, 0.05, 0.0, centre_paint(crate::entity_model::TEX_ITEM_RED_DYE)),
+                part(tip.0, tip.1 - line_len - 0.015, 0.03, 0.03, 0.03, 0.0, steel),
             ]
         }
         // A fork, a grip and the band between the prongs.
@@ -362,6 +370,49 @@ pub(crate) mod tests {
             assert!(max_x(&right) > 0.2 && min_x(&right) > -0.05, "{name}: right-hand feature points to +X");
             assert!(min_x(&left) < -0.2 && max_x(&left) < 0.05, "{name}: left-hand feature points to -X");
         }
+    }
+
+    #[test]
+    fn the_sword_is_long_narrow_and_pointed_with_a_wide_guard() {
+        // Wood, so the blade (the tier's wood tile) and the guard (iron) differ in
+        // paint and can be measured apart.
+        let v = tool_model(ToolType::Sword, ToolMaterial::Wood, HandSide::Right);
+        let blade = tier_paint(ToolMaterial::Wood);
+        let guard = metal();
+        let on = |paint: Paint| -> Vec<[f32; 3]> {
+            v.iter().filter(|q| q.tex_layer == paint.layer && q.uv == paint.uv()).map(|q| q.position).collect()
+        };
+        let width = |pts: &[[f32; 3]], lo: f32, hi: f32| -> f32 {
+            pts.iter().filter(|p| (lo..hi).contains(&p[1])).map(|p| p[0].abs()).fold(0.0f32, f32::max) * 2.0
+        };
+        let blade_pts = on(blade);
+        let top = blade_pts.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+        let bottom = blade_pts.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+        assert!(top >= 0.34 && top < 0.35, "the point reaches the top of the hand envelope, inside it ({top})");
+        assert!(top - bottom >= 0.5, "the blade is long ({}); it was 0.41", top - bottom);
+        let low = width(&blade_pts, -0.2, 0.19);
+        let high = width(&blade_pts, 0.19, 0.33);
+        let tip = width(&blade_pts, 0.33, 0.36);
+        assert!(low <= 0.08, "the blade is narrow ({low}); it was 0.13");
+        assert!(high < low && tip < high && tip <= 0.035, "the blade tapers to a point: {low} {high} {tip}");
+        let crossguard = width(&on(guard), -0.24, -0.19);
+        assert!(crossguard > low * 3.0, "the guard ({crossguard}) is wider than the blade ({low})");
+    }
+
+    #[test]
+    fn the_fishing_rod_has_a_line_a_float_and_a_hook() {
+        let v = tool_model(ToolType::FishingRod, ToolMaterial::Iron, HandSide::Right);
+        let float = centre_paint(crate::entity_model::TEX_ITEM_RED_DYE);
+        let line = centre_paint(TEX_ITEM_STRING);
+        let ys = |paint: Paint| -> Vec<f32> { v.iter().filter(|q| q.tex_layer == paint.layer && q.uv == paint.uv()).map(|q| q.position[1]).collect() };
+        assert!(!ys(float).is_empty(), "a small float");
+        let line_ys = ys(line);
+        assert!(!line_ys.is_empty(), "a line");
+        let line_len = line_ys.iter().cloned().fold(f32::MIN, f32::max) - line_ys.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(line_len >= 0.2, "the line hangs a good way ({line_len})");
+        let float_top = ys(float).iter().cloned().fold(f32::MIN, f32::max);
+        let line_top = line_ys.iter().cloned().fold(f32::MIN, f32::max);
+        assert!(float_top < line_top, "the float hangs on the line, below the tip");
     }
 
     #[test]

@@ -20,7 +20,9 @@
 //!   material with no background to cut away ([`FULL_TILE_BLOCKS`]): a sprite
 //!   of them would be a square card, so they keep the small cube.
 //!
-//! Materials, plans and armour keep their cube looks. A tool is a thin slab when
+//! Plans and armour keep their cube looks, and so does a dropped or framed
+//! material; a material in the hand is a flat cut-out sprite of its icon when the
+//! icon has a transparent background. A tool is a thin slab when
 //! its type is unknown, and its own box model otherwise (`held_tool_model`, in
 //! the hand only; a dropped tool is still its tier's cube).
 //!
@@ -257,6 +259,18 @@ pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) 
             // texture. An unknown id (e.g. a newer peer's material this build
             // doesn't know) falls back to the stick icon.
             let tex = MaterialId::try_from(id).ok().map(material_texture).unwrap_or(TEX_ITEM_STICK);
+            // A material whose icon has a transparent background is held as a
+            // flat cut-out sprite, like a held torch (a cube of it would draw
+            // the transparent texels as black). An icon with no background to
+            // cut away keeps the small cube.
+            if icon_has_clear_background(tex) {
+                let mut verts = sprite_triangles(tex, HELD_SPRITE_WIDTH);
+                let offset = sprite_offset(side);
+                for v in &mut verts {
+                    v.position = (Vec3::from(v.position) + offset).to_array();
+                }
+                return verts;
+            }
             let mut verts = Vec::with_capacity(36);
             push_cuboid(&mut verts, Vec3::ZERO, Vec3::splat(0.3), tex, tex, tex);
             verts
@@ -352,6 +366,26 @@ fn stock_masks() -> &'static [Mask] {
 /// sprite face drops whatever of it the new art leaves transparent.
 pub(crate) fn layer_mask(layer: u32) -> Mask {
     stock_masks().get(layer as usize).copied().unwrap_or(SOLID)
+}
+
+/// Whether the item `held` is held as a flat sprite (a billboard-class block or a
+/// material whose icon has a transparent background): the caller that stands the
+/// item upright in first person takes the sprite's hand offset out and lifts it.
+pub fn held_is_sprite(held: ItemRef, registry: &BlockRegistry) -> bool {
+    match held {
+        ItemRef::Block(id) => matches!(block_look(id, registry), ItemLook::Sprite { .. }),
+        ItemRef::Material(id) => {
+            let tex = MaterialId::try_from(id).ok().map(material_texture).unwrap_or(TEX_ITEM_STICK);
+            icon_has_clear_background(tex)
+        }
+        _ => false,
+    }
+}
+
+/// Whether layer `layer`'s icon has at least one transparent texel to cut away
+/// (so a sprite of it is not a square card).
+pub(crate) fn icon_has_clear_background(layer: u32) -> bool {
+    layer_mask(layer).iter().any(|row| *row != 0xFFFF)
 }
 
 fn opaque(mask: &Mask, x: i32, y: i32) -> bool {
@@ -507,8 +541,54 @@ mod tests {
     }
 
     #[test]
-    fn material_makes_nonempty_cube() {
-        assert_eq!(held_item_mesh(ItemRef::Material(0).into(), &test_registry(), HandSide::Right).len(), 36);
+    fn a_held_material_is_a_nonempty_mesh() {
+        assert!(!held_item_mesh(ItemRef::Material(0).into(), &test_registry(), HandSide::Right).is_empty());
+    }
+
+    #[test]
+    fn no_held_material_draws_a_transparent_texel_as_opaque() {
+        // A held material is either a cut-out sprite (every vertex carries the
+        // cutout bit, so `fs_main_cutout` drops the icon's transparent texels,
+        // and every edge strip samples an opaque texel) or, when its icon has no
+        // background to cut away, a cube of a fully opaque icon.
+        let reg = test_registry();
+        let mut checked = 0;
+        for id in 0..=u16::MAX {
+            let Ok(m) = MaterialId::try_from(id) else { continue };
+            let layer = material_texture(m);
+            let mesh = held_item_mesh(ItemRef::Material(id).into(), &reg, HandSide::Right);
+            assert!(!mesh.is_empty(), "{m:?} draws nothing");
+            checked += 1;
+            if icon_has_clear_background(layer) {
+                assert!(mesh.iter().all(|v| v.tex_layer & CUTOUT_FLAG != 0 && v.tex_layer & !CUTOUT_FLAG == layer), "{m:?}: a held material with a clear background must be a cut-out sprite");
+                let mask = layer_mask(layer);
+                for tri in mesh.chunks_exact(3) {
+                    let n = Vec3::from(tri[0].normal);
+                    if n.z.abs() > 0.5 {
+                        continue; // front and back show the whole icon; the cutout bit drops its clear texels
+                    }
+                    let uv = [0, 1, 2].map(|i| tri[i].uv).iter().fold([0.0f32; 2], |a, u| [a[0] + u[0] / 3.0, a[1] + u[1] / 3.0]);
+                    let (x, y) = ((uv[0] * 16.0) as usize, (uv[1] * 16.0) as usize);
+                    assert!((mask[y.min(15)] >> x.min(15)) & 1 == 1, "{m:?}: an edge strip samples transparent texel ({x}, {y})");
+                }
+            } else {
+                assert!(layer_mask(layer).iter().all(|r| *r == 0xFFFF), "{m:?}: a cube of an icon with clear texels");
+                assert_eq!(mesh.len(), 36);
+            }
+        }
+        assert!(checked > 20, "the material table was not enumerated ({checked})");
+    }
+
+    #[test]
+    fn bread_in_the_hand_is_a_flat_sprite_beside_the_fist() {
+        let reg = test_registry();
+        let bread = MaterialId::Bread as u16;
+        assert!(held_is_sprite(ItemRef::Material(bread), &reg));
+        let mesh = held_item_mesh(ItemRef::Material(bread).into(), &reg, HandSide::Right);
+        let (min_x, max_x) = mesh.iter().fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[0]), a.1.max(v.position[0])));
+        assert!(min_x > 0.25 - HELD_SPRITE_WIDTH / 2.0 - 0.01 && max_x <= 0.25 + HELD_SPRITE_WIDTH / 2.0 + 0.01, "sprite sits beside the fist: {min_x}..{max_x}");
+        let thick = mesh.iter().map(|v| v.position[2].abs()).fold(0.0f32, f32::max);
+        assert!(thick < 0.03, "a sprite is thin ({thick})");
     }
 
     #[test]

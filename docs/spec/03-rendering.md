@@ -1475,8 +1475,9 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   bottom layers on full UVs (held 0.4, dropped 0.2, framed the 0.5 x 0.5 x
   0.1875 box off the plate). So a block can't look one way in the world and
   another as an item. A placed micro-model draws its shell in the world; its
-  item follows the block's class. Tools, materials, plans and armour keep
-  their slab and cubes.
+  item follows the block's class. Plans and armour keep their cubes, and so does a
+  dropped or framed material; a tool in the hand is its own model (below) and a
+  material in the hand is a flat sprite (below).
 - **Held tools (as built, 2026-11-13).** A tool held in the hand is no longer
   one grey slab: each `ToolType` is its own small box model
   (`held_tool_model.rs`: pickaxe, axe, sword, shovel, hoe, bow, flint and steel,
@@ -1499,6 +1500,22 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   guess. `held_tool_model::parts` is an exhaustive `match`: the shield
   (`ToolType::Shield`, off-hand plan slice 5) fails to compile there until it has
   a shape.
+- **Held materials and the polished sword and rod (2026-11-13).** A material in
+  the hand (bread, a stick, an ingot, ...) is the flat cut-out sprite of its icon,
+  the path a held torch takes (`item_model::held_item_mesh`, `HELD_SPRITE_WIDTH`,
+  the sprite offset; the first-person view takes the offset out and stands it
+  upright, `item_model::held_is_sprite`), when its icon has a transparent
+  background to cut away (`icon_has_clear_background`); an icon with none keeps
+  the small cube. Before, a held material was always a cube, and a bread icon's
+  transparent texels drew black. A test walks every material and pins that either
+  the mesh is a cut-out sprite (every vertex carries the cutout bit, every edge
+  strip samples an opaque texel) or the icon is fully opaque. The sword is longer
+  and narrower (about 0.54 of blade against 0.41, a quarter as wide again as a
+  stick at the foot and tapering in three steps to a point), with a crossguard
+  wider than the blade and a short grip; the whole sword still fits the hand
+  envelope (y -0.34 .. 0.35), which caps how long the blade can be. The fishing rod
+  has a line hanging from its tip with a small red float and a hook below it, from
+  the string, red-dye and iron tiles.
 - **The avatar's two hands.** `entity_model::build_player_avatar_vertices_with`
   holds the main-hand item (`held_*`) at the right arm's hand anchor and the
   off-hand item (`off_*`) at the left arm's (index 2), each through the same
