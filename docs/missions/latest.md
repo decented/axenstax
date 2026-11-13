@@ -1,10 +1,10 @@
-# Axe'n'Stax test missions: build 0.2.35
+# Axe'n'Stax test missions: build 0.2.36
 
 This is the test guide for the current build. A tester, or a chat assistant co-hosting their session, reads it for what to type, exact numbers, what success looks like, and why something might not work.
 
-Everything in this file was checked against the game's code for build 0.2.35. If the game and this guide disagree, that is worth reporting.
+Everything in this file was checked against the game's code for build 0.2.36. If the game and this guide disagree, that is worth reporting.
 
-- **Build:** 0.2.35 (desktop app, Linux)
+- **Build:** 0.2.36 (desktop app, Linux)
 - **This session:** first the "Ask first" questions, then the "Fixed since last time" re-checks (Mission 0), then any of the missions "On your own"
 - **Coming next:** missions at a village, and missions with a friend
 
@@ -24,7 +24,7 @@ Last time, the whole inventory disappeared during a fight with brigands. Brigand
 
 ## Fixed since last time (re-check these first)
 
-These were found in the last playtest (build 0.2.34) and are fixed in 0.2.35. Check each one and say whether it now works. Mission 0 below walks through them.
+These were found in the last playtest (build 0.2.34) and are fixed in 0.2.36 (some first came out in 0.2.35). Check each one and say whether it now works. Mission 0 below walks through them.
 
 1. **A torch in an item frame looks right.** It lies flat on the frame showing the whole torch, from the front, the side and above, with no black box round it.
 2. **A torch dropped on the ground, or held in your hand, is a flat torch, not a dark cube.** To see what you are holding, press **F5** for the camera behind you. The same goes for flowers, saplings, rails and tall grass.
@@ -32,20 +32,22 @@ These were found in the last playtest (build 0.2.34) and are fixed in 0.2.35. Ch
 4. **Respawning without a bed puts you on dry land**, near where the world started. Before, it could drop you from the sky into the sea. Worlds made before this build are fixed when they load, unless you set a spawn with a bed or `/sp`.
 5. **Satoshi's house is built on dry ground near where you start, and shows up at once.** Before, it could float on the sea and stay invisible until you broke a block nearby. It is never built on top of anything you placed. A house that was already built stays where it is.
 6. **Respawning at a bed puts you next to the bed**, inside the room, not on the roof.
+7. **Thunder is softer.** It rumbles in just after the flash instead of hitting at full volume, and a bolt far away sounds quieter than one close by. To turn thunder down on its own, press **Esc**, then **Settings**, and move the **Thunder** slider in the sound settings.
 
-**New in 0.2.35:**
+**New in 0.2.36:**
 
 - **Bigger chat text.** Chat and commands are 1.5 times bigger. To make them bigger still, press **Esc**, then **Settings**, then move the **Chat text size** slider (100% to 300%).
 - **The Esc menu button that used to say "Graphics" now says "Settings".**
 - **Tab finishes commands, like Minecraft.** Type `/gi` and press **Tab** to get `/give`. Type `/give tor` and press **Tab** to get `/give torch`. Press **Tab** again for the next suggestion, **Shift+Tab** to go back. The suggestions show above the chat line, and you can also click one.
 - **Tall grass** in the world now shows only its blades, with no dark green square behind them.
+- **A weather command.** `/weather clear` stops rain and keeps the sky clear for 20 minutes. `/weather rain` and `/weather storm` (or `/weather thunder`) start rain or a thunderstorm for 5 minutes. Add a number of seconds to choose how long, up to 3600 (one hour), e.g. `/weather clear 600`. Like other commands, it marks the world as "cheats used". It does nothing in the Workshop or while a trial sets the weather.
+- **More games.** On the lobby's **More to play** page, a new **More games** section shows three other games by the same makers: Stampede, Twang Thang and Cluster Flock. They are Android games; **See it** opens their page on the website.
 
 **Known, not fixed yet** (if one of these happens, it is already known):
 
 - In first person, your hand sits mostly below the screen, so you cannot see what you are holding. Press **F5** to see it.
 - The world is split into columns 16 by 16 blocks wide. A sealed room built across the edge of one of those columns can stay lit like daytime inside at night, even with no torch.
 - A Satoshi house that was already built over the sea stays there.
-- Thunder is loud and comes all at once. There is no `/weather` command yet. Both are planned for the next build.
 
 **Good to know:** brigands cannot take or carry your items. If your whole inventory disappears, you died: your things are in a grave block where it happened.
 
@@ -66,7 +68,7 @@ These were found in the last playtest (build 0.2.34) and are fixed in 0.2.35. Ch
 2. **Press T** (or /) to open chat and type a command. Press **Tab** to finish a command or an item name.
 3. **Type `/gm c`** to switch to Creative so you can fly. Find **flat, open grass with no trees**. Missions 1 to 3 all happen there.
 4. **Type `/gm s`** to switch back to Survival. The game must reply **"Switched to survival"** (or "already in survival").
-5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.35**. Use that number in the feedback.
+5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.36**. Use that number in the feedback.
 
 **Good to know:** hunger drops 1 point (half an icon on the hunger bar) every 30 seconds, whatever you are doing. A full bar lasts about 10 minutes, so take some food (berries, bread or cooked meat), or use `/give bread 16` in a test world.
 
@@ -74,7 +76,7 @@ These were found in the last playtest (build 0.2.34) and are fixed in 0.2.35. Ch
 
 ---
 
-## Mission 0: Re-checks for 0.2.35
+## Mission 0: Re-checks for 0.2.36
 
 **What it tests:** the fixes in "Fixed since last time".
 
@@ -83,11 +85,12 @@ These were found in the last playtest (build 0.2.34) and are fixed in 0.2.35. Ch
 3. **Blight:** if you still have a giant wheat field from last time, look for grey plants. Otherwise do Mission 2 and check the colour.
 4. **Respawn:** in your test world, with no bed, type `/kill` or let something defeat you, then respawn. Say where you came back.
 5. **Chat:** type `/gi` and press **Tab**. Then try `/give tor` and **Tab**, and **Tab** again. Then change **Esc, Settings, Chat text size** and see the chat get bigger.
+6. **Thunder and weather:** type `/weather storm` and wait for lightning (a bolt comes about every 15 seconds in a storm, sometimes sooner or later). Say whether the thunder still makes you jump. Then type `/weather clear` and check the rain stops.
 
-**Success:** the framed torch is a flat torch from every side with no black box; the dropped and held torch are flat torches; blighted wheat is grey; you respawn standing on dry land; Tab finishes the words and the chat text size changes.
+**Success:** the framed torch is a flat torch from every side with no black box; the dropped and held torch are flat torches; blighted wheat is grey; you respawn standing on dry land; Tab finishes the words and the chat text size changes; the thunder rumbles in after the flash and is not a jump scare; `/weather clear` stops the storm.
 
 **If it does not work:**
-- Anything still looks like the old build: check the build number at the bottom of Settings says **v0.2.35**.
+- Anything still looks like the old build: check the build number at the bottom of Settings says **v0.2.36**.
 - Tab does nothing: Tab only completes lines that start with `/`.
 
 ---
@@ -276,6 +279,7 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 | `/time set day` / `/time set night` / `/time set midnight` | Daytime / night-time / the darkest time |
 | `/sp` | Sets where you respawn to where you stand |
 | `/kill` | Defeats you straight away (to test respawning) |
+| `/weather clear` / `/weather rain` / `/weather storm` `[seconds]` | Clear sky (20 minutes) / rain / thunderstorm (5 minutes), or for that many seconds |
 | **Tab** / **Shift+Tab** | Finishes a command or item name / goes back one suggestion |
 | **F5** | Camera behind you (see what you are holding) |
 | **F3** | Shows the debug overlay, including **FPS** (frames per second) |
@@ -289,7 +293,7 @@ At the end, write a short list like this, one line per mission, and hand it to t
 ```
 Build (bottom of Settings):
 Ask first (brigand fight): "You Died!" screen? / typed /gm c? / grave there, things inside?:
-Re-checks: framed torch / dropped and held torch / grey blight / respawn on dry land / bed respawn / chat Tab and text size: works / doesn't. What happened:
+Re-checks: framed torch / dropped and held torch / grey blight / respawn on dry land / bed respawn / chat Tab and text size / softer thunder / /weather: works / doesn't. What happened:
 Mission 0 Re-checks: worked / didn't. What happened:
 Mission 1 Path: worked / didn't. What happened:
 Mission 2 Wheat field: worked / didn't. What happened:
