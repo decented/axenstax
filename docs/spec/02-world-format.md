@@ -2507,7 +2507,12 @@ against the slice before allocating.
       are inert). The writer emits `None` when no player holds an off-hand item; a save written before the field
       (or with a short column) loads every off-hand empty, and the stack is clamped to its item's max stack like
       any restored slot. Local slots only: a joiner's off-hand rides the joiner sidecar (v6, protocol 101: see Spec 04), and
-      nothing here is on the wire. Footer arithmetic: field count 63 + revision 8 = 71; `FOOTER_FIELD_COUNTS`
+      nothing here is on the wire. A bound local seat (one with a `personal_binding`, as every world hosted
+      for joiners or received in a handover has) also carries its off-hand in its `local_personal` record,
+      whose install runs over field 63 on reload; that record is built from the seat's own window
+      (`joiner_save::capture_local`, off-hand review B1), not through the handover seed. A handover's transfer
+      copy clears field 63 with the other seat rows (`eligibility::neutralise`), and its import refuses a copy that
+      still holds it: each participant's off-hand travels in its own seed (Spec 04 v101, "Handover seeds"). Footer arithmetic: field count 63 + revision 8 = 71; `FOOTER_FIELD_COUNTS`
       gains `(71, [63])`; a world written at footer 70 or older still opens, with every off-hand empty. The
       appended field adds no block id and no enum variant, so `SAVE_LAYOUT_REVISION` does not move for it.
     - **The `/weather clear` hold and field 62 (format 70, 2026-11-13).** `Weather::clear_until`

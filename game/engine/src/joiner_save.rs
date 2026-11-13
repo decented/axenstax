@@ -31,10 +31,26 @@ const VERSION: u8 = 6;
 /// off-hand empty.
 const VERSION_V5: u8 = 5;
 /// The sidecar versions a personal snapshot or a bound record may lead with:
-/// v3 to the current one. Every gate that decides "this is a record, not the
-/// checkpoint seed (v2)" reads this, so a new layout can't be refused by a
-/// forgotten literal.
+/// v3 to the current one. Every gate that decides "this is a record, not a
+/// checkpoint seed ([`is_seed`])" reads this, so a new layout can't be
+/// refused by a forgotten literal.
 pub(crate) const RECORD_VERSIONS: std::ops::RangeInclusive<u8> = 3..=VERSION;
+/// The leading byte of the checkpoint seed of a seat whose off-hand holds an
+/// item ([`JoinerSeedOffhand`], off-hand review B2). Seeds of this kind sit
+/// above 0x80, a range record versions (counting up from 1) never reach, so
+/// the next record version can never be read as a seed or a seed as a record.
+pub(crate) const SEED_OFFHAND: u8 = 0x82;
+const _: () = assert!(VERSION < 0x80, "record versions stay below the seed range");
+
+/// Is `bytes` an immutable checkpoint seed: v2 (every seed with an empty
+/// off-hand, byte for byte what it always was) or [`SEED_OFFHAND`]? The one
+/// test every seed gate reads (`bounded_decode::sidecar`,
+/// `personal_adapter::read_personal` and `preflight`; all native, as the
+/// handover is).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn is_seed(bytes: &[u8]) -> bool {
+    matches!(bytes.first(), Some(&VERSION_V2) | Some(&SEED_OFFHAND))
+}
 const VERSION_V4: u8 = 4;
 const VERSION_V3: u8 = 3;
 const VERSION_V2: u8 = 2;
@@ -178,9 +194,13 @@ pub(crate) fn capture_local(
         return Ok(None);
     };
     if !binding.persists() { return Err("Guest progression cannot be saved".into()); }
-    let seed = crate::handover::live::capture::local0_sidecar(slot, [0; 16]).map_err(|r| r.0.to_string())?;
+    // Off-hand review B1: the record is built from the seat's own window, never
+    // through a checkpoint seed, so nothing the window holds (the off-hand) is
+    // lost on the way. The same fields the seed round trip gave: no calendar,
+    // no night mark, no debt, a complete history.
+    let window = crate::handover::live::capture::local0_window(slot);
+    let mut save = JoinerSave::from_parts(&window, slot.combat.health, slot.combat.hunger, slot.spawn_pos.to_array(), [0; 16], None);
     let record = crate::progression::GameplayRecord::from_slot(binding.context(), slot)?;
-    let mut save = JoinerSave::decode(&seed)?;
     save.personal = Some(BoundPersonal::with_gameplay(binding.clone(), &record)?);
     Ok(Some(LocalPersonalSave(save.encode()?)))
 }
@@ -254,6 +274,27 @@ pub(crate) struct JoinerSaveV2 {
     owed: Vec<OwedEntry>,
     /// v2 — whether `owed` is the whole story.
     obligation_history: ObligationHistory,
+}
+
+/// The checkpoint seed of a seat whose off-hand holds an item (off-hand review
+/// B2): the v2 seed's fields in v2's order, then the off-hand. Like v2 it holds
+/// no personal binding (old mutable import bindings must never be hashed into
+/// the next transfer) and no pose. Written only for a non-empty off-hand, so
+/// every other seed stays v2 byte for byte; read back with an empty off-hand it
+/// is refused (v2 is that seed's one form).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct JoinerSeedOffhand {
+    version: u8,
+    slots: Vec<Slot>,
+    armour: [Option<crate::save::SavedArmourPiece>; 4],
+    health: f32,
+    hunger: u8,
+    spawn: [f32; 3],
+    run_id: [u8; 16],
+    slept_night: Option<u32>,
+    owed: Vec<OwedEntry>,
+    obligation_history: ObligationHistory,
+    offhand: Slot,
 }
 
 /// Exact delivered v4 body, read and upgraded ([`JoinerSave::from_v4`]).
@@ -481,6 +522,10 @@ impl JoinerSave {
                 let v2: JoinerSaveV2 = options().deserialize(bytes).map_err(|e| e.to_string())?;
                 Self::from_v2(v2)
             }
+            Some(&SEED_OFFHAND) => {
+                let seed: JoinerSeedOffhand = options().deserialize(bytes).map_err(|e| e.to_string())?;
+                Self::from_seed_offhand(seed)?
+            }
             Some(&VERSION_V1) => {
                 let v1: JoinerSaveV1 = options().deserialize(bytes).map_err(|e| e.to_string())?;
                 Self::from_v1(v1)?
@@ -568,26 +613,74 @@ impl JoinerSave {
         }
     }
 
-    /// Frozen checkpoints retain the known v2 window seed. Personal maps
-    /// travel in their freshly rebound schema1 member; old mutable import
-    /// bindings must never be hashed into the next transfer.
+    /// The seed of a seat whose off-hand holds an item ([`JoinerSeedOffhand`]).
+    pub(crate) fn from_seed_offhand(seed: JoinerSeedOffhand) -> Result<Self, String> {
+        if seed.version != SEED_OFFHAND {
+            return Err("invalid off-hand seed".into());
+        }
+        if seed.offhand.restore()?.is_none() {
+            return Err("an off-hand seed with an empty off-hand is not canonical (v2 is)".into());
+        }
+        Ok(Self {
+            version: VERSION,
+            slots: seed.slots,
+            armour: seed.armour,
+            health: seed.health,
+            hunger: seed.hunger,
+            spawn: seed.spawn,
+            calendar_id: seed.run_id,
+            slept_night: seed.slept_night,
+            owed: seed.owed,
+            obligation_history: seed.obligation_history,
+            personal: None,
+            pose: None,
+            offhand: seed.offhand,
+        })
+    }
+
+    /// The frozen checkpoint's window seed. An empty off-hand writes the v2
+    /// seed exactly as before (so frozen checkpoints and their digests are
+    /// unchanged); an off-hand holding an item writes [`JoinerSeedOffhand`]
+    /// (off-hand review B2). Personal maps travel in their freshly rebound
+    /// schema1 member; old mutable import bindings must never be hashed into
+    /// the next transfer. A seed that would not read back to this window
+    /// exactly is an error, never a silent loss.
     pub fn encode_seed(&self) -> Result<Vec<u8>, String> {
-        self.window()?;
+        let window = self.window()?;
         self.debt()?;
-        let v2 = JoinerSaveV2 {
-            version: VERSION_V2,
-            slots: self.slots.clone(),
-            armour: self.armour,
-            health: self.health,
-            hunger: self.hunger,
-            spawn: self.spawn,
-            run_id: self.calendar_id,
-            slept_night: self.slept_night,
-            owed: self.owed.clone(),
-            obligation_history: self.obligation_history,
-        };
-        let bytes = bincode::serialize(&v2).map_err(|e| e.to_string())?;
-        Self::decode(&bytes)?;
+        let bytes = if window.offhand.is_none() {
+            bincode::serialize(&JoinerSaveV2 {
+                version: VERSION_V2,
+                slots: self.slots.clone(),
+                armour: self.armour,
+                health: self.health,
+                hunger: self.hunger,
+                spawn: self.spawn,
+                run_id: self.calendar_id,
+                slept_night: self.slept_night,
+                owed: self.owed.clone(),
+                obligation_history: self.obligation_history,
+            })
+        } else {
+            bincode::serialize(&JoinerSeedOffhand {
+                version: SEED_OFFHAND,
+                slots: self.slots.clone(),
+                armour: self.armour,
+                health: self.health,
+                hunger: self.hunger,
+                spawn: self.spawn,
+                run_id: self.calendar_id,
+                slept_night: self.slept_night,
+                owed: self.owed.clone(),
+                obligation_history: self.obligation_history,
+                offhand: self.offhand.clone(),
+            })
+        }
+        .map_err(|e| e.to_string())?;
+        let back = Self::decode(&bytes)?;
+        if back.slots != self.slots || back.armour != self.armour || back.offhand != self.offhand {
+            return Err("a seed that would not carry the whole window".into());
+        }
         Ok(bytes)
     }
 

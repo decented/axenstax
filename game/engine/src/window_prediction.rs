@@ -9,8 +9,8 @@ pub struct WindowRecipe {
 
 /// Bodies stay in live holdings; the journal retains only immutable markers.
 /// All current bodies plus one fixed encoding scratch are bounded before store.
-pub fn retain_private_window(inv: &Inventory, cursor: &Option<crate::item::ItemStack>, grid: &CraftGrid) -> Result<(), String> {
-    let stacks = || inv.slots_iter().chain(std::iter::once(cursor.as_ref())).chain(grid.iter().flatten().map(Option::as_ref));
+pub fn retain_private_window(inv: &Inventory, offhand: &Option<crate::item::ItemStack>, cursor: &Option<crate::item::ItemStack>, grid: &CraftGrid) -> Result<(), String> {
+    let stacks = || inv.slots_iter().chain(std::iter::once(offhand.as_ref())).chain(std::iter::once(cursor.as_ref())).chain(grid.iter().flatten().map(Option::as_ref));
     let mut residency = crate::body_residency::BodyResidency::default();
     for stack in stacks().flatten() {
         if let Item::Plan(body) = &stack.item { residency.observe(body).map_err(|e| format!("Private Plan residency unavailable: {e:?}"))?; }
@@ -22,7 +22,7 @@ pub fn retain_private_window(inv: &Inventory, cursor: &Option<crate::item::ItemS
 }
 
 pub fn reserve_click(remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4], offhand: &Option<crate::item::ItemStack>, cursor: &Option<crate::item::ItemStack>, grid: &CraftGrid, click: &WindowClick, ctx: &ClickCtx, registry: &crate::block::BlockRegistry) -> Result<crate::action_identity::ActionHeader, String> {
-    retain_private_window(inv, cursor, grid)?;
+    retain_private_window(inv, offhand, cursor, grid)?;
     let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, cursor, grid, registry);
     let mut staged = crate::staged_window::stage(&raw, click, ctx);
     let station = crate::window::station_after(ctx.station, click, &staged.result);

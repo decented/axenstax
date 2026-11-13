@@ -251,7 +251,7 @@ fn read_personal(
         confirm_durable(&target)?;
         return Ok(Some((save, false)));
     }
-    if bytes.first() != Some(&2) {
+    if !crate::joiner_save::is_seed(&bytes) {
         return Err("unsupported personal checkpoint seed".into());
     }
     let selected = crate::hosted_server::pubkey_to_npub(&key);
@@ -623,7 +623,7 @@ pub(crate) fn preflight(
     context: crate::handover::personal::RecordContext,
 ) -> Result<(), Refusal> {
     let result = (|| -> Result<(), String> {
-        if seed.first() != Some(&2) { return Err("personal transfer needs an immutable v2 seed".into()); }
+        if !crate::joiner_save::is_seed(seed) { return Err("personal transfer needs an immutable seed".into()); }
         let mut save = JoinerSave::decode(seed)?;
         let record = crate::handover::personal::PersonalRecord::decode(progress, &context)
             .map_err(|e| e.to_string())?;

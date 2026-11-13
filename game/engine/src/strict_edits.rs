@@ -221,7 +221,7 @@ fn reserve(
     registry: &crate::block::BlockRegistry,
 ) -> Result<crate::action_identity::ActionHeader, String> {
     let slot_u8 = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A typed edit needs a hotbar slot")?;
-    crate::window_prediction::retain_private_window(inv, &ui.cursor_item, &ui.grid)?;
+    crate::window_prediction::retain_private_window(inv, offhand, &ui.cursor_item, &ui.grid)?;
     let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, &ui.cursor_item, &ui.grid, registry);
     let mut after = raw.clone();
     {

@@ -465,13 +465,21 @@ pub(super) fn sidecar(bytes: &[u8]) -> Result<()> {
     if bytes.len() > 65536 {
         return Err(Error::Limit("sidecar bytes"));
     }
-    use crate::joiner_save::{JoinerSave, JoinerSaveV2};
-    if bytes.first() != Some(&2) {
-        return Err(Error::Invalid(
-            "checkpoint sidecar must be immutable v2 seed",
-        ));
-    }
-    let saved = JoinerSave::from_v2(binary::<JoinerSaveV2>(bytes, 2 * 1024 * 1024)?);
+    use crate::joiner_save::{JoinerSave, JoinerSaveV2, JoinerSeedOffhand};
+    // The two seed layouts (`joiner_save::is_seed`): v2, and the seed of a
+    // seat whose off-hand holds an item. Anything else is refused.
+    let saved = match bytes.first() {
+        Some(&2) => JoinerSave::from_v2(binary::<JoinerSaveV2>(bytes, 2 * 1024 * 1024)?),
+        Some(&crate::joiner_save::SEED_OFFHAND) => JoinerSave::from_seed_offhand(
+            binary::<JoinerSeedOffhand>(bytes, 2 * 1024 * 1024)?,
+        )
+        .map_err(|_| Error::Invalid("actual checkpoint off-hand seed"))?,
+        _ => {
+            return Err(Error::Invalid(
+                "checkpoint sidecar must be an immutable seed",
+            ));
+        }
+    };
     JoinerSave::decode(bytes).map_err(|_| Error::Invalid("sidecar validation"))?;
     saved
         .window()

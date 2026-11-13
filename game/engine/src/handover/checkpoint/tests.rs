@@ -1430,7 +1430,12 @@ fn handover_checkpoint_an_empty_off_hand_seed_is_the_v2_layout_byte_for_byte() {
     ))
     .unwrap();
     assert_eq!(seed, v2, "an empty off-hand's seed is the v2 layout");
-    println!("SEEDPIN {} {}", seed.len(), hex::encode(crate::handover::hash(&seed)));
+    // The bytes the code wrote before the off-hand seed existed (taken from
+    // that build, 2026-11-13).
+    assert_eq!(
+        (seed.len(), hex::encode(crate::handover::hash(&seed)).as_str()),
+        (442, "6541d10fea7df1d9094d5ab26991603613041b35032a68e8399ef3275bea6e64"),
+    );
     super::bounded_decode::sidecar(&seed).unwrap();
 }
 

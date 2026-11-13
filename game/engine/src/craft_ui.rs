@@ -280,7 +280,7 @@ impl CraftingUi {
         registry: &crate::block::BlockRegistry,
     ) -> Result<crate::container_window::ContainerApplied, String> {
         self.sync_auto_refill_joined(remote, inv, armour, offhand)?;
-        crate::window_prediction::retain_private_window(inv, &self.cursor_item, &self.grid)?;
+        crate::window_prediction::retain_private_window(inv, offhand, &self.cursor_item, &self.grid)?;
         let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, &self.cursor_item, &self.grid, registry);
         let mut scratch = crate::container_window::ContainerData::of(container.as_ref());
         let staged = crate::staged_window::stage_container(&raw, &mut scratch, click, ctx);

@@ -91,7 +91,9 @@ pub fn offhand_has_ammo(weapon: ShotWeapon, off: Option<&ItemStack>) -> bool {
 /// picks it: the off-hand's item when it holds ammo `weapon` can shoot (a
 /// Nostrich Arrow included), else the weapon's own ammo ([`ammo_for`]) from
 /// the bag. A joiner's shot claims it and both copies of its window take it
-/// off-hand first (`joiner_actions::owed_hand`).
+/// off-hand first (`joiner_actions::owed_hand`): a Mirror seat's
+/// (`HostedServer::serve_shoot`) and, since the off-hand review's S1, a Strict
+/// seat's (the server stages the same round from its staged off-hand).
 pub fn round_for(weapon: ShotWeapon, off: Option<&ItemStack>) -> Item {
     match off {
         Some(s) if shoots(weapon, &s.item) => s.item.clone(),
@@ -102,8 +104,8 @@ pub fn round_for(weapon: ShotWeapon, off: Option<&ItemStack>) -> Item {
 /// Take one round of ammo for a local shot (single-player and a host's own
 /// seats): from the off-hand first, when it holds ammo `weapon` can shoot, then
 /// from the bag as before (`find_ammo`, no auto-refill). Returns whether a round
-/// was taken. A joiner's shot is the server's and finds its ammo in the window
-/// (the off-hand is not on the wire yet).
+/// was taken. A joiner's shot is the server's: it claims [`round_for`], and
+/// both copies of its window take that round off-hand first.
 pub fn take_ammo(inv: &mut Inventory, off: &mut Option<ItemStack>, weapon: ShotWeapon) -> bool {
     if offhand_has_ammo(weapon, off.as_ref()) {
         if let Some(stack) = off.as_mut() {

@@ -283,7 +283,7 @@ pub fn route_drop(
     let Some(held) = inv.hotbar_slot(slot).map(|s| s.item.clone()) else { return Ok(None) };
     if matches!(held, crate::item::Item::Plan(_)) { return Ok(None); }
     ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
-    crate::window_prediction::retain_private_window(inv, &ui.cursor_item, &ui.grid)?;
+    crate::window_prediction::retain_private_window(inv, offhand, &ui.cursor_item, &ui.grid)?;
     let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, &ui.cursor_item, &ui.grid, registry);
     let mut after = raw.clone();
     let _ = after.view().inv.take_one_from_hotbar(slot);

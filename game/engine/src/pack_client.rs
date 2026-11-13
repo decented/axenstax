@@ -4,7 +4,7 @@ use crate::{container_window::{ContainerTarget, SharedContainer}, item::{Item, I
 mod tests;
 
 fn remember_window(view: &WindowMut, uses: &crate::use_edits::SentUses) -> Result<(), String> {
-    for stack in view.inv.slots_iter().flatten().chain(view.cursor.iter()).chain(view.grid.iter().flatten().flatten()) {
+    for stack in view.inv.slots_iter().flatten().chain(view.offhand.iter()).chain(view.cursor.iter()).chain(view.grid.iter().flatten().flatten()) {
         if let Item::Plan(body) = &stack.item { crate::plan_store::remember_checked(body, 0)?; }
     }
     for body in uses.private_plans() { crate::plan_store::remember_checked(body, 0)?; }
@@ -18,7 +18,7 @@ pub(crate) fn apply_canonical_window(view: &mut WindowMut, packet: &crate::pack_
     remember_window(view, uses)?;
     let refill = view.inv.auto_refill;
     let locks = view.inv.locked_indices();
-    let held_keys: Vec<_> = view.inv.slots_iter().flatten().chain(view.cursor.iter()).chain(view.grid.iter().flatten().flatten()).filter_map(|stack| match &stack.item {
+    let held_keys: Vec<_> = view.inv.slots_iter().flatten().chain(view.offhand.iter()).chain(view.cursor.iter()).chain(view.grid.iter().flatten().flatten()).filter_map(|stack| match &stack.item {
         Item::Plan(body) if body.marker.is_none() => Some((crate::plan::marker(body), body.develop_state.is_developed())),
         _ => None,
     }).collect();
@@ -45,17 +45,19 @@ pub(crate) fn apply_canonical_window(view: &mut WindowMut, packet: &crate::pack_
         resolve(&mut stack, &held_keys, &mut additional);
         decoded.window.inv.set_slot(at, stack);
     }
+    resolve(&mut decoded.window.offhand, &held_keys, &mut additional);
     resolve(&mut decoded.window.cursor, &held_keys, &mut additional);
     for stack in decoded.window.grid.iter_mut().flatten() { resolve(stack, &held_keys, &mut additional); }
     decoded.window.inv.auto_refill = refill;
     if mode == crate::action_identity::InventoryMode::Mirror { decoded.window.inv.set_locked_from(&locks); }
 
     let mut old_inv = std::mem::replace(view.inv, decoded.window.inv);
+    let old_offhand = std::mem::replace(view.offhand, decoded.window.offhand);
     let old_cursor = std::mem::replace(view.cursor, decoded.window.cursor);
     let old_grid = std::mem::replace(view.grid, decoded.window.grid);
     *view.armour = decoded.window.armour;
     let mut bodies = Vec::with_capacity(held_keys.len());
-    for stack in (0..36).filter_map(|at| old_inv.take_slot(at)).chain(old_cursor).chain(old_grid.into_iter().flatten().flatten()) {
+    for stack in (0..36).filter_map(|at| old_inv.take_slot(at)).chain(old_offhand).chain(old_cursor).chain(old_grid.into_iter().flatten().flatten()) {
         if let Item::Plan(body) = stack.item && body.marker.is_none() { bodies.push(((crate::plan::marker(&body), body.develop_state.is_developed()), body)); }
     }
     fn move_body(stack: &mut Option<ItemStack>, bodies: &mut Vec<(([u8; 32], bool), crate::plan::PlanData)>) {
@@ -72,6 +74,7 @@ pub(crate) fn apply_canonical_window(view: &mut WindowMut, packet: &crate::pack_
         move_body(&mut stack, &mut bodies);
         view.inv.set_slot(at, stack);
     }
+    move_body(view.offhand, &mut bodies);
     move_body(view.cursor, &mut bodies);
     for stack in view.grid.iter_mut().flatten() { move_body(stack, &mut bodies); }
     // Unused old bodies were retained successfully before the marker fence.
@@ -92,7 +95,7 @@ impl crate::GameState {
         let external = remote.pack_retained_usage();
         if self.window_inbox.add_bounded(Vec::new(), Vec::new(), Vec::new(), (external.0, external.1.saturating_add(self.chunk_intake.carried_metadata_bytes()))).is_err() { return false; }
         let p = &self.players[pidx];
-        let held = p.inventory.slots_iter().flatten().chain(p.crafting_ui.cursor_item.iter()).chain(p.crafting_ui.grid.iter().flatten().flatten());
+        let held = p.inventory.slots_iter().flatten().chain(p.offhand.iter()).chain(p.crafting_ui.cursor_item.iter()).chain(p.crafting_ui.grid.iter().flatten().flatten());
         for stack in held {
             if let Item::Plan(body) = &stack.item && let Err(error) = crate::plan_store::remember_checked(body, 0) {
                 log::warn!("Pack request could not retain its private Plan: {error}");

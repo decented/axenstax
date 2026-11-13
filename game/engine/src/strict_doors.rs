@@ -182,7 +182,7 @@ pub fn place_door_joined(
     let slot_u8 = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A door placement needs a hotbar slot")?;
     let halves = door_halves(bottom, facing).ok_or("A door faces a horizontal direction")?;
     ui.sync_auto_refill_joined(remote, inv, armour, offhand)?;
-    crate::window_prediction::retain_private_window(inv, &ui.cursor_item, &ui.grid)?;
+    crate::window_prediction::retain_private_window(inv, offhand, &ui.cursor_item, &ui.grid)?;
     let raw = crate::staged_window::MarkerWindow::capture_parts(inv, armour, offhand, &ui.cursor_item, &ui.grid, registry);
     let mut after = raw.clone();
     crate::strict_edits::place_window(after.view().inv, slot);

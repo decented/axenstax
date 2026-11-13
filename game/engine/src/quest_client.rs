@@ -55,6 +55,7 @@ impl crate::GameState {
             .inventory
             .slots_iter()
             .flatten()
+            .chain(slot.offhand.iter())
             .chain(slot.crafting_ui.cursor_item.iter())
             .chain(slot.crafting_ui.grid.iter().flatten().flatten())
         {

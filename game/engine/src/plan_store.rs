@@ -181,7 +181,7 @@ mod tests {
         // the failing one too and nothing is cached before the retain.
         let failure = crate::fsync::tests::fail_directory_on_match(&root(), 1);
         inv.set_slot(0, Some(crate::item::ItemStack { item: crate::item::Item::Plan(body), count: 1 }));
-        let failed = crate::window_prediction::retain_private_window(&inv, &None, &Default::default());
+        let failed = crate::window_prediction::retain_private_window(&inv, &None, &None, &Default::default());
         assert!(failure.failures() >= 2, "automatic remembering and checked retention both reached the shared directory helper");
         assert!(failed.unwrap_err().starts_with("Plan-store directory was not durably synced:"));
         assert!(root().join(hex::encode(marker)).is_file(), "failure is after rename, not an absent-file shortcut");
@@ -190,7 +190,7 @@ mod tests {
         assert!(!held.cells.is_empty());
         assert_eq!(crate::plan::marker(held), marker);
         drop(failure);
-        crate::window_prediction::retain_private_window(&inv, &None, &Default::default()).unwrap();
+        crate::window_prediction::retain_private_window(&inv, &None, &None, &Default::default()).unwrap();
         assert!(REMEMBERED.with(|set| set.borrow().contains(&cache_key(marker))));
         assert_eq!(resolve(marker).unwrap().cells, held.cells);
     }

@@ -54,6 +54,7 @@ fn validate_metadata(meta: &WorldMeta) -> Result<()> {
 }
 fn validate_neutral(save: &WorldSave) -> Result<()> {
     if save.local_personal.is_some() || !save.players.is_empty()
+        || save.player_offhands.is_some()
         || !save.inventory.is_empty()
         || !save.locked_slots.is_empty()
         || save.player_x.to_bits() != 0

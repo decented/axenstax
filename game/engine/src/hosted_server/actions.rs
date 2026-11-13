@@ -544,8 +544,13 @@ impl HostedServer {
         if surviving.tool_type != historical.tool_type || surviving.material != historical.material {
             self.refuse_typed_action(i, action); return false;
         }
+        // Off-hand review S1: the round the client's rule spends
+        // (`shot::round_for` over the staged window's off-hand), taken off-hand
+        // first as the client takes it (`joiner_actions::owed_hand`): the same
+        // rule as Mirror's `serve_shoot`, so both copies pay from one place.
+        let round = crate::shot::round_for(weapon, effective_view.offhand.as_ref());
         let events = vec![
-            crate::window_events::WindowEvent::Take { hand: crate::hands::Hand::Main, slot: slot as usize, item: Item::Material(crate::shot::ammo_for(weapon)), n: 1, how: "on a shot" },
+            crate::window_events::WindowEvent::Take { hand: crate::hands::Hand::Off, slot: slot as usize, item: round, n: 1, how: "on a shot" },
             crate::window_events::WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot: slot as usize, tool: historical },
         ].into_boxed_slice();
         match crate::window_events::stage_strict_effects(sp, &self.server.registry, &events) {

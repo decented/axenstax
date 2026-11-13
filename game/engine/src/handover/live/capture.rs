@@ -47,7 +47,10 @@ pub fn default_progress(context: RecordContext) -> Vec<u8> {
         .expect("an empty record always encodes")
 }
 
-fn local0_window(slot: &PlayerSlot) -> crate::window_events::EffectiveWindow {
+/// The seat's window: the 36 slots, armour, off-hand, cursor and grid. The
+/// one source of both its handover seed and its `local_personal` record
+/// (`joiner_save::capture_local`).
+pub(crate) fn local0_window(slot: &PlayerSlot) -> crate::window_events::EffectiveWindow {
     crate::window_events::EffectiveWindow {
         inv: slot.inventory.clone(),
         armour: slot.armour_slots,
@@ -63,7 +66,7 @@ fn local0_window(slot: &PlayerSlot) -> crate::window_events::EffectiveWindow {
 pub fn local0_plan_items(slot: &PlayerSlot) -> Vec<crate::item::Item> {
     let w = local0_window(slot);
     let inv = (0..36).filter_map(|i| w.inv.slot(i).map(|s| s.item.clone()));
-    let rest = w.cursor.iter().chain(w.grid.iter().flatten().flatten()).map(|s| s.item.clone());
+    let rest = w.offhand.iter().chain(w.cursor.iter()).chain(w.grid.iter().flatten().flatten()).map(|s| s.item.clone());
     inv.chain(rest)
         .filter(|i| matches!(i, crate::item::Item::Plan(body) if body.marker.is_none()))
         .collect()

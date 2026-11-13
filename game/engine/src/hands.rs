@@ -13,9 +13,9 @@
 //! main hand: an item the list does not know keeps today's behaviour, so the
 //! worst a missing entry costs is an off-hand item that will not fire.
 //!
-//! Local players only for now: a joined client's use packets do not carry a
-//! hand yet, so `game_loop` takes [`Hand::Main`] while joined (slice 2 of the
-//! off-hand plan, `docs/` plan file `offhand-plan.md`).
+//! Since v101 a joined Mirror client's use packets carry the hand; a Strict
+//! seat keeps [`Hand::Main`] for its uses (a BRIDGE in `game_loop`), though its
+//! shots take their round off-hand first on both copies, as every seat's do.
 
 use crate::block::{self, BlockId};
 use crate::crafting::ToolType;
@@ -89,7 +89,13 @@ pub fn use_hand(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> 
         // BRIDGE: a Plan's Inspect dialog is keyed on a hotbar slot, so a Plan
         // in the off-hand never takes the click — replace when the dialog can
         // name the off-hand.
-        Some(o) if !matches!(o, Item::Plan(_)) && item_has_use(o, target) => Hand::Off,
+        Some(Item::Plan(_)) => Hand::Main,
+        // A steed's pack goes on from the main hand only (a joiner's
+        // `PackRequest` names the hotbar slot, `pack_attempt`): aimed at a
+        // mob, a chest in the off-hand never takes the click, in local play as
+        // joined (off-hand review M2).
+        Some(Item::Block(block::CHEST)) if target.mob => Hand::Main,
+        Some(o) if item_has_use(o, target) => Hand::Off,
         _ => Hand::Main,
     }
 }

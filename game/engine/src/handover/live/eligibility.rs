@@ -321,6 +321,9 @@ pub fn neutralise(save: &mut WorldSave, source_npub: &str) -> Result<(), Refusal
     save.satoshi = Default::default();
     save.local_personal = None;
     save.players.clear();
+    // Field 63 is a column of the seat rows: each participant's off-hand
+    // travels in its own seed (off-hand review B2), never here.
+    save.player_offhands = None;
     save.inventory.clear();
     save.locked_slots.clear();
     save.player_x = 0.0;
