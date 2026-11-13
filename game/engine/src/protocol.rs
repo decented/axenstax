@@ -4468,7 +4468,8 @@ mod tests {
         assert_eq!(&payload[8..12], &(-1i32).to_le_bytes(), "the cell");
         assert_eq!(&payload[16..20], &(-3i32).to_le_bytes());
         assert_eq!(payload[20], 0, "the face");
-        assert_eq!(&payload[21..], &8u32.to_le_bytes(), "events_applied closes it");
+        assert_eq!(&payload[21..25], &8u32.to_le_bytes(), "events_applied");
+        assert_eq!(&payload[25..], &0u32.to_le_bytes(), "and the hand (v101) closes it");
         // v100 (living world Tier 2 S7) — SiteBoard = 15: the cell, then the op
         // (Add = 0, Toggle = 1, Remove = 2, each a u32 index and a u8 argument).
         for (op, op_index, arg) in [
@@ -4490,7 +4491,8 @@ mod tests {
             if extra == 1 {
                 assert_eq!(payload[25], if op_index == 1 { 9 } else { 4 }, "the job the asker saw there");
             }
-            assert_eq!(&payload[25 + extra..], &9u32.to_le_bytes(), "events_applied closes it");
+            assert_eq!(&payload[25 + extra..29 + extra], &9u32.to_le_bytes(), "events_applied");
+            assert_eq!(&payload[29 + extra..], &0u32.to_le_bytes(), "and the hand (v101) closes it");
         }
 
         let outcome = ItemActionOutcomePacket {
