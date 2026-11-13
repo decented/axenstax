@@ -4585,20 +4585,21 @@ impl super::GameState {
         }
     }
 
-    /// C3b-2-fix (M1) — may player `pidx`'s hand spend one of what its
-    /// selected hotbar slot holds (a placement, a sown seed or reed, a crop
-    /// accelerator)? Always, unless joined and every one its window holds is
-    /// claimed by a request in flight (`JoinerActions::can_spend`, as the
-    /// Q-drop asks): an item frame, rack or fire the joiner just asked to take
-    /// the block from must get it, so one block can't be framed AND placed
-    /// on a slow link. An empty slot spends nothing, so it may.
-    pub(crate) fn hand_may_spend(&self, pidx: usize) -> bool {
+    /// C3b-2-fix (M1) — may player `pidx`'s `hand` spend one of what it holds
+    /// (a placement, a sown seed or reed, a crop accelerator)? v101 — the
+    /// hand's own item: the selected hotbar slot's for the main hand, the
+    /// off-hand's for the off-hand. Always, unless joined and every one its
+    /// window holds is claimed by a request in flight
+    /// (`JoinerActions::can_spend`, as the Q-drop asks): an item frame, rack
+    /// or fire the joiner just asked to take the block from must get it, so
+    /// one block can't be framed AND placed on a slow link. An empty hand
+    /// spends nothing, so it may.
+    pub(crate) fn hand_may_spend(&self, pidx: usize, hand: crate::hands::Hand) -> bool {
         if !self.joined() {
             return true;
         }
         let p = &self.players[pidx];
-        p.inventory
-            .hotbar_slot(p.hotbar_slot)
+        p.held_for_use(hand)
             .is_none_or(|s| self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &p.offhand, &s.item, 1))
     }
 
@@ -4836,7 +4837,7 @@ impl super::GameState {
         // C3c-1-fix (M-1) — a bucket a block use in flight claims (a hive's
         // honey) isn't spent here too: the click does nothing (and is
         // claimed, so nothing further down the chain spends it either).
-        let may_spend = self.hand_may_spend(pidx);
+        let may_spend = self.hand_may_spend(pidx, hand);
         if !may_spend
             || !self.players[pidx]
                 .consume_one_material_for(hand, crate::item::MaterialId::Bucket)
@@ -15469,7 +15470,7 @@ impl super::GameState {
                             let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::GrowGrass, above);
                             // C3c-1-fix (M-1) — not bone meal a block use in
                             // flight claims.
-                            if self.hand_may_spend(pidx)
+                            if self.hand_may_spend(pidx, hand)
                                 && self.players[pidx].consume_one_material_for(hand, crate::item::MaterialId::Bonemeal)
                             {
                                 self.world.set_block(above[0], above[1], above[2], block::TALL_GRASS);
@@ -16108,7 +16109,7 @@ impl super::GameState {
                             let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::Sow, above);
                             if self.play_mode.can_edit_world()
                                 && above_blk == block::AIR
-                                && self.hand_may_spend(pidx)
+                                && self.hand_may_spend(pidx, hand)
                                 && self.players[pidx].consume_one_material_for(hand, seed_id)
                             {
                                 // Spec 06 §2.2 — a sown crop is player-placed:
@@ -16169,7 +16170,7 @@ impl super::GameState {
                         };
                         let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::GrowCrop, pos);
                         if let Some(next) = next
-                            && self.hand_may_spend(pidx)
+                            && self.hand_may_spend(pidx, hand)
                             && self.players[pidx].consume_one_material_for(hand, material)
                             {
                                 self.world.set_block(pos[0], pos[1], pos[2], next);
@@ -16205,7 +16206,7 @@ impl super::GameState {
                         let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::PlantPapyrus, reed_cell);
                         if self.play_mode.can_edit_world()
                             && crate::papyrus::is_valid_planting_base(&self.world, pos[0], pos[1], pos[2])
-                            && self.hand_may_spend(pidx)
+                            && self.hand_may_spend(pidx, hand)
                             && self.players[pidx].consume_one_material_for(hand, crate::item::MaterialId::PapyrusReed)
                         {
                             // Spec 06 §2.2 — planted papyrus is player-placed.
@@ -16287,7 +16288,7 @@ impl super::GameState {
                         if let Some((liquid, filled)) = held
                             .and_then(|h| crate::bucket::empty_result(&h, self.world.get_block(dx, dy, dz)))
                             && !self.commons_blocks_local_edit(pidx, [dx, dy, dz])
-                            && self.hand_may_spend(pidx)
+                            && self.hand_may_spend(pidx, hand)
                             && self.players[pidx].consume_one_material_for(hand, filled)
                             {
                                 // The block, a meta byte of 0 (`fluids::is_source_meta`,
@@ -16338,7 +16339,7 @@ impl super::GameState {
                         let tag = self.use_tag(pidx, hand, crate::use_edits::UseKind::Salt, pos);
                         // C3c-1-fix (M-1) — not salt a block use in flight
                         // claims.
-                        if self.hand_may_spend(pidx)
+                        if self.hand_may_spend(pidx, hand)
                             && self.players[pidx].consume_one_material_for(hand, crate::item::MaterialId::Salt)
                         {
                             self.world.set_block(pos[0], pos[1], pos[2], block::SALT_PATH);
@@ -16454,7 +16455,7 @@ impl super::GameState {
                                 };
                                 // C3c-3a — a paper a request in flight claims
                                 // (joined) can't pay twice: nothing happens.
-                                if !self.hand_may_spend(pidx) {
+                                if !self.hand_may_spend(pidx, hand) {
                                     continue;
                                 }
                                 if self.players[pidx].inventory.add_item(plan_stack).is_none() {
@@ -16777,7 +16778,7 @@ impl super::GameState {
                                             !self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &p.offhand, &s.item, 1)
                                         });
                                     if claimed { None } else { self.players[pidx].take_placeable_for(hand) }
-                                } else if self.hand_may_spend(pidx) {
+                                } else if self.hand_may_spend(pidx, hand) {
                                     match self.take_for_placement(pidx, hotbar, [place_x, place_y, place_z], existing, face) {
                                         crate::strict_edits::PlaceRoute::Legacy(taken) => taken,
                                         crate::strict_edits::PlaceRoute::Typed(taken) => {
@@ -17128,14 +17129,17 @@ impl super::GameState {
                                         {
                                             let standing =
                                                 self.world.get_block(place_x, place_y, place_z);
-                                            let change = broadcast_change(&self.world, place_x, place_y, place_z, standing);
                                             match off_edit_hand {
                                                 // v101 — an off-hand placement, charged there.
                                                 Some(off) => {
                                                     let before = self.edit_hand_now();
-                                                    self.pending_block_changes.push_stamped(change, before, off);
+                                                    self.pending_block_changes.push_stamped(
+                                                        broadcast_change(&self.world, place_x, place_y, place_z, standing),
+                                                        before,
+                                                        off,
+                                                    );
                                                 }
-                                                None => self.pending_block_changes.push(change),
+                                                None => self.pending_block_changes.push(broadcast_change(&self.world, place_x, place_y, place_z, standing)),
                                             }
                                         }
                                     }

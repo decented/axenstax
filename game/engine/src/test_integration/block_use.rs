@@ -993,17 +993,17 @@ fn a_joined_hand_spends_nothing_a_block_use_in_flight_claims() {
         // `take_placeable_from_hotbar`, or a Strict client's typed `Edit`);
         // the place arm asks `hand_may_spend` before calling it.
         ".take_for_placement(pidx, hotbar,",
-        ".consume_one_material(hotbar, seed_id)",
-        ".consume_one_material(hotbar, crate::item::MaterialId::PapyrusReed)",
-        ".consume_one_material(hotbar, material)",
+        ".consume_one_material_for(hand, seed_id)",
+        ".consume_one_material_for(hand, crate::item::MaterialId::PapyrusReed)",
+        ".consume_one_material_for(hand, material)",
         // C3c-1-fix (M-1) — a bucket filled or emptied, bone meal on grass,
         // salt: every spend of a claimable item.
-        ".consume_one_material(hotbar, crate::item::MaterialId::Bucket)",
-        ".consume_one_material(hotbar, filled)",
-        ".consume_one_material(hotbar, crate::item::MaterialId::Bonemeal)",
-        ".consume_one_material(hotbar, crate::item::MaterialId::Salt)",
+        ".consume_one_material_for(hand, crate::item::MaterialId::Bucket)",
+        ".consume_one_material_for(hand, filled)",
+        ".consume_one_material_for(hand, crate::item::MaterialId::Bonemeal)",
+        ".consume_one_material_for(hand, crate::item::MaterialId::Salt)",
         // C3c-3a — the art capture's paper.
-        ".take_one_from_hotbar(hot_art)",
+        "let paper = self.players[pidx].take_one_for(hand);",
     ] {
         let hits: Vec<usize> = lines
             .iter()
@@ -1014,7 +1014,7 @@ fn a_joined_hand_spends_nothing_a_block_use_in_flight_claims() {
         assert_eq!(hits.len(), 1, "hand-spend lint: `{needle}` should appear once in game_loop.rs, found {hits:?}");
         let i = hits[0];
         assert!(
-            lines[i.saturating_sub(4)..i].iter().any(|l| l.contains("self.hand_may_spend(pidx)")),
+            lines[i.saturating_sub(4)..i].iter().any(|l| l.contains("self.hand_may_spend(pidx, hand)")),
             "game_loop.rs:{}: `{needle}` spends without asking `hand_may_spend` (a block use in flight may claim it)",
             i + 1
         );

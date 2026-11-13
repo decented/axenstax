@@ -37,8 +37,7 @@ impl<'de> Deserialize<'de> for LocalPersonalSave {
                     }
                     bytes.push(byte);
                 }
-                // v3..=v6: v6 (off-hand plan, slice 2) is what `JoinerSave` writes now.
-                if !matches!(bytes.first(), Some(3..=6)) {
+                if !bytes.first().is_some_and(|v| crate::joiner_save::RECORD_VERSIONS.contains(v)) {
                     return Err(serde::de::Error::custom(
                         "personal snapshot has an unsupported canonical version",
                     ));
@@ -100,7 +99,7 @@ mod tests {
             bincode::deserialize::<LocalPersonalSave>(&huge).is_err(),
             "oversized sequence reached allocation"
         );
-        for bytes in [vec![], vec![1], vec![2], vec![6]] {
+        for bytes in [vec![], vec![1], vec![2], vec![7]] {
             assert!(
                 bincode::deserialize::<LocalPersonalSave>(&bincode::serialize(&bytes).unwrap())
                     .is_err(),

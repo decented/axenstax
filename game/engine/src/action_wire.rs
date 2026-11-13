@@ -235,6 +235,7 @@ mod tests {
         want.push(9);
         want.extend([4u8, 1]);
         want.extend(0x0304u16.to_le_bytes());
+        want.extend(0u32.to_le_bytes()); // v101: the hand (Main = 0)
         want.push(1); // Some(mined)
         for v in [1i32, -2, 3] { want.extend(v.to_le_bytes()); }
         want.extend(0u32.to_le_bytes()); // WireItem::None

@@ -4430,7 +4430,8 @@ mod tests {
         assert_eq!(&payload[32..36], &3u32.to_le_bytes(), "the plan: WireItem::Plan = 3");
         assert_eq!(&payload[36..68], &[0xAB; 32], "its marker");
         assert_eq!(payload[68], 0, "not developed");
-        assert_eq!(&payload[69..], &0x0A0B_0C0Du32.to_le_bytes(), "events_applied closes it");
+        assert_eq!(&payload[69..73], &0x0A0B_0C0Du32.to_le_bytes(), "events_applied");
+        assert_eq!(&payload[73..], &0u32.to_le_bytes(), "and the hand (v101) closes it");
         assert_ne!(peek_item_action_variant(payload), Some(item_action_variant::DROP), "not paced as a drop");
         // v84 (C3c-3b) — Attach = 11 (the cell, the face, then the held
         // claim as `UseBlock`'s), Detach = 12 (the cell, the face).

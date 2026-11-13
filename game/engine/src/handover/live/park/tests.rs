@@ -78,14 +78,18 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     // 100 (the same independent computation, a short script over the layouts in
     // `park.rs`, reproduced the protocol-99 values of the Tier 2 base first); the
     // authority and attachment digests do not hash it and are
-    // unchanged.
+    // unchanged. Protocol 101 (off-hand plan, slice 2): the fence and message
+    // goldens were recomputed again with 101 by the same independent script
+    // (sha256 over the documented layouts, the generation a little-endian
+    // u32); that script first reproduced the protocol-100 values above exactly,
+    // and the 101 fence it gives is the code's.
     assert_eq!(
         hex::encode(authority_digest(&authority)),
         "30a50bb9c25270bddc7157141c13c3fbd7efc722c1cf66b8b043feee033b62c1"
     );
     assert_eq!(
         hex::encode(fence.digest(&authority).unwrap()),
-        "6408e1f69df21176e39d3661fec55a554d6be207aa37eb766aca43e46943f4c8"
+        "148be4373ebdd6457d083fec4df0e7c1fecf01cefc044396a1e11865fee85ff2"
     );
     assert_eq!(
         hex::encode(attachment.digest()),
@@ -93,7 +97,7 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     );
     assert_eq!(
         hex::encode(fence.message(&authority, attachment).unwrap()),
-        "34223023a08f7bc51a7b8b5b1ce1aa60e9f68e80722f84121e144ca198572e88"
+        "f8aea598096e7cffb80d2fd0eb61b79ff352cc04d30511499b16378e245af5b8"
     );
     let imported = Attachment {
         context: GameplayContext::Imported(crate::personal_value::PersonalContext {
@@ -110,7 +114,7 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     );
     assert_eq!(
         hex::encode(fence.message(&authority, imported).unwrap()),
-        "7b815dc142e95f8d1db1a8ad5a7f1647c33ff5dd2ca4e5034eb63370e6197cd4"
+        "229cff57a0c46d05e7a712654af6ba3efbba8d65616a7446327a4f9d6b1112ae"
     );
 }
 

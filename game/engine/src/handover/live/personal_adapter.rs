@@ -237,7 +237,7 @@ fn read_personal(
     let bytes = read_regular(&target, crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
     let mut save = JoinerSave::decode(&bytes)?;
     let binding = proof.binding(key);
-    if matches!(bytes.first(), Some(3..=5)) {
+    if bytes.first().is_some_and(|v| crate::joiner_save::RECORD_VERSIONS.contains(v)) {
         let current = save
             .personal
             .as_ref()
@@ -327,8 +327,7 @@ fn scan_bound_in(directory: &Path, imported_only: bool) -> Result<bool, String> 
             continue;
         }
         let bytes = read_regular(&entry.path(), crate::joiner_save::MAX_JOINER_SAVE_BYTES)?;
-        // v3..=v6: v6 (off-hand plan, slice 2) is what `JoinerSave` writes now.
-        if matches!(bytes.first(), Some(3..=6)) && JoinerSave::decode(&bytes)?.personal.is_some_and(|p| !imported_only || p.binding.imported().is_some()) {
+        if bytes.first().is_some_and(|v| crate::joiner_save::RECORD_VERSIONS.contains(v)) && JoinerSave::decode(&bytes)?.personal.is_some_and(|p| !imported_only || p.binding.imported().is_some()) {
             return Ok(true);
         }
     }

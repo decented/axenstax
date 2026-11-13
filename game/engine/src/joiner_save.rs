@@ -30,6 +30,11 @@ const VERSION: u8 = 6;
 /// v5: the layout before the off-hand ([`JoinerSaveV5`]), read with the
 /// off-hand empty.
 const VERSION_V5: u8 = 5;
+/// The sidecar versions a personal snapshot or a bound record may lead with:
+/// v3 to the current one. Every gate that decides "this is a record, not the
+/// checkpoint seed (v2)" reads this, so a new layout can't be refused by a
+/// forgotten literal.
+pub(crate) const RECORD_VERSIONS: std::ops::RangeInclusive<u8> = 3..=VERSION;
 const VERSION_V4: u8 = 4;
 const VERSION_V3: u8 = 3;
 const VERSION_V2: u8 = 2;

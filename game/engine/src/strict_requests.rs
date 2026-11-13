@@ -407,8 +407,8 @@ mod bracket_position_tests {
     #[test]
     fn c3d_no_prediction_brackets_enclose_the_swing_the_shot_the_interaction_the_eat_the_give_and_the_device() {
         let src = include_str!("game_loop.rs");
-        for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon)"][..]), ("\"interaction\")", &["strict_requests::route_interact(", "Request::Interact("][..]), ("\"eat\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"creative give\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"device\")", &["strict_requests::route_device("][..]), ("\"sleep\")", &["self.route_item_request(pidx, pending, action)"][..])] {
-            let begin = src.find(&format!("NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, {what}")).unwrap_or_else(|| panic!("the {what} bracket opens in the game loop"));
+        for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon, hand)"][..]), ("\"interaction\")", &["strict_requests::route_interact(", "Request::Interact("][..]), ("\"eat\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"creative give\")", &["self.route_item_request(pidx, pending, action)"][..]), ("\"device\")", &["strict_requests::route_device("][..]), ("\"sleep\")", &["self.route_item_request(pidx, pending, action)"][..])] {
+            let begin = src.find(&format!("NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, {what}")).unwrap_or_else(|| panic!("the {what} bracket opens in the game loop"));
             let end = begin + src[begin..].find("NoPrediction::check(").unwrap_or_else(|| panic!("the {what} bracket closes"));
             // C3d run 21 (run-18 review L1) — the close found is THIS
             // bracket's: it comes before the next bracket opens, and it
