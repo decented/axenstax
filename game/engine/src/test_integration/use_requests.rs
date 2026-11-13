@@ -220,6 +220,8 @@ fn a_joiners_shot_takes_its_ammo_from_the_off_hand_first() {
     rig.give(0, 0, tool(ToolType::Bow), 1);
     rig.give(0, 12, mat(MaterialId::Arrow), 3);
     rig.give_offhand(0, mat(MaterialId::Arrow), 2);
+    // The believed bounds are spent: an honest shot draws on neither.
+    rig.spend_bound(0);
     let off = |rig: &Rig| rig.hs.server.players[slot].offhand.as_ref().map(|s| s.count);
     for (shot, expect_off, expect_bag) in [(1, Some(1), 3), (2, None, 3), (3, None, 2)] {
         rig.hs.server.players[slot].next_shot_tick = 0;
@@ -232,6 +234,8 @@ fn a_joiners_shot_takes_its_ammo_from_the_off_hand_first() {
         rig.assert_lockstep(0, &format!("shot {shot}"));
     }
     assert_eq!(rig.projectiles().len(), 3, "three real arrows in the server's world");
+    let tally = rig.hs.server.players[slot].possession;
+    assert_eq!((tally.ammo_believed, tally.tool_believed, tally.use_believed), (0, 0, 0), "honest shots, no believed bound drawn on");
 }
 
 /// Decision 3 — the off-hand's ammo is believed no further than the bag's:
@@ -250,14 +254,11 @@ fn off_hand_ammo_is_believed_no_further_than_the_bags() {
     assert!(rig.projectiles().is_empty(), "nothing fired");
     assert_eq!(rig.cs[0].offhand.as_ref().map(|s| s.count), Some(4), "the client keeps its arrows");
     assert_eq!(rig.hs.server.players[slot].offhand, None, "nothing appears in the shadow");
-    // An honest shot, bound still spent: accepted, off-hand first.
-    rig.give_offhand(0, mat(MaterialId::Arrow), 2);
+    // The main hand's claim is refused the same way (the bag holds no arrow either).
+    rig.cs[0].offhand = None;
+    rig.cs[0].inv.set_slot(9, Some(ItemStack::new_material(MaterialId::Arrow, 1)));
     rig.hs.server.players[slot].next_shot_tick = 0;
-    rig.spend_bound(0);
-    accepted(&rig.ask(0, |c| c.shoot(ShotWeapon::Bow, 0, 0.0, 1.5)), 1);
-    assert_eq!(rig.hs.server.players[slot].offhand.as_ref().map(|s| s.count), Some(1));
-    assert_eq!(rig.hs.server.players[slot].possession.ammo_believed, 0, "an honest shot draws on no believed bound");
-    rig.assert_lockstep(0, "an honest off-hand shot");
+    refused(&rig.ask(0, |c| c.shoot(ShotWeapon::Bow, 0, 0.0, 1.5)), ItemNote::NoAmmo);
 }
 
 /// A shot with no ammo the server's copy holds or can believe is refused

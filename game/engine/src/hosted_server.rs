@@ -10101,7 +10101,7 @@ pub(crate) mod tests {
         let mut hs = start_room_test_server("sidecar-offhand", 0);
         hs.server.difficulty = crate::survival::Difficulty::Peaceful;
         let first = hs.attach_test_remote_with_binding(Some([17;32]));
-        send_signed_join(&first, [66;32], Some([17;32])); hs.tick();
+        send_signed_join(&first, [66;32], Some([17;32])); hs.tick(); join_installed(&mut hs, &first, HostedServer::tick);
         let i = hs.server.players.len()-1;
         let torch = crate::item::ItemStack::new_block(crate::block::TORCH, 5);
         hs.server.players[i].offhand = Some(torch.clone());

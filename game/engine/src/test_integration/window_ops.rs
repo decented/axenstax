@@ -1557,6 +1557,11 @@ fn the_off_hand_slot_click_is_mirrored_in_lockstep() {
     // (different items) swaps too; an empty click on an empty pair is refused.
     assert!(rig.step("swap back", WindowClick::Offhand { right: true }).ok());
     rig.step("put the dirt down", slot(4, false));
+    // The torches are in the off-hand and the cursor is empty: a click picks them up.
+    assert!(rig.step("pick the torches up", WindowClick::Offhand { right: false }).ok());
+    assert_eq!(rig.sp().offhand, None);
+    rig.step("put them in the bag", slot(3, false));
+    // An empty off-hand and an empty cursor: nothing to do, refused on both sides.
     assert_eq!(rig.step("an empty click", WindowClick::Offhand { right: false }), ClickResult::Refused);
     rig.close();
     rig.flush();
