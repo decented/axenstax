@@ -68,3 +68,17 @@ pub fn local0_plan_items(slot: &PlayerSlot) -> Vec<crate::item::Item> {
         .filter(|i| matches!(i, crate::item::Item::Plan(body) if body.marker.is_none()))
         .collect()
 }
+
+/// Remember the private Plan bodies of the seat's items ([`local0_plan_items`])
+/// in the Plan store, so the markers its record holds resolve on reload. Run
+/// before every local personal save (`GameState::preflight_personal_local`).
+pub fn remember_local0_plans(slot: &PlayerSlot) -> Result<(), String> {
+    for item in local0_plan_items(slot) {
+        if let crate::item::Item::Plan(body) = item {
+            let resident = crate::body_residency::allocated_body_bytes(&body)
+                .map_err(|_| "Plan body allocation overflow")?;
+            crate::plan_store::remember_checked(&body, resident)?;
+        }
+    }
+    Ok(())
+}

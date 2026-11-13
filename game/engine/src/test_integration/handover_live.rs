@@ -1093,6 +1093,46 @@ mod session {
         }
     }
 
+    /// Off-hand review B2, through the handover rig: the source seat's
+    /// off-hand and the recipient's (a joiner seat on the source) each travel
+    /// in that participant's own seed, and the transfer copy's world.dat holds
+    /// no seat's off-hand (field 63 is cleared with the other seat rows).
+    #[test]
+    fn handover_carries_each_participants_off_hand_in_its_own_seed() {
+        let mut p = pair("offhand");
+        let bread = crate::item::ItemStack::new_material(crate::item::MaterialId::Bread, 2);
+        p.hs.server.players[p.seat.slot].offhand = Some(bread.clone());
+        consent(&mut p);
+        let mut rc = std::mem::replace(
+            &mut p.rc,
+            RemoteClient::from_transport(Box::new(crate::transport::ClosedClientTransport), crate::remote_client::build_join_request_guest("x", 0), None),
+        );
+        rc.disconnect();
+        drop(rc);
+        let torch = crate::item::ItemStack::new_block(block::TORCH, 5);
+        let mut seat0 = seat0();
+        seat0.offhand = Some(torch.clone());
+        offer(&mut p, &seat0);
+        stream(&mut p, 10_000);
+        assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
+        let cp = p.dst.as_ref().unwrap().checkpoint().unwrap();
+        let seed = |who: [u8; 32]| {
+            let n = nostr::PublicKey::from_slice(&who).unwrap().to_bech32().unwrap();
+            let bytes = std::fs::read(cp.received_world().join(format!("joiners/{n}.dat"))).unwrap();
+            crate::joiner_save::JoinerSave::decode(&bytes).unwrap()
+        };
+        let source_key = keys(SOURCE_PERSONA).public_key().to_bytes();
+        let source = seed(source_key).window().unwrap();
+        assert_eq!(source.offhand, Some(torch), "the source's off-hand travels in its seed");
+        assert_eq!(source.inv.slot(4).map(|s| s.count), Some(9));
+        let recipient = seed(p.seat.key).window().unwrap();
+        assert_eq!(recipient.offhand, Some(bread), "the recipient's off-hand travels in its seed");
+        let bytes = std::fs::read(cp.received_world().join("world.dat")).unwrap();
+        let (body, _) = crate::save_format::split_save_footer(&bytes);
+        let world: crate::save::WorldSave = bincode::deserialize(body).unwrap();
+        assert!(world.player_offhands.is_none(), "no seat's off-hand rides the transfer copy's world.dat");
+    }
+
     /// What a connecting client actually gets from the latched listener: a
     /// refused connection, never an established one.
     #[test]

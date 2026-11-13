@@ -21,8 +21,10 @@ pub(super) fn projectiles(j: &Joined) -> usize {
     j.hs.server.ecs.query::<&crate::entity::ProjectileEntity>().iter().count()
 }
 
-/// The shot `GameState::send_shot` builds for hotbar `hot`, and its record.
-fn shot_of(inv: &crate::inventory::Inventory, hot: usize) -> (Pending, protocol::ItemAction) {
+/// The shot `GameState::send_shot` builds for hotbar `hot`, and its record:
+/// the round it claims is the off-hand's when that holds ammo the weapon
+/// shoots, else the weapon's own (`shot::round_for`).
+fn shot_of(inv: &crate::inventory::Inventory, offhand: &Option<ItemStack>, hot: usize) -> (Pending, protocol::ItemAction) {
     let item = inv.slot(hot).expect("a weapon in hand").item.clone();
     let Item::Tool(tool) = item.clone() else { panic!("a weapon") };
     let weapon = crate::shot::weapon_of(Some(&item)).expect("a shot weapon");
@@ -31,7 +33,7 @@ fn shot_of(inv: &crate::inventory::Inventory, hot: usize) -> (Pending, protocol:
         weapon, hotbar_slot: hot as u8, held_kind, held_id, held_full: crate::inventory::item_to_wire_full(&item),
         yaw: 0.0, pitch: 0.0, charge: crate::shot::max_charge(weapon),
     };
-    let pending = Pending { kind: Asked::Shoot { weapon, material: tool.material }, mob: None, hotbar_slot: hot, held: Some(Item::Material(crate::shot::ammo_for(weapon))), hand: crate::hands::Hand::Main };
+    let pending = Pending { kind: Asked::Shoot { weapon, material: tool.material }, mob: None, hotbar_slot: hot, held: Some(crate::shot::round_for(weapon, offhand.as_ref())), hand: crate::hands::Hand::Main };
     (pending, action)
 }
 
@@ -43,8 +45,8 @@ fn send_legacy(rc: &mut RemoteClient, actions: &mut JoinerActions, pending: Pend
 
 /// Shoot from hotbar `hot` on the Strict rig, routed as the game loop does.
 pub(super) fn shoot(j: &mut Joined, hot: usize) -> Option<ActionHeader> {
-    let (pending, action) = shot_of(&j.inv, hot);
-    match route_shot(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut j.actions, pending.clone(), &action).expect("routed") {
+    let (pending, action) = shot_of(&j.inv, &j.offhand, hot);
+    match route_shot(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &j.offhand, &mut j.actions, pending.clone(), &action).expect("routed") {
         ShotRoute::Typed(header) => Some(header),
         ShotRoute::Legacy => { send_legacy(&mut j.rc, &mut j.actions, pending, action); None }
         ShotRoute::Unaffordable => panic!("the ammo is there"),
@@ -81,6 +83,25 @@ fn c3d_client_strict_shot_is_served_typed() {
     assert_eq!(j.held(&ammo), 7, "the server's Take applied on the client");
     assert!(matches!(j.inv.slot(0).map(|s| &s.item), Some(Item::Tool(t)) if t.durability + 1 == bow().durability), "the server's Wear applied on the client");
     assert_eq!((j.sp().strict_refusals.stale_world, j.sp().strict_refusals.other), (0, 0));
+}
+
+/// Off-hand review S1: a Strict seat with arrows in the off-hand AND in the
+/// bag. The client takes its round from the off-hand (`joiner_actions::owed_hand`,
+/// the local rule), so the server's Strict shot must take it from the same
+/// place: the two copies stay equal, digest for digest.
+#[test]
+fn c3d_client_strict_shot_takes_off_hand_ammo_first_on_both_copies() {
+    let mut j = joined("shot-offhand", &[(0, ItemStack { item: Item::Tool(bow()), count: 1 }), (1, arrows(8))], true);
+    j.offhand = Some(arrows(4));
+    j.hs.server.players[j.i].offhand = Some(arrows(4));
+    let routed = shoot(&mut j, 0).expect("a Strict seat sends the shot typed");
+    j.pump();
+    assert_eq!(fate(&j, routed), Some(ActionFate::Accepted), "served");
+    assert_eq!(projectiles(&j), 1, "one projectile");
+    j.assert_honest("an off-hand round on a Strict seat");
+    assert_eq!(j.offhand, Some(arrows(3)), "the client's round came from the off-hand");
+    assert_eq!(j.sp().offhand, Some(arrows(3)), "and so did the server's");
+    assert_eq!(j.held(&arrows(1).item), 8, "the bag kept its arrows");
 }
 
 /// Run 16 — a bow on its last point shot twice inside one round trip: the
@@ -155,7 +176,7 @@ fn c3d_client_mirror_shot_stays_the_legacy_request() {
     j.give(1, arrows(8));
     j.pumps(3);
     let mut actions = JoinerActions::default();
-    let (pending, action) = shot_of(&j.inv, 0);
+    let (pending, action) = shot_of(&j.inv, &j.offhand, 0);
     let routed = route_shot(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &None, &mut actions, pending.clone(), &action).expect("routed");
     assert_eq!(routed, ShotRoute::Legacy, "Mirror: the legacy request");
     assert_eq!(actions.len(), 0, "Mirror: route_shot records nothing");

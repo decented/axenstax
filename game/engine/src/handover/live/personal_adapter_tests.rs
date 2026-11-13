@@ -14,6 +14,10 @@ struct Fixture {
     seed: Vec<u8>,
 }
 fn fixture(tag: &str) -> Fixture {
+    fixture_with(tag, None)
+}
+/// [`fixture`], with `offhand` in the frozen seat's off-hand.
+fn fixture_with(tag: &str, offhand: Option<ItemStack>) -> Fixture {
     let root = crate::save::WorldsRootGuard::new(tag);
     let world = crate::save::world_dir("personal");
     fs::create_dir(&world).unwrap();
@@ -40,6 +44,7 @@ fn fixture(tag: &str) -> Fixture {
     slot.kill_counter.insert(crate::mob::MobType::Pig, 17);
     slot.reputation.per_village.insert((3, 4), -30);
     slot.bounties_claimed.insert(7, 2);
+    slot.offhand = offhand;
     let seed = super::super::capture::local0_sidecar(&slot, [9; 16]).unwrap();
     let progress = super::super::capture::local0_progress(&slot, context).unwrap();
     fs::create_dir(world.join("joiners")).unwrap();
@@ -616,4 +621,103 @@ fn a_handover_record_that_cant_be_read_is_an_error_at_checkpoint() {
     fs::remove_dir(&link).unwrap();
     h.server.stored_records.note_handover("personal");
     h.server.checkpoint().expect("put right, it checkpoints");
+}
+
+/// Off-hand review B2: a frozen seat's off-hand travels in its seed (not the
+/// v2 layout, which has no place for it) and the recipient's bootstrap and
+/// install put it back in the off-hand, once.
+#[test]
+fn a_seed_carries_the_off_hand_into_the_installed_seat() {
+    let torch = ItemStack::new_block(crate::block::TORCH, 5);
+    let f = fixture_with("personal-offhand", Some(torch.clone()));
+    assert_ne!(f.seed[0], 2, "a seed holding an off-hand is not the v2 layout");
+    assert_eq!(JoinerSave::decode(&f.seed).unwrap().window().unwrap().offhand, Some(torch.clone()));
+    assert!(JoinerSave::decode(&f.seed).unwrap().personal.is_none(), "the seed carries no import binding");
+    let saved = load_or_bootstrap(&f.world, f.key, &f.proof).unwrap().unwrap();
+    let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+    install(&saved, &mut slot).unwrap();
+    assert_eq!(slot.offhand, Some(torch.clone()), "the off-hand arrives in the off-hand");
+    assert!(
+        slot.inventory.slots_iter().flatten().all(|s| s.item != torch.item),
+        "and nowhere else"
+    );
+    // The bootstrapped current record (v6) keeps it too.
+    let current = load_or_bootstrap(&f.world, f.key, &f.proof).unwrap().unwrap();
+    assert_eq!(current.window().unwrap().offhand, Some(torch));
+}
+
+/// The load order of a bound local seat (`chunk_stream::initial_load`): field
+/// 63 into the off-hand, then the `local_personal` record's install over it.
+fn reload_bound(save: &crate::save::WorldSave, scope: [u8; 16], key: [u8; 32]) -> crate::player_slot::PlayerSlot {
+    let bytes = crate::save_format::encode_world_save(save).unwrap();
+    let back = crate::save::read_world_save(&bytes).unwrap();
+    let mut loaded = crate::player_slot::PlayerSlot::new(0, glam::Vec3::ZERO, 1.0);
+    loaded.offhand = crate::save::restore_offhand(back.player_offhands.as_ref(), 0);
+    let snapshot = back.local_personal.as_ref().expect("a bound seat saves its record");
+    let selected = crate::gameplay_attachment::selected_world_local(snapshot, Some(scope), Some(key), Some(0)).unwrap();
+    install(&selected, &mut loaded).unwrap();
+    loaded
+}
+
+fn bound_seat(scope: [u8; 16], key: [u8; 32]) -> crate::player_slot::PlayerSlot {
+    let mut slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(4.5, 70.0, 9.5), 1.0);
+    // As `GameState::prepare_local_gameplay` binds a hosting seat.
+    slot.personal_binding = Some(crate::progression::GameplayBinding::WorldLocal {
+        scope,
+        player: crate::progression::WorldPlayer::Npub(key),
+    });
+    slot
+}
+
+/// Off-hand review B1: a seat with a personal binding (any world that has
+/// been hosted) saves its off-hand in its `local_personal` record, so the
+/// install that runs over field 63 on reload keeps it.
+#[test]
+fn a_bound_local_seats_off_hand_survives_a_save_and_reload() {
+    let _root = crate::save::WorldsRootGuard::new("bound-offhand");
+    let (scope, key) = ([19; 16], [17; 32]);
+    let torch = ItemStack::new_block(crate::block::TORCH, 5);
+    let mut slot = bound_seat(scope, key);
+    slot.offhand = Some(torch.clone());
+    slot.inventory.set_slot(2, Some(ItemStack::new_block(crate::block::STONE, 3)));
+    let world = crate::world::World::new();
+    let save = crate::save::build_world_save(&world, std::slice::from_ref(&slot), 42, &[], &[], None, None).unwrap();
+    let saved = JoinerSave::decode(&save.local_personal.as_ref().unwrap().0).unwrap();
+    assert_eq!(saved.window().unwrap().offhand, Some(torch.clone()), "the record holds the off-hand");
+    let loaded = reload_bound(&save, scope, key);
+    assert_eq!(loaded.offhand, Some(torch.clone()), "the off-hand is back in the off-hand");
+    let torches: u32 = loaded.inventory.slots_iter().flatten().chain(loaded.offhand.iter())
+        .chain(loaded.crafting_ui.cursor_item.iter()).chain(loaded.crafting_ui.grid.iter().flatten().flatten())
+        .filter(|s| s.item == torch.item).map(|s| u32::from(s.count)).sum();
+    assert_eq!(torches, 5, "and nowhere else twice");
+    assert_eq!(loaded.inventory.slot(2).map(|s| s.count), Some(3));
+    // And the next save writes it again.
+    let again = crate::save::build_world_save(&world, std::slice::from_ref(&loaded), 42, &[], &[], None, None).unwrap();
+    assert_eq!(reload_bound(&again, scope, key).offhand, Some(torch));
+}
+
+/// Off-hand review M3: a developed Plan in a bound seat's off-hand is saved as
+/// a marker, so its body must be remembered first, as the inventory's are.
+#[test]
+fn a_developed_plan_in_a_bound_seats_off_hand_survives_a_save_and_reload_with_its_body() {
+    let _root = crate::save::WorldsRootGuard::new("bound-offhand-plan");
+    let (scope, key) = ([21; 16], [23; 32]);
+    let mut body = crate::plan::PlanData::debug_3x3_stone();
+    body.name = "Off-hand plan that is no built-in".into();
+    body.develop_state = crate::plan::DevelopState::Developed;
+    let encoded = bincode::serialize(&body).unwrap();
+    let marker = crate::plan::marker(&body);
+    assert!(crate::plan_store::resolve(marker).is_none(), "not a built-in, not remembered yet");
+    let mut slot = bound_seat(scope, key);
+    slot.offhand = Some(ItemStack { item: crate::item::Item::Plan(body), count: 1 });
+    assert_eq!(super::super::capture::local0_plan_items(&slot).len(), 1, "the off-hand's Plan is one of the seat's private bodies");
+    super::super::capture::remember_local0_plans(&slot).unwrap();
+    let world = crate::world::World::new();
+    let save = crate::save::build_world_save(&world, std::slice::from_ref(&slot), 42, &[], &[], None, None).unwrap();
+    let loaded = reload_bound(&save, scope, key);
+    let Some(ItemStack { item: crate::item::Item::Plan(back), count: 1 }) = &loaded.offhand else {
+        panic!("the Plan left the off-hand: {:?}", loaded.offhand.as_ref().map(|s| &s.item))
+    };
+    assert!(back.marker.is_none() && !back.cells.is_empty(), "the body came back, not a marker");
+    assert_eq!(bincode::serialize(back).unwrap(), encoded);
 }

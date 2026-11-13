@@ -1392,6 +1392,75 @@ fn handover_checkpoint_refuses_mutable_or_legacy_sidecars_before_ready() {
     assert!(super::bounded_decode::sidecar(&legacy).is_err(), "private legacy checkpoint bypassed the immutable seed contract");
 }
 
+/// Off-hand review B2: an empty off-hand keeps the seed byte for byte the v2
+/// layout (v1's fields, then the owed list and the history), so a frozen
+/// checkpoint and its digests are unchanged. Built here field by field, not
+/// through the seed's own struct.
+#[test]
+fn handover_checkpoint_an_empty_off_hand_seed_is_the_v2_layout_byte_for_byte() {
+    use crate::item::{ItemStack, MaterialId};
+    use crate::saved_item_slot::SavedItemSlot;
+    let mut window = crate::window_events::EffectiveWindow {
+        inv: crate::inventory::Inventory::new(),
+        armour: [None; 4],
+        offhand: None,
+        cursor: Some(ItemStack::new_block(crate::block::DIRT, 3)),
+        grid: Default::default(),
+    };
+    window.inv.set_slot(4, Some(ItemStack::new_block(crate::block::GLASS, 9)));
+    window.grid[2][2] = Some(ItemStack::new_material(MaterialId::Diamond, 2));
+    let saved = crate::joiner_save::JoinerSave::from_parts(&window, 7.0, 9, [1.5, 70.0, -2.5], [9; 16], Some(4));
+    let seed = saved.encode_seed().unwrap();
+    let slots: Vec<SavedItemSlot> = (0..36)
+        .map(|i| SavedItemSlot::capture(window.inv.slot(i)))
+        .chain(std::iter::once(SavedItemSlot::capture(window.cursor.as_ref())))
+        .chain(window.grid.iter().flatten().map(|s| SavedItemSlot::capture(s.as_ref())))
+        .collect();
+    let v2 = bincode::serialize(&(
+        2u8,
+        slots,
+        crate::save::serialize_armour_slots(&window.armour),
+        7.0f32,
+        9u8,
+        [1.5f32, 70.0, -2.5],
+        [9u8; 16],
+        Some(4u32),
+        Vec::<u8>::new(),
+        crate::joiner_save::ObligationHistory::Complete,
+    ))
+    .unwrap();
+    assert_eq!(seed, v2, "an empty off-hand's seed is the v2 layout");
+    println!("SEEDPIN {} {}", seed.len(), hex::encode(crate::handover::hash(&seed)));
+    super::bounded_decode::sidecar(&seed).unwrap();
+}
+
+/// Off-hand review B2: a seat whose off-hand holds an item is frozen in a seed
+/// that carries it (and no import binding), and Ready admits it as it admits
+/// v2. A record's leading byte on it is refused, as a v6 record is.
+#[test]
+fn handover_checkpoint_admits_a_seed_that_carries_the_off_hand() {
+    use crate::item::ItemStack;
+    let mut sp = crate::server::ServerPlayer::new(glam::Vec3::ZERO);
+    sp.inventory.set_slot(3, Some(ItemStack::new_block(crate::block::GLASS, 9)));
+    let torch = ItemStack::new_block(crate::block::TORCH, 5);
+    sp.offhand = Some(torch.clone());
+    let saved = crate::joiner_save::JoinerSave::capture(&sp, [7; 16]);
+    let seed = saved.encode_seed().unwrap();
+    assert_ne!(seed[0], 2, "the v2 layout has no place for the off-hand");
+    super::bounded_decode::sidecar(&seed).unwrap();
+    let back = crate::joiner_save::JoinerSave::decode(&seed).unwrap();
+    assert!(back.personal.is_none(), "a seed carries no import binding");
+    let window = back.window().unwrap();
+    assert_eq!(window.offhand, Some(torch));
+    assert_eq!(window.inv.slot(3).map(|s| s.count), Some(9));
+    let mut relabelled = seed.clone();
+    relabelled[0] = 6;
+    assert!(super::bounded_decode::sidecar(&relabelled).is_err(), "Ready accepted a record's version on a seed");
+    let mut trailing = seed;
+    trailing.push(0);
+    assert!(super::bounded_decode::sidecar(&trailing).is_err(), "Ready accepted trailing bytes");
+}
+
 #[test]
 fn handover_checkpoint_native_metadata_accepts_pretty_history_and_refuses_recovery() {
     let mut original = WorldMeta::new("Authored world");

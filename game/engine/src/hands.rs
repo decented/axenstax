@@ -396,6 +396,24 @@ mod tests {
         assert_eq!(use_hand(Some(&pick), Some(&torch), &stone_target()), Hand::Off);
     }
 
+    /// Off-hand review M2: a steed's pack goes on from the main hand only
+    /// (`PackRequest` names the hotbar slot), so a chest in the off-hand
+    /// never takes a click aimed at a mob, whatever block lies behind it.
+    /// Local play and a joined client both route by this rule.
+    #[test]
+    fn a_chest_in_the_off_hand_never_takes_a_click_on_a_mob() {
+        let pick = tool(ToolType::Pickaxe);
+        let chest = Item::Block(block::CHEST);
+        let mob_before_stone = UseTarget { mob: true, ..stone_target() };
+        assert_eq!(use_hand(Some(&pick), Some(&chest), &mob_before_stone), Hand::Main);
+        assert_eq!(use_hand(None, Some(&chest), &mob_before_stone), Hand::Main);
+        // Aimed at a block alone, the off-hand chest is still placed.
+        assert_eq!(use_hand(Some(&pick), Some(&chest), &stone_target()), Hand::Off);
+        // Another block in the off-hand is unchanged at a mob.
+        let torch = Item::Block(block::TORCH);
+        assert_eq!(use_hand(Some(&pick), Some(&torch), &mob_before_stone), Hand::Off);
+    }
+
     #[test]
     fn swap_trades_the_two_hands_and_ignores_two_empty_ones() {
         let mut main = Some(ItemStack::new_block(block::STONE, 5));

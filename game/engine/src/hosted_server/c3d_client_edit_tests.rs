@@ -134,15 +134,15 @@ impl Joined {
                 // `GameState::apply_item_action_outcome`'s window half.
                 InboxItem::Outcome(RequestOutcome::Item(out)) => {
                     if let Some(request) = self.actions.take(out.seq) {
-                        crate::joiner_actions::apply_item_outcome(&mut self.inv, &mut self.ui, &mut None, &request, &out);
-                        crate::joiner_actions::apply_use_wear(&mut self.inv, &mut None, &request, &out);
+                        crate::joiner_actions::apply_item_outcome(&mut self.inv, &mut self.ui, &mut self.offhand, &request, &out);
+                        crate::joiner_actions::apply_use_wear(&mut self.inv, &mut self.offhand, &request, &out);
                     }
                 }
                 // C3d run 15 — `GameState::apply_interact_outcome`'s window
                 // half: an accepted swing wears the weapon.
                 InboxItem::Outcome(RequestOutcome::Interact(out)) => {
                     if let Some(request) = self.actions.take(out.seq) {
-                        crate::joiner_actions::apply_outcome(&mut self.inv, &mut self.ui, &mut None, &request, &out);
+                        crate::joiner_actions::apply_outcome(&mut self.inv, &mut self.ui, &mut self.offhand, &request, &out);
                     }
                 }
                 _ => {}
@@ -181,7 +181,7 @@ impl Joined {
         let new = held.as_ref().and_then(crate::joiner_inventory::placeable_block).expect("a placeable block");
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta: self.world.meta_at(cell[0], cell[1], cell[2]) };
         let old = self.world.get_block(cell[0], cell[1], cell[2]);
-        match route_place(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, &mut None, slot, change.clone(), (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent") {
+        match route_place(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, &mut self.offhand, slot, change.clone(), (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent") {
             Routed::Typed(placed) => assert_eq!(placed, Some(new), "the window gave the block"),
             Routed::Legacy => {
                 self.inv.take_placeable_from_hotbar(slot);
@@ -199,7 +199,7 @@ impl Joined {
         let tool = match &held { Some(Item::Tool(t)) => Some(*t), _ => None };
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: AIR, meta: 0 };
         let old = self.world.get_block(cell[0], cell[1], cell[2]);
-        match route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, &mut None, slot, change.clone(), (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent") {
+        match route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, &mut self.offhand, slot, change.clone(), (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent") {
             Routed::Typed(_) => {}
             Routed::Legacy => {
                 self.inv.use_tool_at(slot);
@@ -222,7 +222,7 @@ impl Joined {
         let meta = stamped.unwrap_or_else(|| self.world.meta_at(cell[0], cell[1], cell[2]));
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta };
         let old = self.world.get_block(cell[0], cell[1], cell[2]);
-        let routed = route_place(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, &mut None, slot, change, (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent");
+        let routed = route_place(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, &mut self.offhand, slot, change, (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent");
         assert!(matches!(routed, Routed::Typed(Some(b)) if b == new), "a shaped placement goes typed");
         self.world.place_player_block(cell[0], cell[1], cell[2], new);
         if let Some(m) = stamped { self.world.set_meta((cell[0], cell[1], cell[2]), m); }
@@ -241,7 +241,7 @@ impl Joined {
         let replacement = crate::break_drops::break_yield(&self.world, &self.reg, old, (cell[0], cell[1], cell[2]), tool.as_ref(), 0, &keys).replacement;
         let meta = if replacement == AIR { 0 } else { self.world.meta_at(cell[0], cell[1], cell[2]) };
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: replacement, meta };
-        let routed = route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, &mut None, slot, change.clone(), (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent");
+        let routed = route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, &mut self.offhand, slot, change.clone(), (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent");
         assert!(matches!(routed, Routed::Typed(_)), "a harvest goes typed");
         self.world.set_block(cell[0], cell[1], cell[2], replacement);
         self.world.set_meta((cell[0], cell[1], cell[2]), meta);
@@ -271,7 +271,7 @@ impl Joined {
     pub(super) fn sp(&self) -> &crate::server::ServerPlayer { &self.hs.server.players[self.i] }
 
     fn client_digest(&self) -> u32 {
-        crate::window::digest_parts(&self.inv, &self.armour, &None, &self.ui.cursor_item, &self.ui.grid, self.ui.station())
+        crate::window::digest_parts(&self.inv, &self.armour, &self.offhand, &self.ui.cursor_item, &self.ui.grid, self.ui.station())
     }
 
     /// The server's copy at the client's applied boundary (its waiting

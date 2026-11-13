@@ -95,3 +95,47 @@ fn d2c2_canonical_retention_failure_leaves_every_physical_place_unchanged() {
         assert!(debt.is_empty());
     }
 }
+
+/// Off-hand review M1: a canonical window replaces the off-hand too (so it
+/// repairs drift there), and a held Plan body moves into and out of the
+/// off-hand as it does for the cursor.
+#[test]
+fn a_canonical_window_installs_the_off_hand_and_moves_its_plan_body() {
+    for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+        let _root = crate::save::WorldsRootGuard::new(&format!("offhand-canonical-{mode:?}"));
+        let registry = crate::block::BlockRegistry::new();
+        // Drift: the client shows stone where the canonical window holds a torch.
+        let mut window = empty();
+        window.offhand = Some(ItemStack::new_block(crate::block::STONE, 3));
+        let mut canonical = empty();
+        canonical.offhand = Some(ItemStack::new_block(crate::block::TORCH, 2));
+        let packet = PackWindow::capture(&canonical, &CorrectionDebt::default(), &registry).unwrap();
+        apply(&mut window, &packet, &Default::default(), &mut CorrectionDebt::default(), mode).unwrap();
+        assert_eq!(window.offhand, canonical.offhand, "the canonical off-hand is installed");
+        // A held body in the off-hand moves to the cursor the canonical window names.
+        let mut held = crate::plan::PlanData::debug_3x3_stone();
+        held.name = format!("Off-hand body {mode:?}");
+        let encoded = bincode::serialize(&held).unwrap();
+        let marker = crate::plan::marker(&held);
+        let allocation = held.cells.as_ptr();
+        let mut window = empty();
+        window.offhand = Some(ItemStack { item: Item::Plan(held), count: 1 });
+        let mut canonical = empty();
+        canonical.cursor = Some(ItemStack { item: Item::Plan(crate::plan::PlanData::marker_placeholder(marker, true)), count: 1 });
+        let packet = PackWindow::capture(&canonical, &CorrectionDebt::default(), &registry).unwrap();
+        apply(&mut window, &packet, &Default::default(), &mut CorrectionDebt::default(), mode).unwrap();
+        assert!(window.offhand.is_none());
+        let moved = plan(window.cursor.as_ref().unwrap());
+        assert_eq!(moved.cells.as_ptr(), allocation, "the off-hand's body moved to the cursor");
+        assert_eq!(bincode::serialize(moved).unwrap(), encoded);
+        // And back into the off-hand.
+        let mut canonical = empty();
+        canonical.offhand = Some(ItemStack { item: Item::Plan(crate::plan::PlanData::marker_placeholder(marker, true)), count: 1 });
+        let packet = PackWindow::capture(&canonical, &CorrectionDebt::default(), &registry).unwrap();
+        apply(&mut window, &packet, &Default::default(), &mut CorrectionDebt::default(), mode).unwrap();
+        assert!(window.cursor.is_none());
+        let back = plan(window.offhand.as_ref().unwrap());
+        assert_eq!(back.cells.as_ptr(), allocation, "the body moved into the off-hand");
+        assert_eq!(bincode::serialize(back).unwrap(), encoded);
+    }
+}

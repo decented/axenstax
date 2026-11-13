@@ -654,13 +654,7 @@ impl crate::GameState {
             );
         }
         let slot = self.players.first().ok_or("missing personal player")?;
-        for item in super::capture::local0_plan_items(slot) {
-            if let crate::item::Item::Plan(body) = item {
-                let resident = crate::body_residency::allocated_body_bytes(&body)
-                    .map_err(|_| "Plan body allocation overflow")?;
-                crate::plan_store::remember_checked(&body, resident)?;
-            }
-        }
+        super::capture::remember_local0_plans(slot)?;
         crate::joiner_save::capture_local(slot)?;
         Ok(())
     }

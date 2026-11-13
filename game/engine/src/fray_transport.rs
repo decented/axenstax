@@ -283,6 +283,11 @@ impl Drop for FrayServerTransport {
 struct HostState {
     ready: AtomicBool,
     failure: Mutex<Option<String>>,
+    /// Tests only: the peers' non-empty reliable messages the pump has handed
+    /// to their slots (admitted or dropped), so a test can wait for a flood to
+    /// be fully handled instead of sleeping.
+    #[cfg(test)]
+    handled: AtomicUsize,
 }
 
 /// A Fray room and the pump thread that turns its peers into
@@ -419,6 +424,10 @@ fn pump(
                 HostEvent::Reliable { peer, bytes } => {
                     if let Some(slot) = slots.get_mut(&peer) {
                         slot.deliver(peer, &bytes, inbound_cap);
+                    }
+                    #[cfg(test)]
+                    if !bytes.is_empty() {
+                        state.handled.fetch_add(1, Ordering::Release);
                     }
                 }
                 // The game sends and reads reliable packets only.
@@ -917,16 +926,16 @@ mod tests {
         for _ in 0..64 {
             client.send_to_server(&[5u8; 1024]);
         }
-        // What fits, then the packet that crosses the bound, then nothing.
+        // The bound is on what waits UNREAD: a read releases its packet's
+        // charge and lets more of the flood fit. So nothing is read until the
+        // pump has handled the whole flood (an event, not a sleep: a read
+        // racing the flood under load once saw 20 here), and then exactly
+        // what fits arrives, then the packet that crosses the bound, then
+        // nothing.
+        eventually("the pump has handled the whole flood", || rig.host.state.handled.load(Ordering::Acquire) >= 64);
+        assert_eq!(rig.host.state.handled.load(Ordering::Acquire), 64, "only the flood was sent");
         let expected = cap / charge(1024) + 1;
         let mut read = 0;
-        eventually("the packets up to the crossing one arrive", || {
-            while server.try_recv_from_client().is_some() {
-                read += 1;
-            }
-            read >= expected
-        });
-        thread::sleep(Duration::from_millis(300));
         while server.try_recv_from_client().is_some() {
             read += 1;
         }
