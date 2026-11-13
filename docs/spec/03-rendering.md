@@ -1381,24 +1381,70 @@ first-person viewmodel (§7.5), and it reuses the authoritative
 ### 7.5 Item and Dropped Item Rendering
 
 - **Held items / first-person viewmodel** (the LOCAL player's own hand): the
-  local player sees their **right arm + the equipped 3D item model**, anchored
-  lower-right of the screen (`viewmodel.rs`). This is *not* a flat textured
+  local player sees their **right arm + the equipped 3D item model**, in the
+  lower right of the screen (`viewmodel.rs`). This is *not* a flat textured
   quad — it is the same `player_model()` right-arm part plus the shared
   `item_model::held_item_mesh` (§7.4a, §7.5a), assembled in the arm's local space
-  and transformed straight into VIEW space by `viewmodel::viewmodel_transform`
-  (a fixed lower-right slot ~0.9 units in front of the camera, with a small
-  inward tilt). It is rendered in a **depth-cleared pass drawn after the wire
-  passes** (so the world's depth survives for the block-highlight outline) using
-  an identity view matrix and a narrow-FOV projection (`VIEWMODEL_FOV_Y`, 55°)
-  so the world camera's yaw/pitch never move the viewmodel.
+  and transformed straight into VIEW space by `viewmodel::arm_transform`. It is
+  rendered in a **depth-cleared pass drawn after the wire passes** (so the
+  world's depth survives for the block-highlight outline) using an identity view
+  matrix and a narrow-FOV projection (`viewmodel::viewmodel_projection`,
+  `VIEWMODEL_FOV_Y` 55°, near 0.01, far 10) so the world camera's yaw/pitch
+  never move the viewmodel.
+  - **The slot (Minecraft-like, 2026-11-13).** The arm points away from the
+    player, in toward the centre, like Minecraft's first-person arm: yawed
+    `ARM_YAW_DEG` (35°) and pitched `ARM_PITCH_DEG` (91°, nearly along -z). The
+    middle of its hand end (the fist) sits at `FIST_NDC` = (0.57, -0.63) of the
+    viewport (lower-right quadrant), `SLOT_DEPTH` 1.57 units out at 16:9. Seen
+    end-on the shoulder end is nearer the camera and well below and right of the
+    fist, so it is off the screen (NDC about (1.3, -0.8) to (1.35, -1.35) at
+    16:9); only the forearm and the fist show, entering from the right and bottom
+    edges. A held tool, sprite (torch, sapling) or block stands **upright above
+    the fist, leaning `ITEM_LEAN_DEG` (12°) in toward the centre**: a first-person
+    adjustment made in `viewmodel::held_item_placement` (the item is turned back
+    by the arm's rotation, lifted 0.15 to 0.2 above the fist, and a sprite's
+    third-person `HELD_SPRITE_OFFSET` is taken out), so `item_model` and the
+    third-person hand are unchanged.
+  - **The aspect rule.** The slot is a pure function of the viewport's aspect
+    (`viewmodel::slot_depth`, `arm_slot`). The fist is placed from NDC, so it
+    lands on the same spot of the screen at every aspect; but the model's size
+    does not change with the aspect, so below 16:9 the slot moves deeper:
+    `SLOT_DEPTH * (REF_ASPECT / aspect)^0.58` (1.57 at 16:9, 1.67 at 16:10, 1.86
+    at 4:3, 3.07 at 9:16). That keeps the arm
+    and a 0.6-wide sprite inside a phone-portrait viewport while the item stays
+    a sixth of the screen tall or more. Wider than 16:9 keeps the 16:9 depth.
+    The game loop passes the viewport's aspect to `build_viewmodel_vertices`
+    and to `Renderer::update_viewmodel_camera`.
+  - **Hand side.** The slot takes a `HandSide`; the left hand is the same layout
+    mirrored in x (the yaw, the lean and the x offset negate, the pitch does
+    not). Only the right hand is drawn; Spec 05's off-hand is not built. A unit
+    test pins the mirror.
+  - **The #15 guard.** #15 (2026-05) moved the first slot (+0.45, -0.32, -0.9)
+    to (+0.58, -0.60, -0.9) because its shoulder sat near the centre and the
+    upper arm read as "too far forward / in front of the face"; that slot
+    overshot and put the fist and every held item below the bottom edge. The
+    rule is: **the shoulder end of the arm never shows, and the fist and the item
+    do.** `viewmodel::layout_tests` project the real vertices through
+    `viewmodel_projection` at 16:9, 16:10, 4:3 and 9:16 (rest, bob 0, swing 0,
+    classic and slim arm): (1) every vertex of a torch, iron tool, stone block
+    and oak sapling inside NDC +-0.98; (2) the item's on-screen box at least 12%
+    of the viewport height (15% for the torch, tool and sapling) with its centre
+    in the lower-right quadrant (x > 0.15, y < -0.15); (3) the four corners of
+    the arm's hand end inside the viewport; (4) all four shoulder corners beyond
+    the right or bottom edge (and a test shows this check fails for the pre-#15
+    slot); (5) no arm or item triangle covers the centre +-5% of the viewport
+    (+-0.10 NDC); (6) at the swing peak part of the item is still in view.
   - **Walk bob** — a sinusoidal sway (`viewmodel::BOB_AMP`) applied while
-    walking, baked into the transform's y (and a quarter to x).
-  - **Swing on use** — mine/place rotates the whole viewmodel about its local X
-    via `entity_model::swing_angle`, so the tool arcs down-and-forward.
+    walking, baked into the slot's y (and a quarter to x).
+  - **Swing on use** — mine/place rotates the whole arm + item about the
+    shoulder (the model's X) via `entity_model::swing_angle` (peak 0.70 rad), so
+    the hand arcs up the screen and the item rises toward the vertical middle of
+    the right half; at the peak it is still on screen.
   - **Empty hand** — just the bare arm/fist (no item mesh).
   - A `viewmodel::SHOW_VIEWMODEL` kill-switch disables the whole pass.
-  - Feel knobs (size/position/tilt in `viewmodel_transform`, `BOB_AMP`,
-    `SWING_PEAK`) are unverified pending playtest tuning.
+  - Feel knobs (the constants above, `BOB_AMP`, `SWING_PEAK`) were set from
+    CPU projections and GPU shots (`game_harness_viewmodel_shots`, 1280x720 and
+    720x1280); not yet played by the owner.
 - **Dropped items** (on the ground): a small 3D block or a flat sprite, by the
   item model (§7.5a). They slowly rotate (y-axis spin) and bob vertically.
 
@@ -1507,10 +1553,10 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   also shoots a dropped and a placed tall grass).
 - **Known.** The busiest sprite is papyrus stage 2 at 170 quads. A pack that redraws a stock icon keeps the
   stock outline's edge geometry (the cutout drops whatever the new art leaves
-  transparent). In first person the hand end of the arm sits below the screen
-  edge (`viewmodel_transform`), so a held item, cube or sprite, is mostly out
-  of view there (a mid-swing shot shows none of the torch); the third-person
-  avatar shows it beside the fist.
+  transparent). In first person (from 2026-11-13) the held item stands upright
+  above the fist in the lower-right quadrant (§7.5, `viewmodel::held_item_placement`);
+  before that the hand end of the arm sat below the screen edge and a held item
+  was out of view. The third-person avatar shows it beside the fist.
 
 ### 7.6 Particle System
 

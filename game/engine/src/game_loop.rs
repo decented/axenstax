@@ -17925,12 +17925,17 @@ impl super::GameState {
                 // THIS player's skin layer — player 0 → layer 0 (uploaded/
                 // default, Phase 2), player 1 → layer 1 (tint), etc. On WASM
                 // there's only player 0, so `skin_layer_of(0)` == 0 — unchanged.
+                // The slot depends on the viewport's shape (a phone in portrait
+                // is narrow), so the aspect goes to the builder and the camera.
+                let aspect = screen.viewport.width as f32
+                    / screen.viewport.height.max(1) as f32;
                 let (mut arm_verts, mut held_verts) = crate::viewmodel::build_viewmodel_vertices(
                     held, bob, swing,
                     crate::pure_helpers::skin_layer_of(pidx),
                     &self.registry,
                     // Your own hand follows YOUR skin's Arms setting.
                     self.worn_arm_model(),
+                    aspect,
                 );
                 // Campaign N — your own hand + held tool dim in caves / at
                 // night, sampled at the eye cell (subtract the sampler's 0.9
@@ -17947,8 +17952,6 @@ impl super::GameState {
                     &mut held_verts,
                     (ch.0, ch.1 * sky_brightness),
                 );
-                let aspect = screen.viewport.width as f32
-                    / screen.viewport.height.max(1) as f32;
                 self.renderer.update_viewmodel_camera(pidx, aspect);
                 self.renderer.upload_viewmodel_skin_vertices(pidx, &arm_verts);
                 self.renderer.upload_viewmodel_vertices(pidx, &held_verts);
