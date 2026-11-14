@@ -11,7 +11,7 @@
 //! (`1280x720` by default); the folder `SH_SHOTS_OUT`.
 //!
 //! Run: SH_SHOTS_OUT=<dir> cargo test --lib -- --ignored --test-threads=1 --nocapture game_harness_shield_shots
-use super::torch_diag::{ground_y, place, pose_eye, set_time, settle};
+use super::torch_diag::{ground_y, place, set_time, settle};
 use super::*;
 use crate::block;
 use crate::crafting::{Tool, ToolMaterial, ToolType};

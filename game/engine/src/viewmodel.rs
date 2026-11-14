@@ -255,6 +255,7 @@ fn held_item_placement(held: ItemRef, registry: &BlockRegistry, side: HandSide) 
 /// depends on it (see [`slot_depth`]). Vertices are ready to render with an
 /// identity view matrix and the [`viewmodel_projection`], which draws the arm and
 /// the item in one depth-cleared pass so they self-occlude correctly.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_viewmodel_vertices(
     side: HandSide,

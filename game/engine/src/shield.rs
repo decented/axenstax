@@ -134,9 +134,6 @@ pub struct ShieldCtx {
 }
 
 impl ShieldCtx {
-    /// No shield: every hit lands as before.
-    pub const NONE: ShieldCtx = ShieldCtx { guard: None, tally: BlockTally { wear: 0, clacks: 0 } };
-
     pub fn with(guard: Option<Guard>) -> Self {
         Self { guard, tally: BlockTally::default() }
     }

@@ -1256,7 +1256,7 @@ pub(crate) fn paint_shield_icon(ui: &egui::Ui, icon_rect: egui::Rect, egui_integ
     }
     painter.rect_stroke(board, 2.0, egui::Stroke::new((h * 0.09).max(1.5), iron), egui::StrokeKind::Inside);
     painter.circle_filled(board.center(), h * 0.15, iron);
-    painter.circle_stroke(board.center(), h * 0.15, egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 92, 98)));
+    painter.circle_stroke(board.center(), h * 0.15, egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(90, 92, 98)));
 }
 
 /// One stack drawn inside a slot rect: its icon, count badge and durability
