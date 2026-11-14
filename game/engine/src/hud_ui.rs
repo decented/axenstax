@@ -1480,6 +1480,27 @@ fn draw_hunger(
 /// the hotbar line. Free slots are always shown (handy while mining); the arrow
 /// line only appears when the player actually carries arrows, so it stays out of
 /// the way otherwise.
+/// Top-left of the "NN free" / arrows label, in points, for a viewport of
+/// `vp_w`×`vp_h` points anchored at (`vp_x`,`vp_y`) and a label `width`×`height`.
+/// It sits just above the hotbar, right-aligned. On desktop its right edge is
+/// the viewport's, 12 points in. On a touch device the bottom-right corner
+/// belongs to the Break/Place buttons, so the label ends at the hotbar's right
+/// edge instead (never under a button at any phone size). One source for the
+/// draw and the phone-layout tests.
+pub(crate) fn vital_counts_origin(
+    vp_x: f32,
+    vp_y: f32,
+    vp_w: f32,
+    vp_h: f32,
+    width: f32,
+    height: f32,
+    touch: bool,
+) -> egui::Pos2 {
+    let g = hotbar_geom(vp_x, vp_y, vp_w, vp_h);
+    let right = if touch { g.x + g.total_w } else { vp_x + vp_w - 12.0 };
+    egui::pos2(right - width, g.y - 6.0 - height)
+}
+
 fn draw_vital_counts(
     ctx: &egui::Context,
     viewport: &ViewportRect,
@@ -1512,8 +1533,15 @@ fn draw_vital_counts(
     let width = rows.iter().map(|(row, _)| row.size().x).fold(0.0_f32, f32::max);
     let height = rows.iter().map(|(row, _)| row.size().y).sum::<f32>() + gap * (rows.len() - 1) as f32;
     let size = egui::vec2(width, height);
-    let origin = egui::pos2(vp.x + vp.width - 12.0 - width,
-        vp.y + vp.height - 16.0 - 48.0 * scale - 6.0 - height);
+    let origin = vital_counts_origin(
+        vp.x,
+        vp.y,
+        vp.width,
+        vp.height,
+        width,
+        height,
+        crate::touch_input::is_touch_device(),
+    );
     egui::Area::new(egui::Id::new(("vital_counts", player_index)))
         .fixed_pos(origin)
         .interactable(false)
@@ -2168,6 +2196,36 @@ fn draw_debug_overlay(
         });
 }
 
+/// A "Close" chip in the top-right corner, drawn on a touch device while the
+/// inventory / crafting window is open. The touch buttons are hidden behind any
+/// panel (so a tap never acts on the world from behind it), and the Inventory
+/// button was the only touch way to close this window; the chip replaces it.
+/// Returns true on the frame it is tapped.
+pub fn draw_touch_close_chip(ctx: &egui::Context) -> bool {
+    let mut tapped = false;
+    egui::Area::new(egui::Id::new("touch_close_chip"))
+        .anchor(egui::Align2::RIGHT_TOP, [-12.0, 8.0])
+        .order(egui::Order::Foreground)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let label = egui::RichText::new("Close").size(18.0).color(egui::Color32::WHITE);
+            let button = egui::Button::new(label)
+                .min_size(egui::vec2(88.0, 40.0))
+                .fill(egui::Color32::from_rgba_unmultiplied(40, 40, 46, 230));
+            if ui.add(button).clicked() {
+                tapped = true;
+            }
+        });
+    tapped
+}
+
+/// Where the death panel's centre goes, in egui points: the middle of the
+/// viewport (a physical-px rect) at the given pixels-per-point.
+pub(crate) fn death_panel_centre(viewport: &ViewportRect, ppp: f32) -> egui::Pos2 {
+    let vp = ViewportPts::from_physical(viewport, ppp);
+    egui::pos2(vp.x + vp.width / 2.0, vp.y + vp.height / 2.0)
+}
+
 /// Draw death screen overlay. W2: `cause` is the line from
 /// `survival::death_message` (what killed you); `grave` is
 /// `survival::grave_message` when this death left a grave. There is no
@@ -2186,14 +2244,12 @@ pub fn draw_death_screen(
 ) -> bool {
     let mut respawn = accept_enter && ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
-    // Approximate size of the death panel to centre it within the viewport.
-    let panel_w = 320.0_f32;
-    let panel_h = 220.0_f32;
-    let death_x = viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0;
-    let death_y = viewport.y as f32 + viewport.height as f32 / 2.0 - panel_h / 2.0;
-
+    // Centre the panel on the viewport. `viewport` is physical px and egui
+    // places in points, so convert first (the old code used px as points, which
+    // pushed the panel off to the right on a phone, under the touch buttons).
     egui::Area::new(egui::Id::new(("death", player_index)))
-        .fixed_pos(egui::pos2(death_x, death_y))
+        .fixed_pos(death_panel_centre(viewport, ctx.pixels_per_point()))
+        .pivot(egui::Align2::CENTER_CENTER)
         .interactable(true)
         .show(ctx, |ui| {
             egui::Frame::new()

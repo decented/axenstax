@@ -155,7 +155,13 @@ pub enum ButtonKind {
 /// Compute every button's rectangle for a `w`×`h` screen. Pure + proportional,
 /// so it gives a consistent layout in either physical px (hit-test) or points
 /// (draw). See the module docs for the layout.
-pub fn layout_buttons(w: f32, h: f32) -> [(ButtonKind, BtnRect); 9] {
+///
+/// `ppp` is how many units of THIS space make one egui point: `1.0` when `w`×`h`
+/// are points (drawing), the pixels-per-point when they are physical px
+/// (hit-testing). Every button but one is proportional to the screen and ignores
+/// it; the Inventory button sits beside the drawn hotbar, whose size is fixed in
+/// points (`hud_ui::hotbar_geom`), so it needs the scale to stay clear of it.
+pub fn layout_buttons(w: f32, h: f32, ppp: f32) -> [(ButtonKind, BtnRect); 9] {
     let u = h * 0.13; // primary action-button side
     let r = u * 0.5;
     let m = h * 0.035; // margin from screen edges
@@ -178,10 +184,21 @@ pub fn layout_buttons(w: f32, h: f32) -> [(ButtonKind, BtnRect); 9] {
     let persp_c = (w - ms - rs, ms + rs);
     let zoom_c = (w - m - rs, h * 0.40);
 
-    // Inventory sits just right of the centred hotbar, hugging the bottom.
+    // Inventory sits just right of the DRAWN hotbar (its exact right edge, from
+    // the one shared geometry), hugging the bottom. If that spot would run into
+    // the Sneak/Place column (a squarer screen) it moves to the top row beside
+    // Chat, which no hotbar can reach, so it never covers a slot.
+    let ppp = ppp.max(0.5);
     let inv_side = u * 0.82;
     let inv_r = inv_side * 0.5;
-    let inv_c = (w * 0.715, h - m * 0.9 - inv_r);
+    let hg = crate::hud_ui::hotbar_geom(0.0, 0.0, w / ppp, h / ppp);
+    let inv_pad = u * 0.15;
+    let inv_x0 = (hg.x + hg.total_w) * ppp + inv_pad;
+    let inv_c = if inv_x0 + inv_side + inv_pad <= xl - r {
+        (inv_x0 + inv_r, h - m * 0.9 - inv_r)
+    } else {
+        (chat_c.0 + rs + gap * 0.7 + inv_r, ms + inv_r)
+    };
 
     [
         (ButtonKind::Jump, BtnRect::from_center(xr, yl, r)),
@@ -226,9 +243,15 @@ pub struct TouchInput {
     place_id: Option<u64>,
     sneak_id: Option<u64>,
     zoom_id: Option<u64>,
+    /// The finger holding the Jump button, so `jump_down` lasts as long as it does.
+    jump_id: Option<u64>,
 
     // Per-frame edge presses (consumed at end_frame) + holds.
     pub jump_pressed: bool,
+    /// The Jump button is held down (a level, where `jump_pressed` is the
+    /// one-frame edge). It is what `PlayerIntent::jump_held` carries, so holding
+    /// the button swims up in water and keeps jumping on land, as Space does.
+    pub jump_down: bool,
     pub break_held: bool,
     pub place_pressed: bool,
     /// The Place button is held down (a hold, where `place_pressed` is the
@@ -252,6 +275,11 @@ pub struct TouchInput {
     // slot you see — the buttons already share `layout_buttons`; this gives the
     // hotbar the same single-source guarantee.
     pixels_per_point: f32,
+
+    /// True while the player is dead, in a menu or in any panel: the buttons are
+    /// hidden and a new touch is ignored (the menu owns it). See
+    /// [`Self::set_suspended`].
+    suspended: bool,
 
     /// Tripped on the first touch event. Latches the overlay on for the rest of
     /// the session.
@@ -282,7 +310,9 @@ impl TouchInput {
             place_id: None,
             sneak_id: None,
             zoom_id: None,
+            jump_id: None,
             jump_pressed: false,
+            jump_down: false,
             break_held: false,
             place_pressed: false,
             place_held: false,
@@ -297,6 +327,7 @@ impl TouchInput {
             screen_w: 1280.0,
             screen_h: 720.0,
             pixels_per_point: 1.0,
+            suspended: false,
             any_touch_seen: false,
             mouse_seen: false,
         }
@@ -313,6 +344,62 @@ impl TouchInput {
         self.pixels_per_point = ppp.max(0.5);
     }
 
+    /// Screen size in physical px and the scale that draws the HUD, together.
+    /// The caller reads the scale from the window (`scale_factor` times egui's
+    /// zoom), NOT from egui's `pixels_per_point()`, which stays 1.0 until egui
+    /// has run its first frame.
+    pub fn set_display(&mut self, w: f32, h: f32, ppp: f32) {
+        self.set_screen_size(w, h);
+        self.set_pixels_per_point(ppp);
+    }
+
+    /// Hide the buttons and ignore new touches while the player is dead or a
+    /// menu or panel is open, so a tap never reaches the world from behind it and
+    /// nothing is drawn over the death screen. On either edge (open or close)
+    /// every held finger, button and drag is dropped: a stick or button held
+    /// across the change must not stay stuck, and a drag that started in a menu
+    /// must not turn into a look when it closes (its finger has no id here, so
+    /// its moves are ignored).
+    pub fn set_suspended(&mut self, suspended: bool) {
+        if self.suspended != suspended {
+            self.release_all();
+            self.suspended = suspended;
+        }
+    }
+
+    /// Whether the buttons are hidden for a death screen, menu or panel.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
+    }
+
+    /// Drop every finger, hold, edge and drag. Keeps the screen size, the scale
+    /// and the "a touch was seen" latch.
+    fn release_all(&mut self) {
+        self.joystick_id = None;
+        self.joystick_current = self.joystick_origin;
+        self.look_id = None;
+        self.look_dx = 0.0;
+        self.look_dy = 0.0;
+        self.break_id = None;
+        self.place_id = None;
+        self.sneak_id = None;
+        self.zoom_id = None;
+        self.jump_id = None;
+        self.jump_pressed = false;
+        self.jump_down = false;
+        self.break_held = false;
+        self.place_pressed = false;
+        self.place_held = false;
+        self.sneak_held = false;
+        self.zoom_held = false;
+        self.pause_pressed = false;
+        self.chat_pressed = false;
+        self.inventory_pressed = false;
+        self.camera_cycle = false;
+        self.swap_hands = false;
+        self.hotbar_select = None;
+    }
+
     /// Note a real mouse motion (so a desktop+touchscreen dev isn't shown the
     /// overlay until they tap).
     pub fn note_mouse(&mut self) {
@@ -324,15 +411,17 @@ impl TouchInput {
     /// expects to SEE them on load), unless a mouse has been used and no touch
     /// has happened yet. Any touch latches it on for good.
     pub fn controls_visible(&self) -> bool {
-        self.any_touch_seen || (is_touch_device() && !self.mouse_seen)
+        !self.suspended && (self.any_touch_seen || (is_touch_device() && !self.mouse_seen))
     }
 
     fn classify_zone(&self, x: f32, y: f32) -> TouchZone {
         let w = self.screen_w.max(1.0);
         let h = self.screen_h.max(1.0);
 
+        let ppp = self.pixels_per_point.max(0.5);
+
         // 1. Explicit button rects win (checked first, in priority order).
-        for (kind, rect) in layout_buttons(w, h) {
+        for (kind, rect) in layout_buttons(w, h, ppp) {
             if rect.contains(x, y) {
                 return TouchZone::Button(kind);
             }
@@ -343,7 +432,6 @@ impl TouchInput {
         //    one you see (the old hardcoded 0.31..0.69 fractions drifted off the
         //    fixed-width hotbar on wide screens). Web is single-player, so the
         //    viewport is the whole screen; points → physical px via ppp.
-        let ppp = self.pixels_per_point.max(0.5);
         let g = crate::hud_ui::hotbar_geom(0.0, 0.0, w / ppp, h / ppp);
         let x0 = g.x * ppp;
         let y0 = g.y * ppp;
@@ -377,6 +465,10 @@ impl TouchInput {
 
     pub fn on_touch_start(&mut self, id: u64, x: f32, y: f32) {
         self.any_touch_seen = true;
+        if self.suspended {
+            // A menu, panel or the death screen owns this finger.
+            return;
+        }
         match self.classify_zone(x, y) {
             TouchZone::Joystick => {
                 self.joystick_id = Some(id);
@@ -392,7 +484,11 @@ impl TouchInput {
             }
             TouchZone::Offhand => self.swap_hands = true,
             TouchZone::Button(kind) => match kind {
-                ButtonKind::Jump => self.jump_pressed = true,
+                ButtonKind::Jump => {
+                    self.jump_pressed = true;
+                    self.jump_down = true;
+                    self.jump_id = Some(id);
+                }
                 ButtonKind::Place => {
                     self.place_pressed = true;
                     self.place_held = true;
@@ -460,6 +556,10 @@ impl TouchInput {
             self.zoom_held = false;
             self.zoom_id = None;
         }
+        if self.jump_id == Some(id) {
+            self.jump_down = false;
+            self.jump_id = None;
+        }
     }
 
     pub fn to_intent(&self) -> PlayerIntent {
@@ -478,7 +578,7 @@ impl TouchInput {
             look_dy: self.look_dy,
             sprint,
             sneak: self.sneak_held,
-            jump_held: false,
+            jump_held: self.jump_down,
             jump_pressed: self.jump_pressed,
             toggle_flight: false,
             break_block: self.break_held,
@@ -535,8 +635,8 @@ impl TouchInput {
         std::mem::take(&mut self.pause_pressed)
     }
 
-    /// Clear per-frame edges. Call at end of each frame. Holds (break / sneak /
-    /// zoom) persist until their finger lifts.
+    /// Clear per-frame edges. Call at end of each frame. Holds (jump / break /
+    /// sneak / zoom) persist until their finger lifts.
     pub fn end_frame(&mut self) {
         self.look_dx = 0.0;
         self.look_dy = 0.0;
@@ -730,13 +830,14 @@ pub fn draw_touch_overlay(ctx: &egui::Context, touch: &TouchInput) {
                 p.circle_filled(anchor, jr * 0.42, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 110));
             }
 
-            for (kind, rect) in layout_buttons(sw, sh) {
+            for (kind, rect) in layout_buttons(sw, sh, 1.0) {
                 let r = egui::Rect::from_min_max(egui::pos2(rect.x0, rect.y0), egui::pos2(rect.x1, rect.y1));
                 let active = match kind {
                     ButtonKind::Break => touch.break_held,
                     ButtonKind::Place => touch.place_held,
                     ButtonKind::Sneak => touch.sneak_held,
                     ButtonKind::Zoom => touch.zoom_held,
+                    ButtonKind::Jump => touch.jump_down,
                     _ => false,
                 };
                 draw_button(p, r, kind, active);
@@ -749,7 +850,7 @@ mod tests {
     use super::*;
 
     fn rect_for(kind: ButtonKind, w: f32, h: f32) -> BtnRect {
-        layout_buttons(w, h)
+        layout_buttons(w, h, 1.0)
             .into_iter()
             .find(|(k, _)| *k == kind)
             .map(|(_, r)| r)
@@ -770,7 +871,7 @@ mod tests {
         ] {
             let mut t = TouchInput::new();
             t.set_screen_size(w, h);
-            for (kind, rect) in layout_buttons(w, h) {
+            for (kind, rect) in layout_buttons(w, h, 1.0) {
                 let cx = (rect.x0 + rect.x1) * 0.5;
                 let cy = (rect.y0 + rect.y1) * 0.5;
                 t.on_touch_start(1, cx, cy);
@@ -785,7 +886,7 @@ mod tests {
     #[test]
     fn no_two_buttons_overlap() {
         for (w, h) in [(1280.0, 720.0), (1920.0, 1080.0), (2400.0, 1080.0)] {
-            let buttons = layout_buttons(w, h);
+            let buttons = layout_buttons(w, h, 1.0);
             for a in 0..buttons.len() {
                 for b in (a + 1)..buttons.len() {
                     assert!(
@@ -948,5 +1049,304 @@ mod tests {
         t.on_touch_start(2, (pr.x0 + pr.x1) * 0.5, (pr.y0 + pr.y1) * 0.5);
         assert!(t.take_pause_pressed());
         assert!(!t.take_pause_pressed());
+    }
+
+
+    // ── Phone HUD: the drawn hotbar, the touch buttons and the labels ────────
+    //
+    // Everything below is a pure function or a `TouchInput` instance: no test
+    // sets the process-global touch flag.
+
+    /// The two real phone configurations (OnePlus 8T class): 2400x1080 physical
+    /// px at 2.625 and at 3.0 pixels-per-point (about 914x411 and 800x360 points).
+    const PHONES: [(f32, f32, f32); 2] = [(2400.0, 1080.0, 2.625), (2400.0, 1080.0, 3.0)];
+    /// Plus a desktop-class window, so the phone fixes can't break it.
+    /// Also the window less the 103 px camera-hole inset (2297 wide: the Inventory
+    /// button sits within a couple of points of the Sneak/Place column there, and at
+    /// the narrower ratio it takes the top-row fallback).
+    const SIZES: [(f32, f32, f32); 7] = [
+        (2400.0, 1080.0, 2.625),
+        (2400.0, 1080.0, 3.0),
+        (2297.0, 1080.0, 2.625),
+        (2297.0, 1080.0, 3.0),
+        (2200.0, 1080.0, 3.0), // narrower still: forces the top-row fallback
+        (1024.0, 768.0, 1.0),  // 4:3 tablet
+        (1280.0, 720.0, 1.0),
+    ];
+
+    /// Every rect the player sees at the bottom of the screen, in egui POINTS, at
+    /// a physical size and scale: the nine drawn hotbar slots, the off-hand box,
+    /// the touch buttons and the "NN free" label (a conservative 100x34 pt).
+    struct DrawnHud {
+        slots: Vec<BtnRect>,
+        offhand: BtnRect,
+        buttons: Vec<(ButtonKind, BtnRect)>,
+        label: BtnRect,
+    }
+
+    fn drawn_hud(w_px: f32, h_px: f32, ppp: f32) -> DrawnHud {
+        let (w, h) = (w_px / ppp, h_px / ppp);
+        let g = crate::hud_ui::hotbar_geom(0.0, 0.0, w, h);
+        let slots = (0..9)
+            .map(|i| {
+                let x0 = g.x + i as f32 * (g.slot + g.gap);
+                BtnRect { x0, y0: g.y, x1: x0 + g.slot, y1: g.y + g.slot }
+            })
+            .collect();
+        let (ox, oy, side) = g.offhand_box();
+        let o = crate::hud_ui::vital_counts_origin(0.0, 0.0, w, h, 100.0, 34.0, true);
+        DrawnHud {
+            slots,
+            offhand: BtnRect { x0: ox, y0: oy, x1: ox + side, y1: oy + side },
+            buttons: layout_buttons(w, h, 1.0).to_vec(),
+            label: BtnRect { x0: o.x, y0: o.y, x1: o.x + 100.0, y1: o.y + 34.0 },
+        }
+    }
+
+    fn centre_of(r: &BtnRect) -> (f32, f32) {
+        ((r.x0 + r.x1) * 0.5, (r.y0 + r.y1) * 0.5)
+    }
+
+    fn phone_touch(w_px: f32, h_px: f32, ppp: f32) -> TouchInput {
+        let mut t = TouchInput::new();
+        t.set_display(w_px, h_px, ppp);
+        t
+    }
+
+    /// A tap at the centre of each DRAWN hotbar slot selects that slot, at both
+    /// phone sizes and on desktop. The tap is in physical px (point x ppp).
+    #[test]
+    fn a_tap_on_each_drawn_hotbar_slot_selects_it() {
+        for (w, h, ppp) in SIZES {
+            let hud = drawn_hud(w, h, ppp);
+            let mut t = phone_touch(w, h, ppp);
+            for (i, slot) in hud.slots.iter().enumerate() {
+                let (cx, cy) = centre_of(slot);
+                t.on_touch_start(100 + i as u64, cx * ppp, cy * ppp);
+                assert_eq!(t.hotbar_select, Some(i), "{w}x{h} @{ppp}: tap on drawn slot {i}");
+                t.end_frame();
+                t.on_touch_end(100 + i as u64);
+            }
+        }
+    }
+
+    /// Nothing drawn over the hotbar: no touch button covers a slot or the
+    /// off-hand box, and nothing covers the "NN free" label.
+    #[test]
+    fn no_touch_button_covers_a_hotbar_slot_or_a_label() {
+        for (w, h, ppp) in SIZES {
+            let hud = drawn_hud(w, h, ppp);
+            for (kind, b) in &hud.buttons {
+                for (i, slot) in hud.slots.iter().enumerate() {
+                    assert!(!b.overlaps(slot), "{w}x{h} @{ppp}: {kind:?} covers hotbar slot {i}");
+                }
+                assert!(!b.overlaps(&hud.offhand), "{w}x{h} @{ppp}: {kind:?} covers the off-hand box");
+                assert!(!b.overlaps(&hud.label), "{w}x{h} @{ppp}: {kind:?} covers the 'NN free' label");
+            }
+        }
+    }
+
+    /// The buttons stay on screen and clear of each other at phone sizes (points).
+    #[test]
+    fn phone_buttons_are_on_screen_and_do_not_overlap() {
+        for (w, h, ppp) in SIZES {
+            let (wp, hp) = (w / ppp, h / ppp);
+            let hud = drawn_hud(w, h, ppp);
+            for (kind, b) in &hud.buttons {
+                assert!(b.x0 >= 0.0 && b.y0 >= 0.0 && b.x1 <= wp && b.y1 <= hp, "{kind:?} off screen at {w}x{h} @{ppp}");
+            }
+            for a in 0..hud.buttons.len() {
+                for b in (a + 1)..hud.buttons.len() {
+                    assert!(!hud.buttons[a].1.overlaps(&hud.buttons[b].1), "{:?} overlaps {:?} at {w}x{h} @{ppp}", hud.buttons[a].0, hud.buttons[b].0);
+                }
+            }
+        }
+    }
+
+    /// The tappable rect of a button is the drawn rect times the scale: draw and
+    /// hit-test can't drift apart (the Inventory button depends on the scale).
+    #[test]
+    fn button_hit_rects_are_the_drawn_rects_scaled() {
+        for (w, h, ppp) in SIZES {
+            let drawn = layout_buttons(w / ppp, h / ppp, 1.0);
+            let hit = layout_buttons(w, h, ppp);
+            for ((k, d), (_, p)) in drawn.iter().zip(hit.iter()) {
+                for (a, b) in [(d.x0, p.x0), (d.y0, p.y0), (d.x1, p.x1), (d.y1, p.y1)] {
+                    assert!((a * ppp - b).abs() < 0.5, "{k:?} hit rect != drawn x scale at {w}x{h} @{ppp}");
+                }
+            }
+        }
+    }
+
+    /// A tap on a drawn button's centre reaches that button at phone scale.
+    #[test]
+    fn every_button_centre_hits_its_own_zone_at_phone_scale() {
+        for (w, h, ppp) in PHONES {
+            let mut t = phone_touch(w, h, ppp);
+            for (kind, rect) in drawn_hud(w, h, ppp).buttons {
+                let (cx, cy) = centre_of(&rect);
+                let got = matches!(t.classify_zone(cx * ppp, cy * ppp), TouchZone::Button(k) if k == kind);
+                assert!(got, "{kind:?} centre must classify as {kind:?} at {w}x{h} @{ppp}");
+            }
+        }
+    }
+
+    /// The scale matters: with the stale 1.0 a phone's slot taps miss the drawn
+    /// hotbar (the shipped failure). `lib.rs` now feeds the window's real scale.
+    #[test]
+    fn a_stale_scale_of_one_misses_the_drawn_hotbar() {
+        let (w, h, ppp) = PHONES[0];
+        let hud = drawn_hud(w, h, ppp);
+        let mut t = phone_touch(w, h, 1.0);
+        let (cx, cy) = centre_of(&hud.slots[4]);
+        t.on_touch_start(1, cx * ppp, cy * ppp);
+        assert_eq!(t.hotbar_select, None, "at scale 1.0 the tap falls through to look");
+        t.set_display(w, h, ppp);
+        t.end_frame();
+        t.on_touch_end(1);
+        t.on_touch_start(2, cx * ppp, cy * ppp);
+        assert_eq!(t.hotbar_select, Some(4), "once the real scale is set the same tap selects slot 4");
+    }
+
+    /// A scale change after start moves the hit-band with the drawn hotbar.
+    #[test]
+    fn a_scale_change_after_start_moves_the_hit_band() {
+        let mut t = phone_touch(2400.0, 1080.0, 2.625);
+        t.set_display(2400.0, 1080.0, 3.0);
+        let hud = drawn_hud(2400.0, 1080.0, 3.0);
+        let (cx, cy) = centre_of(&hud.slots[8]);
+        t.on_touch_start(1, cx * 3.0, cy * 3.0);
+        assert_eq!(t.hotbar_select, Some(8));
+    }
+
+    /// Holding the Jump button holds `jump_held` for as long as the finger is
+    /// down (swims up in water, keeps jumping on land, like Space), and the
+    /// one-frame `jump_pressed` edge is still an edge.
+    #[test]
+    fn holding_touch_jump_holds_jump_until_its_finger_lifts() {
+        let mut t = phone_touch(2400.0, 1080.0, 2.625);
+        let jr = drawn_hud(2400.0, 1080.0, 2.625)
+            .buttons
+            .into_iter()
+            .find(|(k, _)| *k == ButtonKind::Jump)
+            .unwrap()
+            .1;
+        let (cx, cy) = centre_of(&jr);
+        t.on_touch_start(7, cx * 2.625, cy * 2.625);
+        assert!(t.to_intent().jump_held, "the frame it goes down");
+        // 30 frames later (about half a second) the finger is still down.
+        for _ in 0..30 {
+            t.end_frame();
+        }
+        let held = t.to_intent();
+        assert!(held.jump_held, "still held after many frames (a level, not an edge)");
+        assert!(!held.jump_pressed, "the press itself stays a one-frame edge");
+        // Another finger lifting does not release it.
+        t.on_touch_start(8, 100.0, 900.0);
+        t.on_touch_end(8);
+        assert!(t.to_intent().jump_held);
+        t.on_touch_end(7);
+        assert!(!t.to_intent().jump_held, "released when ITS finger lifts");
+    }
+
+    fn press_everything(t: &mut TouchInput, w: f32, h: f32, ppp: f32) {
+        // joystick, look, jump, break, place, sneak each on their own finger.
+        t.on_touch_start(1, w * 0.10, h * 0.75);
+        t.on_touch_move(1, w * 0.10, h * 0.55);
+        t.on_touch_start(2, w * 0.50, h * 0.30);
+        t.on_touch_move(2, w * 0.55, h * 0.30);
+        for (id, kind) in [
+            (3u64, ButtonKind::Jump),
+            (4, ButtonKind::Break),
+            (5, ButtonKind::Place),
+            (6, ButtonKind::Sneak),
+        ] {
+            let r = drawn_hud(w, h, ppp).buttons.into_iter().find(|(k, _)| *k == kind).unwrap().1;
+            let (cx, cy) = centre_of(&r);
+            t.on_touch_start(id, cx * ppp, cy * ppp);
+        }
+    }
+
+    /// Opening a menu (or dying) drops every held finger: nothing stays stuck,
+    /// and nothing leaks into the intent while the menu is up or once it closes.
+    #[test]
+    fn a_menu_opening_releases_every_held_touch() {
+        let (w, h, ppp) = PHONES[0];
+        let mut t = phone_touch(w, h, ppp);
+        press_everything(&mut t, w, h, ppp);
+        let before = t.to_intent();
+        assert!(before.jump_held && before.break_block && before.use_held && before.sneak && before.move_forward > 0.5);
+
+        t.set_suspended(true);
+        let i = t.to_intent();
+        assert!(!i.jump_held && !i.break_block && !i.use_held && !i.sneak, "buttons released");
+        assert!(i.move_forward == 0.0 && i.move_right == 0.0, "stick released");
+        assert!(i.look_dx == 0.0 && i.look_dy == 0.0, "look dropped");
+        assert!(!t.controls_visible(), "buttons are hidden behind the menu");
+
+        // Lifting those fingers while the menu is up changes nothing.
+        for id in 1..=6 {
+            t.on_touch_end(id);
+        }
+        t.set_suspended(false);
+        let after = t.to_intent();
+        assert!(!after.jump_held && !after.break_block && !after.use_held && !after.sneak);
+        assert!(after.move_forward == 0.0 && after.look_dx == 0.0);
+    }
+
+    /// A drag that starts while a menu is open must not become a camera look
+    /// when the menu closes under the still-moving finger, and a button pressed
+    /// in the menu's place must not latch.
+    #[test]
+    fn a_drag_started_in_a_menu_never_becomes_a_look() {
+        let (w, h, ppp) = PHONES[0];
+        let mut t = phone_touch(w, h, ppp);
+        t.set_suspended(true);
+        t.on_touch_start(1, w * 0.5, h * 0.3); // would be a look drag
+        t.on_touch_move(1, w * 0.6, h * 0.4);
+        assert_eq!(t.look_delta(), (0.0, 0.0), "no look while the menu is up");
+        t.set_suspended(false); // the menu closes; the finger is still down
+        t.on_touch_move(1, w * 0.7, h * 0.5);
+        t.on_touch_move(1, w * 0.8, h * 0.6);
+        assert_eq!(t.look_delta(), (0.0, 0.0), "the old finger never turns the camera");
+        t.on_touch_end(1);
+        assert!(!t.to_intent().jump_held && !t.to_intent().break_block);
+        // A fresh touch after the menu closed works as normal.
+        t.on_touch_start(2, w * 0.5, h * 0.3);
+        t.on_touch_move(2, w * 0.55, h * 0.3);
+        assert!(t.look_delta().0 > 0.0, "new touches look normally");
+    }
+
+    /// A button pressed on the frame a menu opens does not fire in the menu.
+    #[test]
+    fn touches_are_ignored_while_suspended() {
+        let (w, h, ppp) = PHONES[1];
+        let mut t = phone_touch(w, h, ppp);
+        t.set_suspended(true);
+        press_everything(&mut t, w, h, ppp);
+        let i = t.to_intent();
+        assert!(!i.jump_held && !i.jump_pressed && !i.break_block && !i.place_block && !i.use_held && !i.sneak);
+        assert!(t.hotbar_select.is_none() && !t.inventory_pressed && !t.pause_pressed);
+        // …but the "a touch happened" latch still turns on (a first tap on a card).
+        assert!(t.any_touch_seen);
+    }
+
+    /// The death panel is centred on the screen at phone scale (it was centred
+    /// as if physical px were points, which pushed it to the right edge).
+    #[test]
+    fn the_death_panel_centres_on_the_screen_in_points() {
+        for (w, h, ppp) in PHONES {
+            let vp = crate::screen::ViewportRect::full(w as u32, h as u32);
+            let c = crate::hud_ui::death_panel_centre(&vp, ppp);
+            assert!((c.x - w / ppp / 2.0).abs() < 0.5 && (c.y - h / ppp / 2.0).abs() < 0.5, "{w}x{h} @{ppp}: centre {c:?}");
+        }
+    }
+
+    /// Desktop keeps the label where it was: the viewport's right edge, 12 in.
+    #[test]
+    fn the_free_label_stays_put_on_desktop() {
+        let o = crate::hud_ui::vital_counts_origin(0.0, 0.0, 1280.0, 720.0, 60.0, 16.0, false);
+        assert!((o.x - (1280.0 - 12.0 - 60.0)).abs() < 0.01);
+        assert!((o.y - (720.0 - 16.0 - 48.0 - 6.0 - 16.0)).abs() < 0.01);
     }
 }

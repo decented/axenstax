@@ -3254,6 +3254,32 @@ Current world folder name stored in `Mutex<Option<String>>` static. Cursor captu
   browser windows render exactly as before. Dialogs that bypass
   `draw_dialog_frame` (egui `Window`s such as Relays and Playing online) set
   `.vscroll(true)` on Android so their buttons stay reachable.
+- **Hotbar hit-band scale (2026-11-14).** The hit-band is the hotbar `hud_ui`
+  draws (`hotbar_geom`, in points) times the scale egui draws with. That scale
+  is read from the window (`scale_factor` times egui's zoom factor) by
+  `GameState::sync_touch_metrics`, on every resize, every `ScaleFactorChanged`
+  and every touch start; never from `egui.ctx.pixels_per_point()`, which is 1.0
+  until egui's first frame and on Android stayed 1.0 (every slot tap fell above
+  the drawn hotbar and became a look drag). `layout_buttons(w, h, ppp)` takes the
+  same scale so the Inventory button sits just right of the drawn hotbar (on a
+  squarer screen, in the top row beside Chat), never over a slot; on a touch
+  device the "NN free" label ends at the hotbar's right edge instead of under
+  the Break/Place buttons (`hud_ui::vital_counts_origin`; desktop unchanged).
+- **Buttons hide behind a menu or the death screen.** `GameState::touch_suspended`
+  is true when not `Playing` (pause, lobby, loading), when player 0 is dead, or
+  when any panel is open (`p0_ui_modal_open`). While it is true the overlay is
+  not drawn and a new touch is ignored (egui owns it, so Respawn is always
+  tappable). On each change (open and close) `TouchInput::set_suspended` drops
+  every held finger, button, stick and look drag, so nothing stays stuck and a
+  drag begun in a menu never turns into a camera look afterwards. The death
+  panel is centred in points (`hud_ui::death_panel_centre`). The inventory window
+  gets a "Close" chip (top right) because the Inventory button, its only touch
+  way out, is hidden then.
+- **Jump is a held level.** The Jump button tracks its own finger
+  (`TouchInput::jump_down`) and `to_intent` sends it as `jump_held`, so holding
+  it swims up in water and keeps jumping on land, as Space does;
+  `jump_pressed` stays the one-frame edge. (It was sent as an edge only, with
+  `jump_held` always false, and physics reads only `jump_held`.)
 
 #### Day-Night Cycle + Mob Spawning (Step 13)
 

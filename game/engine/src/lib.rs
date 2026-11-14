@@ -2828,15 +2828,17 @@ impl ApplicationHandler for App {
                         p.camera.aspect = screen.viewport.aspect();
                     }
                 }
-                if crate::touch_input::TOUCH_PLATFORM {
-                    state.touch.set_screen_size(size.width as f32, size.height as f32);
-                    // Keep the touch hotbar hit-band aligned with the drawn
-                    // hotbar across DPR changes (e.g. moving a window between
-                    // monitors, or the browser zoom). Same ppp egui draws with.
-                    state
-                        .touch
-                        .set_pixels_per_point(state.renderer.egui.ctx.pixels_per_point());
-                }
+                // Size and scale for the touch hotbar hit-band, taken from the
+                // window (see `sync_touch_metrics`: egui's own ppp is still 1.0
+                // here on a phone, before its first frame).
+                state.sync_touch_metrics();
+            }
+
+            // A scale change (moving between monitors, the browser zoom, an
+            // Android display-size change) moves the drawn hotbar: keep the
+            // touch hit-band on it.
+            WindowEvent::ScaleFactorChanged { .. } => {
+                state.sync_touch_metrics();
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -3269,6 +3271,11 @@ impl ApplicationHandler for App {
             // satisfy clippy::collapsible_match under check.sh's -D warnings;
             // on desktop the event falls through to `_` as before.
             WindowEvent::Touch(touch) if crate::touch_input::TOUCH_PLATFORM => {
+                // Size, scale and "is a menu / the death screen up" are read at the
+                // moment of the touch, so a stale value never mis-places a tap or
+                // lets one through to the world behind a panel.
+                state.sync_touch_metrics();
+                state.sync_touch_gate();
                 let x = touch.location.x as f32;
                 let y = touch.location.y as f32;
                 let id = touch.id;

@@ -8202,6 +8202,42 @@ impl super::GameState {
         }
     }
 
+    /// True when the touch buttons must be hidden and new touches left to the UI
+    /// underneath: player 0 is dead (the death screen's Respawn must be
+    /// tappable and nothing may draw over it), the game is not in `Playing` (the
+    /// pause menu, lobby, loading), or any panel or modal is open
+    /// ([`Self::p0_ui_modal_open`]: inventory, chest, dialogue, map, settings…).
+    pub(crate) fn touch_suspended(&self) -> bool {
+        !matches!(self.mode, GameMode::Playing)
+            || self.players.first().is_none_or(|p| p.is_dead())
+            || self.p0_ui_modal_open()
+    }
+
+    /// Feed the touch state the window's real size and the scale egui draws
+    /// with. The scale comes from the window (`scale_factor` times egui's zoom),
+    /// not `egui.ctx.pixels_per_point()`: egui learns the scale only when its
+    /// first frame starts, so reading it from the first `Resized` gave 1.0 on a
+    /// phone and put every hotbar tap above the drawn hotbar. Called on every
+    /// resize, scale change and touch start, so it cannot go stale.
+    pub(crate) fn sync_touch_metrics(&mut self) {
+        if !crate::touch_input::TOUCH_PLATFORM {
+            return;
+        }
+        let Some(win) = self.window.winit() else { return };
+        let size = win.inner_size();
+        let ppp = win.scale_factor() as f32 * self.renderer.egui.ctx.zoom_factor();
+        self.touch.set_display(size.width as f32, size.height as f32, ppp);
+    }
+
+    /// Hide the buttons / drop held touches when [`Self::touch_suspended`]
+    /// changes. Cheap; called every frame and before each new touch is read.
+    pub(crate) fn sync_touch_gate(&mut self) {
+        if crate::touch_input::TOUCH_PLATFORM {
+            let suspended = self.touch_suspended();
+            self.touch.set_suspended(suspended);
+        }
+    }
+
     /// True when a UI surface owns player 0's input — chat, the full-screen map,
     /// or any of player 0's modal panels (crafting/inventory, chest, furnace,
     /// vendor, dialogue, inspect/capture/plaque, explorer, Workshop, Wardrobe).
@@ -8437,6 +8473,8 @@ impl super::GameState {
     }
 
     pub(crate) fn update_and_render(&mut self) {
+        // Touch: hide the buttons and drop held fingers while dead / in a menu.
+        self.sync_touch_gate();
         // Native: reconcile cursor grab to game state every frame so the OS
         // cursor is hidden during play and only returns for menus/inventory
         // (no more "click to re-grab" after a focus blip). No-op unless Playing.
@@ -22261,8 +22299,28 @@ impl super::GameState {
         // it immediately on a touch device (a Minecraft player expects to SEE
         // the controls on load), and never on a desktop mouse/keyboard user
         // until they actually tap — see `TouchInput::controls_visible`.
+        self.sync_touch_gate(); // a death or a panel opened by this frame's tick
         if crate::touch_input::TOUCH_PLATFORM && self.touch.controls_visible() {
             crate::touch_input::draw_touch_overlay(&self.renderer.egui.ctx, &self.touch);
+        }
+
+        // The touch buttons are hidden behind the inventory / crafting window,
+        // and the Inventory button was its only touch way out: give it a Close chip.
+        if crate::touch_input::TOUCH_PLATFORM
+            && matches!(self.mode, GameMode::Playing)
+            && self.players.first().is_some_and(|p| p.crafting_ui.open && !p.is_dead())
+            && crate::hud_ui::draw_touch_close_chip(&self.renderer.egui.ctx)
+        {
+            let outcome = self.close_crafting(0);
+            if outcome == crate::window_actions::CraftClose::Refused {
+                self.toast = Some((
+                    "Inventory full — make room to close crafting".to_string(),
+                    Instant::now() + Duration::from_secs(2),
+                ));
+            }
+            if outcome != crate::window_actions::CraftClose::Frozen {
+                self.capture_cursor();
+            }
         }
 
         // ── World handover window (consent / status / paused banner) ─────────
