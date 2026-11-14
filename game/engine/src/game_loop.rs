@@ -3266,6 +3266,7 @@ impl super::GameState {
         self.local_off_swing.clear();
         self.local_off_use.clear();
         self.local_guard.clear();
+        self.shield_press.clear();
         self.local_sneak.clear();
         self.entity_was_in_water.clear();
         // The explored-map cache is keyed by chunk column only, so world B
@@ -4627,8 +4628,16 @@ impl super::GameState {
                 kind.map(|k| crate::local_mob_click::mob_facts(&self.ecs, e, k, Some(&key), self.tick_counter))
             })
         };
+        let (main, off) = p.hands_items();
+        let holds_empty_bucket = |i: Option<&crate::item::Item>| {
+            matches!(i, Some(crate::item::Item::Material(crate::item::MaterialId::Bucket)))
+        };
         crate::hands::UseTarget {
             block: p.target_block.map(|b| self.world.get_block(b[0], b[1], b[2])),
+            // A bucket's fill is a separate ray and survives a mob under the
+            // crosshair: asked only when a hand holds an empty bucket.
+            bucket_fills: (holds_empty_bucket(main) || holds_empty_bucket(off))
+                && self.bucket_fill_target(pidx).is_some(),
             mob: mob_facts.is_some(),
             sneak,
             mob_facts,
@@ -4642,24 +4651,25 @@ impl super::GameState {
         }
     }
 
-    /// Off-hand release — what player `pidx`'s shield does this frame: the target
-    /// check (`hands::shield_raises`: a shield in a hand, and no other use for what
-    /// the crosshair is on) when the press starts, then held up while the button is
-    /// (`hands::shield_hold`, reading last frame's latch `local_guard`). Cheap when
-    /// no shield is held.
-    fn shield_hold(&self, pidx: usize, intent: &PlayerIntent) -> crate::hands::ShieldHold {
-        const DOWN: crate::hands::ShieldHold = crate::hands::ShieldHold { raised: false, held_over: false };
+    /// Off-hand release — what player `pidx`'s shield does this frame, and where its
+    /// use press then stands: the target check (`hands::shield_raises`: a shield in a
+    /// hand, and no other use for what the crosshair is on) when the press starts, then
+    /// the outcome kept until the button is released (`hands::shield_press`, the
+    /// seat's [`Press`](crate::hands::Press) in `shield_press`: nothing re-asks the
+    /// target while the button stays held). A Strict seat's off-hand counts only as a
+    /// shield (`hands::usable_off_hand`: its other off-hand uses never run). Pure of
+    /// state (the caller commits the press), cheap when no shield is held.
+    fn shield_hold(&self, pidx: usize, intent: &PlayerIntent) -> (crate::hands::ShieldHold, crate::hands::Press) {
         let p = &self.players[pidx];
         let holding = (intent.place_block || intent.use_held) && intent.cursor_captured && !p.combat.dead;
         let (main, off) = p.hands_items();
+        let off = crate::hands::usable_off_hand(self.strict_window_connection(), off);
         let shield_in_hand = crate::shield::is_shield(main) || crate::shield::is_shield(off);
-        if !holding || !shield_in_hand {
-            return DOWN;
-        }
-        let was_raised = self.local_guard.contains(&pidx);
-        // The target is asked only when it can decide: not for a held-up shield.
-        let raises_here = !was_raised && crate::hands::shield_raises(main, off, &self.use_target(pidx, intent.sneak));
-        crate::hands::shield_hold(was_raised, holding, shield_in_hand, raises_here)
+        let prev = self.shield_press.get(&pidx).copied().unwrap_or_default();
+        // The target is asked only when it can decide: the press frame.
+        crate::hands::shield_press(prev, holding, shield_in_hand, || {
+            crate::hands::shield_raises(main, off, &self.use_target(pidx, intent.sneak))
+        })
     }
 
     /// Does this client's block edit (and its `mined` tag) reach the server it
@@ -4837,8 +4847,22 @@ impl super::GameState {
         let empty_bucket = self.players[pidx].held_for_use(hand).is_some_and(|s| {
             matches!(s.item, crate::item::Item::Material(crate::item::MaterialId::Bucket))
         });
-        if !empty_bucket || !self.play_mode.can_edit_world() {
+        if !empty_bucket {
             return false;
+        }
+        match self.bucket_fill_target(pidx) {
+            Some((pos, blk)) => self.fill_bucket_at(pidx, hand, pos, blk),
+            None => false,
+        }
+    }
+
+    /// The source cell and liquid an empty bucket's fluid-aware ray reaches for player
+    /// `pidx` (the first WATER or LAVA source in reach), when the play mode lets it
+    /// fill. The one ray `try_bucket_fill` fills from and the hand rule asks
+    /// (`UseTarget::bucket_fills`), so selection and execution cannot disagree.
+    fn bucket_fill_target(&self, pidx: usize) -> Option<([i32; 3], block::BlockId)> {
+        if !self.play_mode.can_edit_world() {
+            return None;
         }
         let eye = self.players[pidx].player.eye_pos();
         let dir = self.players[pidx].camera.forward();
@@ -4858,13 +4882,8 @@ impl super::GameState {
                     lava.is_source(p[0], p[1], p[2])
                 }
             },
-        );
-        match hit {
-            Some(h) if h.block == block::WATER || h.block == block::LAVA => {
-                self.fill_bucket_at(pidx, hand, h.block_pos, h.block)
-            }
-            _ => false,
-        }
+        )?;
+        (hit.block == block::WATER || hit.block == block::LAVA).then_some((hit.block_pos, hit.block))
     }
 
     /// Buckets MC-parity — fill an empty Bucket from a SOURCE block (flowing
@@ -11706,7 +11725,7 @@ impl super::GameState {
             // click does nothing and a break in progress stops (its progress resets
             // in the `!should_break` branch below). A client gate only, local and
             // joined; the server does not enforce it this release.
-            if self.shield_hold(pidx, intent).raised {
+            if self.shield_hold(pidx, intent).0.raised {
                 intent.break_block = false;
             }
 
@@ -13800,7 +13819,12 @@ impl super::GameState {
             // what is under the crosshair now (that is the press frame's question).
             // The press frame still runs the chain (a shield has no arm to take the
             // click), so raising is a latch the tick turns into `guarding`.
-            let hold = self.shield_hold(pidx, intent);
+            let (hold, press) = self.shield_hold(pidx, intent);
+            if press == crate::hands::Press::Idle {
+                self.shield_press.remove(&pidx);
+            } else {
+                self.shield_press.insert(pidx, press);
+            }
             if hold.raised {
                 self.local_guard.insert(pidx);
             } else {

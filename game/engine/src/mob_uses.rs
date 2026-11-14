@@ -99,17 +99,64 @@ pub fn commands_pet(kind: MobType, own_pet: bool) -> bool {
     own_pet && (matches!(kind, MobType::Wolf | MobType::Nostrich) || crate::companion::is_companion_species(kind))
 }
 
-/// Does a click on this mob do something whatever the hands hold: a steed is
-/// mounted (a pack equipped from a chest is the same click), a villager trades,
-/// a tethered mob has its Lead taken off. These arms read no item (the detach
-/// reads only that it is not a Lead; a Lead's own use is [`lead_attaches`]).
-pub fn takes_the_click_whatever_is_held(f: &MobFacts) -> bool {
-    crate::mob::is_rideable(f.kind) || trades(f.kind) || f.tethered
+/// What one hand's click does to the mob under the crosshair, worked out the way
+/// the right-click chain does it for that hand ([`hand_mob_use`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MobUse {
+    /// A mob arm fires for this hand: the click is the mob's.
+    Acts,
+    /// A bucket on a cow that is not ready, or shears on a sheep still growing wool:
+    /// the harvest refuses, every later mob arm skips this hand's click
+    /// (`local_mob_click::MobArm::Refused`), and the click goes on to the block and
+    /// fluid arms, so another hand or a non-mob use may still have it.
+    Refused,
+    /// No mob arm fires for this hand.
+    None,
+}
+
+/// The whole mob chain for ONE hand holding `item` (`None` = an empty hand), in the
+/// chain's own order: a Lead on a passive mob, breeding food, a bucket or shears
+/// (ready: acts; not ready: [`MobUse::Refused`], which ends the mob arms), taming
+/// food, riding a steed (a pack from a chest is the same click), a Lead taken off a
+/// tethered mob (any item but a Lead, `mob_interact::lead_detach`), a villager's
+/// trade, and an empty hand's command to your own pet. The click goes to the first
+/// hand, main then off, whose answer is [`MobUse::Acts`], so one hand's whole chain
+/// runs before the other hand is asked (review 4 finding 1).
+pub fn hand_mob_use(item: Option<&Item>, f: &MobFacts, sneak: bool) -> MobUse {
+    let mat = match item {
+        Some(Item::Material(m)) => Some(*m),
+        _ => None,
+    };
+    if mat == Some(MaterialId::Lead) && lead_attaches(f.kind) {
+        return MobUse::Acts;
+    }
+    if mat.is_some_and(|m| feeds(f.kind, f.can_breed, sneak, m)) {
+        return MobUse::Acts;
+    }
+    if mat == Some(MaterialId::Bucket) && f.kind == MobType::Cow {
+        return if f.product_ready { MobUse::Acts } else { MobUse::Refused };
+    }
+    if matches!(item, Some(Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shears)
+        && crate::tool_uses::shears_cut(f.kind)
+    {
+        return if f.product_ready { MobUse::Acts } else { MobUse::Refused };
+    }
+    if mat.is_some_and(|m| tames_with(f.kind, f.tamed, m)) {
+        return MobUse::Acts;
+    }
+    if crate::mob::is_rideable(f.kind) || (f.tethered && mat != Some(MaterialId::Lead)) || trades(f.kind) {
+        return MobUse::Acts;
+    }
+    if item.is_none() && commands_pet(f.kind, f.own_pet) {
+        return MobUse::Acts;
+    }
+    MobUse::None
 }
 
 /// Does `item` (a hand's item) do something to this mob, in the chain's order:
 /// a Lead, breeding food, a bucket, shears, taming food. The empty hand is
-/// [`commands_pet`] and the unconditional arms [`takes_the_click_whatever_is_held`].
+/// [`commands_pet`] and the unconditional arms (riding, trading, a Lead taken off),
+/// all of them in [`hand_mob_use`].
 pub fn item_works_on(item: &Item, f: &MobFacts, sneak: bool) -> bool {
     match item {
         Item::Material(m) => {
@@ -136,7 +183,7 @@ mod tests {
     fn a_hostile_mob_takes_nothing_a_hand_holds() {
         for kind in [MobType::Brigand, MobType::Marauder, MobType::Berserker] {
             let f = MobFacts::of(kind);
-            assert!(!takes_the_click_whatever_is_held(&f), "{kind:?}");
+            assert_eq!(hand_mob_use(None, &f, true), MobUse::None, "{kind:?}: an empty hand");
             for m in [MaterialId::Wheat, MaterialId::Lead, MaterialId::Bucket, MaterialId::Bone, MaterialId::Bread] {
                 assert!(!item_works_on(&mat(m), &f, true), "{kind:?} {m:?}");
             }
@@ -170,12 +217,31 @@ mod tests {
 
     #[test]
     fn a_steed_a_villager_and_a_tethered_mob_take_the_click_whatever_is_held() {
-        assert!(takes_the_click_whatever_is_held(&MobFacts::of(MobType::Horse)));
-        assert!(takes_the_click_whatever_is_held(&MobFacts::of(MobType::Donkey)));
-        assert!(takes_the_click_whatever_is_held(&MobFacts::of(MobType::Villager)));
-        assert!(takes_the_click_whatever_is_held(&MobFacts::of(MobType::Peddler)));
-        assert!(takes_the_click_whatever_is_held(&MobFacts { tethered: true, ..MobFacts::of(MobType::Cow) }));
-        assert!(!takes_the_click_whatever_is_held(&MobFacts::of(MobType::Cow)));
+        let shield = Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Iron));
+        let tied = MobFacts { tethered: true, ..MobFacts::of(MobType::Cow) };
+        for f in [MobFacts::of(MobType::Horse), MobFacts::of(MobType::Donkey), MobFacts::of(MobType::Villager), MobFacts::of(MobType::Peddler), tied] {
+            assert_eq!(hand_mob_use(None, &f, false), MobUse::Acts, "{:?}: empty", f.kind);
+            assert_eq!(hand_mob_use(Some(&shield), &f, false), MobUse::Acts, "{:?}: a shield", f.kind);
+        }
+        assert_eq!(hand_mob_use(Some(&shield), &MobFacts::of(MobType::Cow), false), MobUse::None);
+        // A Lead is never taken off by a Lead (and it does not tie a mob that is not passive).
+        let lead = mat(MaterialId::Lead);
+        assert_eq!(hand_mob_use(Some(&lead), &MobFacts { tethered: true, ..MobFacts::of(MobType::Brigand) }, false), MobUse::None);
+    }
+
+    /// Review 4 finding 3: a harvest that refuses ends the mob arms for that hand, so
+    /// a tethered sheep's Lead is NOT taken off by shears that cannot cut, but IS by
+    /// any other item.
+    #[test]
+    fn a_refused_harvest_ends_the_hands_mob_arms() {
+        let shears = Item::Tool(Tool::new(ToolType::Shears, ToolMaterial::Iron));
+        let shield = Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Iron));
+        let tied_sheep = MobFacts { tethered: true, ..MobFacts::of(MobType::Sheep) };
+        let growing = MobFacts { product_ready: false, ..tied_sheep };
+        assert_eq!(hand_mob_use(Some(&shears), &tied_sheep, false), MobUse::Acts, "shears that can cut");
+        assert_eq!(hand_mob_use(Some(&shears), &growing, false), MobUse::Refused, "wool still growing: nothing, not a detach");
+        assert_eq!(hand_mob_use(Some(&shield), &growing, false), MobUse::Acts, "any other item takes the Lead off");
+        assert_eq!(hand_mob_use(Some(&mat(MaterialId::Bucket)), &MobFacts { product_ready: false, ..MobFacts::of(MobType::Cow) }, false), MobUse::Refused);
     }
 
     #[test]

@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glam::Vec3;
 
-use crate::protocol::{entity_flags, EntityKind, EntitySpawn, EntityUpdate, WireItem};
+use crate::protocol::{entity_flags, entity_flags2, EntityKind, EntitySpawn, EntityUpdate, WireItem};
 
 /// A joiner is told about an entity once it comes within this many blocks
 /// (horizontal distance) of its body. Past mob-spawning range and well inside
@@ -74,6 +74,19 @@ pub(crate) struct LiveEntity {
 }
 
 impl LiveEntity {
+    /// This entity's update as `owner_key`'s client is sent it: the shared update,
+    /// plus [`entity_flags2::OWN_PET`] when it is that client's own pet.
+    fn update_for(&self, ecs: &hecs::World, owner_key: Option<&str>) -> EntityUpdate {
+        let mut update = self.update.clone();
+        if update.flags & entity_flags::TAMED != 0
+            && let Some(key) = owner_key
+            && crate::tameable::pet_owner_of(ecs, self.entity).as_deref() == Some(key)
+        {
+            update.flags2 |= entity_flags2::OWN_PET;
+        }
+        update
+    }
+
     fn pos(&self) -> Vec3 {
         Vec3::new(self.update.x, self.update.y, self.update.z)
     }
@@ -225,6 +238,7 @@ fn update_changed(prev: &EntityUpdate, next: &EntityUpdate) -> bool {
     let far = |a: f32, b: f32, eps: f32| (a - b).abs() > eps;
     prev.state != next.state
         || prev.flags != next.flags
+        || prev.flags2 != next.flags2
         || far(prev.x, next.x, POS_EPSILON)
         || far(prev.y, next.y, POS_EPSILON)
         || far(prev.z, next.z, POS_EPSILON)
@@ -303,6 +317,12 @@ fn collect_live(ecs: &hecs::World, tick: u64) -> BTreeMap<u32, LiveEntity> {
         {
             flags |= entity_flags::PRODUCT_NOT_READY;
         }
+        // Off-hand review 4 — the breeding state a joiner's hand rule needs (the
+        // rule `mob_interact::feed` takes food by: not in love, not cooling down).
+        let mut flags2 = 0u8;
+        if ecs.get::<&crate::breeding::InLove>(e).is_ok() || ecs.get::<&crate::breeding::BreedCooldown>(e).is_ok() {
+            flags2 |= entity_flags2::BREED_BLOCKED;
+        }
         let update = EntityUpdate {
             id: pid.0,
             x: pos.0.x,
@@ -314,6 +334,7 @@ fn collect_live(ecs: &hecs::World, tick: u64) -> BTreeMap<u32, LiveEntity> {
             vy: vel.0.y,
             vz: vel.0.z,
             flags,
+            flags2,
         };
         live.insert(pid.0, LiveEntity { entity: e, class: Class::Mob(kind.0), update });
     }
@@ -377,6 +398,7 @@ fn collect_live(ecs: &hecs::World, tick: u64) -> BTreeMap<u32, LiveEntity> {
             vy: vel.0.y,
             vz: vel.0.z,
             flags: 0,
+            flags2: 0,
         };
         live.insert(pid.0, LiveEntity { entity: e, class: Class::Projectile, update });
     }
@@ -451,11 +473,26 @@ impl ClientInterest {
     /// diffed from (an entrant's spawn is built from it). `anchor` is where
     /// its body stands (a joiner); `None` for a local slot, which hears about
     /// everything.
+    #[cfg(test)]
     pub fn events(
         &mut self,
         tick: &EntityTick,
         ecs: &hecs::World,
         anchor: Option<Vec3>,
+    ) -> ClientEntityEvents {
+        self.events_for(tick, ecs, anchor, None)
+    }
+
+    /// [`Self::events`] for a client whose pet-owner key is `owner_key` (its
+    /// verified npub, `ServerPlayer::pet_owner_key`): each mob update sent to it
+    /// carries [`entity_flags2::OWN_PET`] when the mob is that client's own pet, so
+    /// its hand rule can tell a pet it commands from someone else's.
+    pub fn events_for(
+        &mut self,
+        tick: &EntityTick,
+        ecs: &hecs::World,
+        anchor: Option<Vec3>,
+        owner_key: Option<&str>,
     ) -> ClientEntityEvents {
         let mut ev = ClientEntityEvents::default();
         for id in &tick.despawns {
@@ -470,7 +507,7 @@ impl ClientInterest {
                     self.shown.remove(id);
                     ev.despawns.push(*id);
                 } else if tick.changed.contains(id) {
-                    ev.updates.push(e.update.clone());
+                    ev.updates.push(e.update_for(ecs, owner_key));
                 }
             } else if distance(e).is_none_or(|d| d <= INTEREST_ENTER_RADIUS) {
                 // Entering: the spawn carries the entity's state NOW (not
@@ -478,7 +515,7 @@ impl ClientInterest {
                 // follows whether or not it changed this tick.
                 self.shown.insert(*id);
                 ev.spawns.push(e.spawn(ecs));
-                ev.updates.push(e.update.clone());
+                ev.updates.push(e.update_for(ecs, owner_key));
             }
         }
         ev
@@ -633,6 +670,47 @@ mod tests {
         let id = ecs.get::<&ProtocolId>(hurt).unwrap().0;
         assert!(tick.changed.contains(&id));
         assert_eq!(tick.live[&id].update.flags, 0);
+    }
+
+    /// Off-hand review 4 finding 4 — the server sends the facts a joiner's hand rule cannot
+    /// see: `BREED_BLOCKED` on an adult in love or on its cooldown (and clears when it is
+    /// over, as a change), and `OWN_PET` only in the updates sent to the pet's own owner.
+    #[test]
+    fn the_server_sends_breeding_state_and_a_per_recipient_own_pet_bit() {
+        let (mut ecs, mut b) = fresh();
+        let cow = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 0.0));
+        let cooling = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(2.0, 64.0, 0.0));
+        let wolf = entity::spawn_mob(&mut ecs, MobType::Wolf, Vec3::new(4.0, 64.0, 0.0));
+        ecs.get::<&mut crate::wolf::WolfData>(wolf).unwrap().ownership.owner_pubkey = "npub-owner".to_string();
+        let id_of = |ecs: &hecs::World, e: hecs::Entity| ecs.get::<&ProtocolId>(e).unwrap().0;
+
+        let tick = b.diff(&mut ecs, 0);
+        assert_eq!(tick.live[&id_of(&ecs, cow)].update.flags2, 0, "a fresh adult takes food");
+        ecs.insert_one(cow, crate::breeding::InLove { until_tick: 999, fed_by: None }).unwrap();
+        ecs.insert_one(cooling, crate::breeding::BreedCooldown { until_tick: 999 }).unwrap();
+        let tick = b.diff(&mut ecs, 0);
+        for e in [cow, cooling] {
+            let id = id_of(&ecs, e);
+            assert!(tick.changed.contains(&id), "the flag is a change to broadcast");
+            assert_eq!(tick.live[&id].update.flags2, entity_flags2::BREED_BLOCKED);
+        }
+        let _ = ecs.remove_one::<crate::breeding::InLove>(cow);
+        let tick = b.diff(&mut ecs, 0);
+        assert!(tick.changed.contains(&id_of(&ecs, cow)), "and its clearing is one");
+        assert_eq!(tick.live[&id_of(&ecs, cow)].update.flags2, 0);
+
+        // Ownership is per recipient: only the owner's copy carries OWN_PET.
+        let wolf_id = id_of(&ecs, wolf);
+        let tick = b.diff(&mut ecs, 0);
+        assert_eq!(tick.live[&wolf_id].update.flags2, 0, "the shared update names no owner");
+        let sent = |owner: Option<&str>| {
+            let mut client = ClientInterest::default();
+            let ev = client.events_for(&tick, &ecs, None, owner);
+            ev.updates.into_iter().find(|u| u.id == wolf_id).expect("the wolf's update").flags2
+        };
+        assert_eq!(sent(Some("npub-owner")), entity_flags2::OWN_PET, "its owner");
+        assert_eq!(sent(Some("npub-other")), 0, "someone else");
+        assert_eq!(sent(None), 0, "a client with no identity");
     }
 
     /// FU3 (FU1 verify N8) — `PRODUCT_NOT_READY` on a cow just milked and a

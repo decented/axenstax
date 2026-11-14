@@ -197,11 +197,19 @@ fn game_harness_a_shield_raises_only_where_the_target_has_no_other_use() {
     aim_at(&mut hg, at + glam::Vec3::new(0.0, 0.7, 0.0));
     hold(&mut hg, winit::event::MouseButton::Right, true);
     // The press frame: the wheat's use wins, the cow is fed and the shield stays down.
-    // (Once the cow is in love the wheat has no use there, and a button still held
-    // raises the shield, as it should: so look at the press, not at the frames after.)
     hg.frames(1);
     assert!(!hg.state.local_guard.contains(&0), "the wheat's use wins: the shield stays down");
     assert!(hg.state.ecs.get::<&crate::breeding::InLove>(cow).is_ok(), "and the cow is fed");
+    // Review 4: the press is classified once. The cow is in love now and the wheat has no
+    // use on it, but the button is still held: the shield stays down for the whole press.
+    hg.frames(4);
+    assert!(!hg.state.local_guard.contains(&0), "the same press never turns into a raise");
+    hold(&mut hg, winit::event::MouseButton::Right, false);
+    hg.frames(2);
+    // Release and press again: the cow in love takes no wheat, so the shield raises.
+    hold(&mut hg, winit::event::MouseButton::Right, true);
+    hg.frames(3);
+    assert!(hg.state.local_guard.contains(&0), "a new press asks again: the shield raises");
     hold(&mut hg, winit::event::MouseButton::Right, false);
     hg.frames(2);
     hg.state.players[0].offhand = None;
@@ -220,9 +228,10 @@ fn game_harness_a_shield_raises_only_where_the_target_has_no_other_use() {
 /// Review 2 finding 6 and review 3 decision B: a raised shield neither mines nor attacks,
 /// and once raised it stays raised while the button is held, whatever comes under the
 /// crosshair. A pickaxe in the main hand, a shield in the off-hand, both buttons held:
-/// the shield is raised in open air, then the aim turns to a cow and to stone. It stays
-/// up, the cow takes no hit and the stone gets no break progress. Releasing the shield
-/// lets both work again.
+/// the shield is raised in open air, then the aim turns, still holding, to a villager and a
+/// door (targets whose use would win at a press: trade, a toggle; review 4 decision 5) and
+/// to stone. It stays up, the villager is not hit or talked to, the door does not move and
+/// the stone gets no break progress. Releasing the shield lets both work again.
 #[test]
 #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
 fn game_harness_a_raised_shield_neither_mines_nor_attacks() {
@@ -241,17 +250,29 @@ fn game_harness_a_raised_shield_neither_mines_nor_attacks() {
     run(&mut hg, 4);
     assert!(hg.state.local_guard.contains(&0), "the shield is up in open air");
 
-    // Turn to a cow in front, still holding: it stays up and the cow takes no hit.
+    // Review 4 decision 5: turn to targets whose use would WIN at a press, still holding.
+    // A villager (the right click would open its trade, the left would hit it) and a
+    // door (it would toggle): the shield stays up, the villager is neither hit nor
+    // talked to, the door does not move.
     let at = glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32, cell[2] as f32 + 1.2);
-    let cow = crate::entity::spawn_mob(&mut hg.state.ecs, crate::mob::MobType::Cow, at);
-    let max = hg.state.ecs.get::<&crate::combat::Health>(cow).unwrap().current;
-    aim_at(&mut hg, at + glam::Vec3::new(0.0, 0.7, 0.0));
+    let villager = crate::entity::spawn_mob(&mut hg.state.ecs, crate::mob::MobType::Villager, at);
+    let max = hg.state.ecs.get::<&crate::combat::Health>(villager).unwrap().current;
+    aim_at(&mut hg, at + glam::Vec3::new(0.0, 0.9, 0.0));
     run(&mut hg, 12);
-    assert!(hg.state.local_guard.contains(&0), "turned over a cow: held on");
-    assert_eq!(hg.state.ecs.get::<&crate::combat::Health>(cow).unwrap().current, max, "no hit while guarding");
+    assert!(hg.state.local_guard.contains(&0), "turned over a villager: held on");
+    assert_eq!(hg.state.ecs.get::<&crate::combat::Health>(villager).unwrap().current, max, "no hit while guarding");
+    assert!(hg.state.players[0].dialogue_villager.is_none(), "and no trade opened");
+    hg.state.ecs.despawn(villager).ok();
+    hg.state.world.set_block(cell[0], cell[1], cell[2], block::OAK_DOOR);
+    let door_before = (hg.state.world.get_block(cell[0], cell[1], cell[2]), hg.state.world.meta_at(cell[0], cell[1], cell[2]));
+    aim_at(&mut hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5));
+    run(&mut hg, 12);
+    assert!(hg.state.local_guard.contains(&0), "turned to a door: held on");
+    let door_after = (hg.state.world.get_block(cell[0], cell[1], cell[2]), hg.state.world.meta_at(cell[0], cell[1], cell[2]));
+    assert_eq!(door_before, door_after, "the door did not toggle");
 
     // Turn to the stone: still up, and no break progress.
-    hg.state.ecs.despawn(cow).ok();
+    hg.state.world.set_block(cell[0], cell[1], cell[2], block::STONE);
     aim_at(&mut hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5));
     run(&mut hg, 12);
     assert!(hg.state.local_guard.contains(&0), "turned to stone: held on");

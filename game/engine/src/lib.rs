@@ -1452,6 +1452,9 @@ pub(crate) struct GameState {
     /// tick turns it into `PlayerIntent::guarding` and counts the raise
     /// (`PlayerSlot::shield_ticks`). Also suppresses the use swing.
     pub(crate) local_guard: std::collections::HashSet<usize>,
+    /// Each seat's use press, classified once per press and kept until the button is
+    /// released (`hands::shield_press`). Absent = the button is up.
+    pub(crate) shield_press: std::collections::HashMap<usize, hands::Press>,
     /// Phase 3 (cosmetics) — live sneak signal per LOCAL player index, captured
     /// each tick from the post-gate intent. Read by `local_player_state` to drive
     /// a split-screen peer's CROUCHING flag. `PlayerSlot.input` is vestigial in
@@ -2301,6 +2304,7 @@ impl GameState {
             local_off_swing: std::collections::HashMap::new(),
             local_off_use: std::collections::HashSet::new(),
             local_guard: std::collections::HashSet::new(),
+            shield_press: std::collections::HashMap::new(),
             local_sneak: std::collections::HashMap::new(),
             net_send_seq: 0,
             own_prediction: crate::prediction::OwnPrediction::new(),

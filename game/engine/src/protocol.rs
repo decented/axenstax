@@ -2065,6 +2065,27 @@ pub struct EntityUpdate {
     /// MP-D2a (v68) — [`entity_flags`] bits.
     #[serde(default)]
     pub flags: u8,
+    /// v101 (off-hand review 4, appended before any build: no version bump) —
+    /// [`entity_flags2`] bits, the server's facts a joiner's hand rule needs and
+    /// cannot see (breeding eligibility, whose pet this is). APPEND-ONLY, after
+    /// `flags`. The `OWN_PET` bit is per recipient: it says the mob is the pet of
+    /// the client the update is sent to.
+    #[serde(default)]
+    pub flags2: u8,
+}
+
+/// Bit flags carried in `EntityUpdate.flags2` (v101, appended): see
+/// [`entity_flags`] for the first byte. Wire-stable bit positions; append only.
+pub mod entity_flags2 {
+    /// An adult that takes no breeding food now: already in love
+    /// (`breeding::InLove`) or on its breeding cooldown (`breeding::BreedCooldown`).
+    /// A baby says so with [`super::entity_flags::BABY`]. A joiner's feed request on it
+    /// would be refused (`mob_interact::feed`), so wheat has no use on it.
+    pub const BREED_BLOCKED: u8 = 1;
+    /// A tamed mob that is THIS client's own pet (`tameable::pet_owner_of` equals
+    /// the client's verified npub): the one an empty hand commands. Set per
+    /// recipient, off for everyone else's pet.
+    pub const OWN_PET: u8 = 2;
 }
 
 /// State update sent from server to client each tick.
@@ -3742,10 +3763,11 @@ mod tests {
             vy: -0.08,
             vz: 0.0,
             flags: entity_flags::HURT | entity_flags::BABY,
+            flags2: entity_flags2::BREED_BLOCKED | entity_flags2::OWN_PET,
         };
         let bytes = bincode::serialize(&upd).unwrap();
-        // id + 4 f32 + state + 3 f32 + flags, fixint.
-        assert_eq!(bytes.len(), 4 + 16 + 1 + 12 + 1);
+        // id + 4 f32 + state + 3 f32 + flags + flags2, fixint.
+        assert_eq!(bytes.len(), 4 + 16 + 1 + 12 + 1 + 1);
         let back: EntityUpdate = safe_deserialize(&bytes).unwrap();
         assert_eq!(back, upd);
     }
@@ -4046,6 +4068,7 @@ mod tests {
         // v100 (living world Tier 2 S10): RegionPeople (79), a new packet.
         // v100 (living world Tier 2 S6): block id 378 (Commons Shelf), `ChestTier::Shelf`, no packet change.
         // v100 (living world Tier 2 S7): block id 379 (Site Board); ItemAction::SiteBoard (= 15); BlockView::SiteBoard (= 5).
+        // v101 (off-hand review 4, appended before any build): `EntityUpdate.flags2` (`entity_flags2::BREED_BLOCKED`, `OWN_PET`).
         // v101 (off-hand plan slice 2): the hand on every use packet, WindowClick::Offhand (= 11) and SwapHands (= 12), WireWindowSlot::Offhand (= 5), the tool type and the off-hand on the avatar wire.
         assert_eq!(PROTOCOL_VERSION, 101);
     }

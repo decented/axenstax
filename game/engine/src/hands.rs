@@ -68,6 +68,12 @@ pub struct UseTarget {
     /// (`mob_uses`). `None` with `mob` set is a mob nothing is known about, which no
     /// held item does anything to.
     pub mob_facts: Option<crate::mob_uses::MobFacts>,
+    /// An EMPTY bucket's fluid ray reaches a water or lava source it can fill from,
+    /// and the play mode can edit (`GameState::bucket_fill_in_reach`, the ray
+    /// `try_bucket_fill` casts). That ray passes through nothing else, so it is a
+    /// separate question from `block` (whose ray passes through water) and from the
+    /// mob: a fish under the crosshair does not take it away.
+    pub bucket_fills: bool,
 }
 
 /// Blocks whose right-click arm in `game_loop` takes or reads the HELD item
@@ -142,21 +148,35 @@ enum Pick {
     Raise(Hand),
 }
 
-/// In the click's order: the block that takes whatever is held, the main hand's
-/// item, the off-hand's item, a mob that takes the click whatever is held (a
-/// steed, a villager, a Lead to take off) and an empty hand's command to its own
-/// pet, and only then a shield (the main hand's first). A shield's own use, the
-/// raise, is the last claimant: another hand's real use, a door or a chest, and a
-/// mob that a hand does something to all win over it, and nothing else does.
+/// Does the hand holding `item` (`None` = empty) do anything at all for `target`:
+/// first the whole mob chain for that hand ([`crate::mob_uses::hand_mob_use`]: the
+/// chain's own order, a refusing harvest ending only the mob arms), then the item's
+/// uses that are not about a mob (a block placed, food eaten, a bucket filled at
+/// water). A shield's raise is not counted here: it is the last claimant.
+fn hand_acts(item: Option<&Item>, target: &UseTarget) -> bool {
+    use crate::mob_uses::{hand_mob_use, MobUse};
+    if target.mob_facts.is_some_and(|f| hand_mob_use(item, &f, target.sneak) == MobUse::Acts) {
+        return true;
+    }
+    item.is_some_and(|i| !crate::shield::is_shield(Some(i)) && non_mob_use(i, target))
+}
+
+/// In the click's order: the block that takes whatever is held, then each hand in
+/// turn, the main hand's WHOLE action first (the mob chain in its own order, then
+/// its other uses) and only if it has nothing, the off-hand's, and only then a
+/// shield (the main hand's first). A shield's own use, the raise, is the last
+/// claimant: another hand's real use, a door or a chest, and a mob that a hand does
+/// something to all win over it, and nothing else does. An empty off-hand never
+/// takes a click (a pet is commanded by an empty MAIN hand).
 fn pick(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Option<Pick> {
     if target.block.is_some_and(block_takes_held_item) {
         return Some(Pick::Use(Hand::Main));
     }
-    let other_use = |i: &Item| !crate::shield::is_shield(Some(i)) && item_has_use(i, target);
-    if main.is_some_and(other_use) {
+    if hand_acts(main, target) {
         return Some(Pick::Use(Hand::Main));
     }
     match off {
+        None => {}
         // BRIDGE: a Plan's Inspect dialog is keyed on a hotbar slot, so a Plan
         // in the off-hand never takes the click — replace when the dialog can
         // name the off-hand.
@@ -166,14 +186,8 @@ fn pick(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Option<P
         // mob, a chest in the off-hand never takes the click, in local play as
         // joined (off-hand review M2).
         Some(Item::Block(block::CHEST)) if target.mob => {}
-        Some(o) if other_use(o) => return Some(Pick::Use(Hand::Off)),
-        _ => {}
-    }
-    if let Some(f) = &target.mob_facts
-        && (crate::mob_uses::takes_the_click_whatever_is_held(f)
-            || (main.is_none() && crate::mob_uses::commands_pet(f.kind, f.own_pet)))
-    {
-        return Some(Pick::Use(Hand::Main));
+        Some(o) if hand_acts(Some(o), target) => return Some(Pick::Use(Hand::Off)),
+        Some(_) => {}
     }
     // Nothing else wants the click. A shield raises unless a block with a use of its
     // own is aimed at (a door, a chest...); a mob under the crosshair that nothing
@@ -224,13 +238,13 @@ pub fn either_hand_has_use(main: Option<&Item>, off: Option<&Item>, target: &Use
 /// aimed at, and no mob a hand really does something to (feeding, taming, a Lead,
 /// milking, shearing, riding, trading, a pet's command: `mob_uses`). A hostile mob,
 /// or one nothing held does anything to, never takes the click. The decision is made
-/// when the press starts ([`shield_hold`] keeps it up while the button is held).
+/// when the press starts ([`shield_press`] keeps it up while the button is held).
 pub fn shield_raises(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> bool {
     matches!(pick(main, off, target), Some(Pick::Raise(_)))
 }
 
-/// What the shield does this frame, given last frame's state: `raised` is the
-/// state the frame applies, `held_over` says it was already up and is held on (not
+/// What the shield does this frame: `raised` is the state the frame applies,
+/// `held_over` says the press was already decided as a raise and is held on (not
 /// the press frame): the chain must not act on whatever is under the crosshair now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShieldHold {
@@ -238,14 +252,55 @@ pub struct ShieldHold {
     pub held_over: bool,
 }
 
-/// Hold persistence: the target check ([`shield_raises`], passed as `raises_here`)
-/// decides when the press starts; once raised, the shield stays up while the use
-/// button is held and a shield is still in a hand, whatever comes under the
-/// crosshair. Releasing (or no shield) lowers it, and a new press asks the target
-/// again. Pure, so a test pins it without a window.
-pub fn shield_hold(was_raised: bool, holding: bool, shield_in_hand: bool, raises_here: bool) -> ShieldHold {
-    let live = holding && shield_in_hand;
-    ShieldHold { raised: live && (was_raised || raises_here), held_over: live && was_raised }
+/// Where a seat's use press stands: the classification is made once per press and
+/// kept until the button is released, so nothing re-asks the target while it stays
+/// held (a cow fed on the press frame is in love on the next, and wheat no longer
+/// claims it: that must not turn the press into a raise).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Press {
+    /// The button is up.
+    #[default]
+    Idle,
+    /// The press was classified: `raised` is its outcome (a decision to keep the
+    /// shield down included).
+    Decided { raised: bool },
+}
+
+/// One frame of the use button, given last frame's [`Press`]: the target check
+/// (`raises_here`, [`shield_raises`], asked only on the press frame, never again
+/// while the button stays held) decides when the press starts; once decided it
+/// stands (a raise stays up whatever comes under the crosshair, a decision to keep
+/// the shield down stays down) until release, and a new press asks the target
+/// again. A shield no longer in a hand lowers the raise and it stays down for the
+/// press. Pure, so a test pins it without a window.
+pub fn shield_press(
+    prev: Press,
+    holding: bool,
+    shield_in_hand: bool,
+    raises_here: impl FnOnce() -> bool,
+) -> (ShieldHold, Press) {
+    if !holding {
+        return (ShieldHold { raised: false, held_over: false }, Press::Idle);
+    }
+    match prev {
+        Press::Idle => {
+            let raised = shield_in_hand && raises_here();
+            (ShieldHold { raised, held_over: false }, Press::Decided { raised })
+        }
+        Press::Decided { raised } => {
+            let up = raised && shield_in_hand;
+            (ShieldHold { raised: up, held_over: up }, Press::Decided { raised: up })
+        }
+    }
+}
+
+/// The off-hand item a seat's click can really use. A Strict seat keeps the main
+/// hand for its uses (a BRIDGE in `game_loop`: its typed actions carry no hand), so
+/// an off-hand action that is not a shield can never run there and must not claim
+/// the click; an off-hand shield can still be raised. Raise selection and execution
+/// ask the same rule.
+pub fn usable_off_hand(strict: bool, off: Option<&Item>) -> Option<&Item> {
+    if strict && !crate::shield::is_shield(off) { None } else { off }
 }
 
 /// Which hands swing when the player acts: `(main, off)`. Mining and attacking
@@ -259,8 +314,20 @@ pub fn swing_hands(break_block: bool, place_block: bool, place_uses_off_hand: bo
 /// Does right-click do anything with `item` for `target`? See the module doc:
 /// every tool and target-specific material asks the predicate its arm asks
 /// (`tool_uses`), so a hoe aimed at stone has no use and the off-hand item gets
-/// the click. Errs toward "yes" only for what no predicate can tell.
+/// the click. Errs toward "yes" only for what no predicate can tell. A mob under
+/// the crosshair counts ([`crate::mob_uses::hand_mob_use`]); a shield's use is its
+/// raise, wherever no block with a use of its own is aimed at.
 pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
+    if crate::shield::is_shield(Some(item)) {
+        return !target.block.is_some_and(block_has_use);
+    }
+    hand_acts(Some(item), target)
+}
+
+/// What `item` does that is not about a mob: the non-mob half of [`item_has_use`],
+/// the part a failed mob use must never erase (a bucket's fill at water beside a
+/// fish or a cow just milked).
+fn non_mob_use(item: &Item, target: &UseTarget) -> bool {
     use crate::tool_uses as uses;
     match item {
         // A placeable block needs something to place against.
@@ -273,36 +340,31 @@ pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
             ToolType::Slingshot => target.rubber_balls,
             ToolType::Hoe => uses::hoe_tills(target.block, target.face, target.edit_blocked),
             ToolType::FlintAndSteel => uses::flint_lights(target.block),
-            // A hive is the block case (`block_takes_held_item`); otherwise a sheep.
-            ToolType::Shears => target.mob_facts.is_some_and(|f| crate::mob_uses::shears(f.kind, f.product_ready)),
+            // A hive is the block case (`block_takes_held_item`); a sheep is the mob's.
+            ToolType::Shears => false,
             ToolType::FishingRod => uses::rod_answers(),
             ToolType::Eraser => uses::eraser_erases(target.block, target.edit_blocked),
             ToolType::DraftingStamp => uses::stamp_captures(target.block),
             // Melee and digging tools have no right-click use (the chain has no
             // shovel path or axe strip).
             ToolType::Pickaxe | ToolType::Axe | ToolType::Sword | ToolType::Shovel => false,
-            // Off-hand release (slice 5) — a shield's use is the raise: what a click
-            // does when nothing else claims it. A door, a chest and the other block
-            // arms win, and so does a mob a hand really works on, which [`pick`] asks
-            // (a shield's raise is its last claimant; a hostile mob does not stop it).
-            ToolType::Shield => !target.block.is_some_and(block_has_use),
+            // A shield's use is the raise, which [`pick`] asks last.
+            ToolType::Shield => false,
         },
         Item::Material(m) => {
-            // What a mob under the crosshair gets from this item (`mob_uses`: its
-            // food, a Lead, a bucket on a ready cow, taming food).
-            let works_on_mob = target.mob_facts.is_some_and(|f| crate::mob_uses::item_works_on(item, &f, target.sneak));
             if item.is_food() {
-                return target.wants_to_eat || works_on_mob;
+                return target.wants_to_eat;
             }
             let (block, blocked) = (target.block, target.edit_blocked);
             // Any material a block can be made of is placed against any block.
             let placeable = block.is_some() && material_as_placeable_block(*m).is_some();
             match *m {
-                // A Lead ties a passive mob or goes on a fence post.
-                MaterialId::Lead => works_on_mob || block.is_some_and(block::is_fence_post),
-                // A bucket milks a ready cow, and fills at a pond where no mob is
-                // aimed at (BRIDGE: whether a pond is aimed at is not in `UseTarget`).
-                MaterialId::Bucket => target.mob_facts.is_none() || works_on_mob,
+                // A Lead goes on a fence post (a mob is the mob chain's).
+                MaterialId::Lead => block.is_some_and(block::is_fence_post),
+                // An empty bucket fills at a pond (the fluid ray, `bucket_fills`) or
+                // taps a rubber log (`game_loop`'s block arm); a hive is the block
+                // case. Milking is the mob chain's.
+                MaterialId::Bucket => target.bucket_fills || (block == Some(block::RUBBER_LOG) && !blocked),
                 // These read the click wherever it is aimed.
                 MaterialId::WaterBucket | MaterialId::LavaBucket | MaterialId::RecallWhistle => true,
                 // Target-specific: the arm's own test.
@@ -314,12 +376,11 @@ pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
                 // A Stick feeds a campfire; it is not for a mob.
                 MaterialId::Stick => matches!(block, Some(block::CAMPFIRE | block::CAMPFIRE_UNLIT)) || placeable,
                 // Seeds go on tilled soil, a cart on a rail (any block); any other
-                // material is for a mob that takes it (its food, taming it) or nothing.
+                // material is for a mob that takes it or nothing.
                 _ => {
                     placeable
                         || (crate::use_edits::sown_crop(*m).is_some() && uses::seeds_sown(block, target.face))
                         || (block.is_some() && crate::cart::cart_hull_for_item(*m).is_some())
-                        || works_on_mob
                 }
             }
         }
@@ -838,27 +899,164 @@ mod tests {
         assert!(!shield_raises(Some(&sword), Some(&shield), &tied));
     }
 
+    // --- Review 4: hand choice at mobs ---
+
+    fn facts_at(f: crate::mob_uses::MobFacts) -> UseTarget {
+        UseTarget { mob: true, mob_facts: Some(f), ..UseTarget::default() }
+    }
+
+    /// Finding 1: the main hand's whole mob chain goes before the off-hand's. Wheat in
+    /// the main hand and a Lead in the off-hand, a plain right-click on a free horse
+    /// (or a villager): the main hand's click mounts (opens trade) and the Lead is
+    /// not spent on the horse.
+    #[test]
+    fn the_main_hands_whole_mob_chain_goes_before_the_off_hand() {
+        use crate::mob::MobType;
+        let (wheat, lead, sword, shield) =
+            (Item::Material(MaterialId::Wheat), Item::Material(MaterialId::Lead), tool(ToolType::Sword), tool(ToolType::Shield));
+        for kind in [MobType::Horse, MobType::Donkey, MobType::Villager] {
+            let t = at_mob(kind);
+            assert_eq!(hand_with_use(Some(&wheat), Some(&lead), &t), Some(Hand::Main), "{kind:?}: wheat main, Lead off");
+            assert_eq!(use_hand(Some(&wheat), Some(&lead), &t), Hand::Main, "{kind:?}");
+            assert_eq!(use_hand(Some(&sword), Some(&lead), &t), Hand::Main, "{kind:?}: a sword main does not hand the click to the Lead either");
+            assert_eq!(use_hand(Some(&shield), Some(&lead), &t), Hand::Main, "{kind:?}: nor a shield");
+        }
+        // Where the main hand has nothing at a mob, the off-hand's real use still gets the click.
+        let cow = at_mob(MobType::Cow);
+        assert_eq!(hand_with_use(Some(&sword), Some(&lead), &cow), Some(Hand::Off), "a Lead ties a cow from the off-hand");
+        // And in the chain's own order within a hand: the main Lead ties a cow before the off wheat feeds.
+        assert_eq!(hand_with_use(Some(&lead), Some(&wheat), &cow), Some(Hand::Main));
+        // Sneaking, wheat feeds a horse (the feed arm comes before the mount arm, in the same hand).
+        let sneaking = UseTarget { sneak: true, ..at_mob(MobType::Horse) };
+        assert_eq!(hand_with_use(Some(&wheat), Some(&lead), &sneaking), Some(Hand::Main));
+    }
+
+    /// Finding 2: a bucket's fluid-ray fill survives a mob under the crosshair. An empty
+    /// bucket main, a shield off, a fish under the crosshair and a water source on the
+    /// fluid ray: the bucket keeps the click and the shield does not raise. The same
+    /// beside a cow that was just milked.
+    #[test]
+    fn a_buckets_fill_survives_a_mob_under_the_crosshair() {
+        use crate::mob::MobType;
+        let (bucket, shield) = (Item::Material(MaterialId::Bucket), tool(ToolType::Shield));
+        let with_water = |t: UseTarget| UseTarget { bucket_fills: true, ..t };
+        let fish = with_water(at_mob(MobType::Fish));
+        assert_eq!(hand_with_use(Some(&bucket), Some(&shield), &fish), Some(Hand::Main), "the bucket fills");
+        assert!(!shield_raises(Some(&bucket), Some(&shield), &fish), "the shield does not raise");
+        let milked = with_water(facts_at(crate::mob_uses::MobFacts { product_ready: false, ..crate::mob_uses::MobFacts::of(MobType::Cow) }));
+        assert_eq!(hand_with_use(Some(&bucket), Some(&shield), &milked), Some(Hand::Main), "beside a cow just milked");
+        assert!(!shield_raises(Some(&bucket), Some(&shield), &milked));
+        // No water on the ray: the bucket has no use at the fish, and the shield raises.
+        assert!(shield_raises(Some(&bucket), Some(&shield), &at_mob(MobType::Fish)));
+        // A ready cow is still milked (the mob's own use), with or without water.
+        assert_eq!(hand_with_use(Some(&bucket), Some(&shield), &at_mob(MobType::Cow)), Some(Hand::Main));
+        // The block uses the fill path shares: a tappable log, unless the mode cannot edit.
+        let log = UseTarget { block: Some(block::RUBBER_LOG), ..UseTarget::default() };
+        assert_eq!(hand_with_use(Some(&bucket), Some(&shield), &log), Some(Hand::Main));
+        assert!(shield_raises(Some(&bucket), Some(&shield), &UseTarget { edit_blocked: true, ..log }));
+        // From the off-hand too.
+        assert_eq!(hand_with_use(Some(&shield), Some(&bucket), &fish), Some(Hand::Off));
+    }
+
+    /// Finding 3: whether a hand can take a Lead off depends on the item it holds and on
+    /// whether THAT hand's harvest refused, worked out per hand. Shears main (the wool is
+    /// still growing) and a shield off, on a tethered sheep: the click is not swallowed,
+    /// the Lead comes off through the off-hand and the shield does not raise. Shears that
+    /// can cut keep the click, as the chain has it.
+    #[test]
+    fn a_hand_whose_harvest_refused_hands_the_lead_to_the_other_hand() {
+        use crate::mob::MobType;
+        let (shears, shield, sword) = (tool(ToolType::Shears), tool(ToolType::Shield), tool(ToolType::Sword));
+        let tied = |ready| facts_at(crate::mob_uses::MobFacts { tethered: true, product_ready: ready, ..crate::mob_uses::MobFacts::of(MobType::Sheep) });
+        let growing = tied(false);
+        assert_eq!(hand_with_use(Some(&shears), Some(&shield), &growing), Some(Hand::Off), "the Lead comes off through the off-hand");
+        assert_eq!(use_hand(Some(&shears), Some(&shield), &growing), Hand::Off);
+        assert!(!shield_raises(Some(&shears), Some(&shield), &growing), "the shield does not raise");
+        assert_eq!(hand_with_use(Some(&shears), Some(&sword), &growing), Some(Hand::Off), "any non-Lead item takes it off");
+        // Nothing to take the click: not swallowed by the refused hand, not claimed by an empty off-hand.
+        assert_eq!(hand_with_use(Some(&shears), None, &growing), None);
+        // The existing order when the shears can cut.
+        assert_eq!(hand_with_use(Some(&shears), Some(&shield), &tied(true)), Some(Hand::Main));
+        // A shield main on the growing sheep detaches from the main hand (it is not shears).
+        assert_eq!(hand_with_use(Some(&shield), Some(&shears), &growing), Some(Hand::Main));
+        // A Lead in a hand never takes a Lead off: the other hand does.
+        let lead = Item::Material(MaterialId::Lead);
+        let tied_brigand = facts_at(crate::mob_uses::MobFacts { tethered: true, ..crate::mob_uses::MobFacts::of(MobType::Brigand) });
+        assert_eq!(hand_with_use(Some(&lead), Some(&sword), &tied_brigand), Some(Hand::Off));
+    }
+
     // --- Decision B: hold persistence ---
 
     #[test]
     fn once_raised_the_shield_stays_up_across_target_changes_until_the_button_is_released() {
+        let ask = |answer: bool| move || answer;
+        let up = ShieldHold { raised: true, held_over: false };
+        let down = ShieldHold { raised: false, held_over: false };
         // The press: the target check decides.
-        assert_eq!(shield_hold(false, true, true, true), ShieldHold { raised: true, held_over: false });
-        assert_eq!(shield_hold(false, true, true, false), ShieldHold { raised: false, held_over: false }, "a press on a door never raises");
-        // Held: whatever comes under the crosshair (a cow that takes the click, a door), it stays up.
-        assert_eq!(shield_hold(true, true, true, false), ShieldHold { raised: true, held_over: true });
-        assert_eq!(shield_hold(true, true, true, true), ShieldHold { raised: true, held_over: true });
+        assert_eq!(shield_press(Press::Idle, true, true, ask(true)), (up, Press::Decided { raised: true }));
+        assert_eq!(shield_press(Press::Idle, true, true, ask(false)), (down, Press::Decided { raised: false }), "a press on a door never raises");
+        // Held: whatever comes under the crosshair (a cow that takes the click, a door), it stays up,
+        // and the target is not asked again.
+        let held = Press::Decided { raised: true };
+        let (h, p) = shield_press(held, true, true, || panic!("the target is asked once per press"));
+        assert_eq!((h, p), (ShieldHold { raised: true, held_over: true }, held));
         // Release lowers it, and the next press asks the target again.
-        assert_eq!(shield_hold(true, false, true, true), ShieldHold { raised: false, held_over: false });
-        assert_eq!(shield_hold(false, true, true, false), ShieldHold { raised: false, held_over: false });
-        // No shield in a hand (swapped away mid-hold): nothing to hold up.
-        assert_eq!(shield_hold(true, true, false, false), ShieldHold { raised: false, held_over: false });
+        assert_eq!(shield_press(held, false, true, ask(true)), (down, Press::Idle));
+        assert_eq!(shield_press(Press::Idle, true, true, ask(true)).0, up);
+        // No shield in a hand (swapped away mid-hold): nothing to hold up, and it stays down for the press.
+        let (h, p) = shield_press(held, true, false, ask(true));
+        assert_eq!((h, p), (down, Press::Decided { raised: false }));
+        assert_eq!(shield_press(p, true, true, || panic!("not asked again")).0, down);
         // A whole walk: raise on air, turn over a door and a cow, release.
-        let mut up = false;
+        let mut press = Press::Idle;
         for (holding, raises_here, want) in [(true, true, true), (true, false, true), (true, false, true), (true, true, true), (false, false, false), (true, false, false)] {
-            up = shield_hold(up, holding, true, raises_here).raised;
-            assert_eq!(up, want);
+            let (hold, next) = shield_press(press, holding, true, ask(raises_here));
+            press = next;
+            assert_eq!(hold.raised, want);
         }
+    }
+
+    /// Review 4 finding 5: the press is classified once. A shield main and wheat off,
+    /// a press on a breedable cow: the cow is fed and the shield stays down for the whole
+    /// press, even though on the next frame the cow is in love and wheat no longer claims
+    /// it. Release and press again: the shield raises.
+    #[test]
+    fn a_press_decided_as_a_feed_never_becomes_a_raise_until_released() {
+        use crate::mob::MobType;
+        let (shield, wheat) = (tool(ToolType::Shield), Item::Material(MaterialId::Wheat));
+        let breedable = at_mob(MobType::Cow);
+        let in_love = UseTarget { mob_facts: Some(crate::mob_uses::MobFacts { can_breed: false, ..crate::mob_uses::MobFacts::of(MobType::Cow) }), ..breedable };
+        let asks = |t: &UseTarget| shield_raises(Some(&shield), Some(&wheat), t);
+        assert!(!asks(&breedable) && asks(&in_love), "the premise: the same cow, fed, would now raise");
+        let frame = |press, target: &UseTarget, holding| shield_press(press, holding, true, || asks(target));
+        let (hold, press) = frame(Press::Idle, &breedable, true);
+        assert!(!hold.raised, "the press frame feeds");
+        // Still held: the cow is in love now. The shield stays down.
+        let (hold, press) = frame(press, &in_love, true);
+        assert!(!hold.raised, "same press: still down");
+        let (hold, press) = frame(press, &in_love, true);
+        assert!(!hold.raised, "and the next frame");
+        // Release, press again on the cow in love: the shield raises.
+        let (hold, press) = frame(press, &in_love, false);
+        assert_eq!((hold.raised, press), (false, Press::Idle));
+        let (hold, _) = frame(press, &in_love, true);
+        assert!(hold.raised, "a new press asks again");
+    }
+
+    /// Review 4 finding 6: a Strict seat's off-hand counts only as a shield, so a
+    /// shield main and a torch off, clicking stone, raises (the torch cannot be
+    /// placed on a Strict seat) while an unrestricted seat places the torch.
+    #[test]
+    fn a_strict_seat_raises_a_shield_past_an_off_hand_use_it_cannot_run() {
+        let (shield, torch, sword) = (tool(ToolType::Shield), Item::Block(block::TORCH), tool(ToolType::Sword));
+        let raises = |strict, main: &Item, off: &Item| shield_raises(Some(main), usable_off_hand(strict, Some(off)), &stone_target());
+        assert!(!raises(false, &shield, &torch), "a Mirror seat places the torch");
+        assert!(raises(true, &shield, &torch), "a Strict seat raises: the torch never runs there");
+        // An off-hand shield is still a raise candidate on a Strict seat.
+        assert!(raises(true, &sword, &shield));
+        assert_eq!(usable_off_hand(true, Some(&shield)), Some(&shield));
+        assert_eq!(usable_off_hand(true, Some(&torch)), None);
+        assert_eq!(usable_off_hand(false, Some(&torch)), Some(&torch));
     }
 
     #[test]

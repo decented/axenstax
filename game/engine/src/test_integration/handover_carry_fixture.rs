@@ -350,6 +350,8 @@ fn remote_kill(source: &mut HeadlessGame, peer: &mut HeadlessGame, kind: crate::
             baby: false,
             tethered: false,
             product_not_ready: false,
+            breed_blocked: false,
+            own_pet: false,
         },
         false,
         false,

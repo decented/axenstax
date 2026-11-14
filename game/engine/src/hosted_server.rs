@@ -7264,7 +7264,8 @@ impl HostedServer {
             // hears about entities near its body, changed-only (a late
             // joiner's empty interest set doubles as its backfill).
             let anchor = self.entity_interest_anchor(i);
-            let entities = self.entity_interest[i].events(&entity_tick, &self.server.ecs, anchor);
+            let owner_key = self.server.players.get(i).and_then(|sp| sp.pet_owner_key());
+            let entities = self.entity_interest[i].events_for(&entity_tick, &self.server.ecs, anchor, owner_key.as_deref());
             // B2a — a remote client hears of changes only to chunks it has
             // been sent (queued counts): the rest arrive inside their push.
             let filtered: Vec<protocol::BlockChange>;

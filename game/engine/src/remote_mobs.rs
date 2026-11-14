@@ -46,7 +46,7 @@ use glam::Vec3;
 
 use crate::entity::{Hitbox, MobKind, Position, Velocity};
 use crate::mob::MobType;
-use crate::protocol::{entity_flags, EntityKind, EntitySpawn, EntityUpdate};
+use crate::protocol::{entity_flags, entity_flags2, EntityKind, EntitySpawn, EntityUpdate};
 
 /// Seconds per server tick (20 TPS): an update's glide length.
 const TICK_SECS: f32 = 1.0 / 20.0;
@@ -62,6 +62,9 @@ pub struct Mirrored {
     pub id: u32,
     /// [`entity_flags`] from the latest update.
     pub flags: u8,
+    /// [`entity_flags2`] from the latest update (the server's breeding and
+    /// ownership-relative facts).
+    pub flags2: u8,
     from: Vec3,
     to: Vec3,
     vel: Vec3,
@@ -71,7 +74,7 @@ pub struct Mirrored {
 
 impl Mirrored {
     fn new(id: u32, at: Vec3) -> Self {
-        Self { id, flags: 0, from: at, to: at, vel: Vec3::ZERO, age: TICK_SECS }
+        Self { id, flags: 0, flags2: 0, from: at, to: at, vel: Vec3::ZERO, age: TICK_SECS }
     }
 
     /// Where the entity is drawn `age` seconds after its latest update.
@@ -97,6 +100,12 @@ pub struct MirrorTarget {
     /// (`entity_flags::PRODUCT_NOT_READY`, FU3): false means ready OR an
     /// older server that never says.
     pub product_not_ready: bool,
+    /// An adult already in love or on its breeding cooldown
+    /// (`entity_flags2::BREED_BLOCKED`): the server would refuse its food.
+    pub breed_blocked: bool,
+    /// The server says this is THIS client's own pet (`entity_flags2::OWN_PET`, set
+    /// per recipient from the owner npub): the one an empty hand commands.
+    pub own_pet: bool,
 }
 
 /// What a joiner's right-click on a mirrored mob means (MP-D2b).
@@ -111,18 +120,25 @@ pub enum MirrorClick {
 }
 
 impl MirrorTarget {
-    /// What the hand rule needs to know about this mob (`mob_uses::MobFacts`),
-    /// as far as a joiner can see it: it cannot see a breeding cooldown (a baby
-    /// is the only "can't breed" it knows), nor whose pet a tamed mob is (the
-    /// server checks that, so any tamed mob may be a command).
+    /// Takes breeding food now: an adult not in love and off its cooldown, as the
+    /// server judges it (`entity_flags2::BREED_BLOCKED`, off review 4: the mirror used
+    /// to know only "baby" and invented eligibility for a mob in love).
+    pub fn can_breed(&self) -> bool {
+        !self.baby && !self.breed_blocked
+    }
+
+    /// What the hand rule needs to know about this mob (`mob_uses::MobFacts`):
+    /// the server's own facts, so a joiner's routing and the interaction it
+    /// chooses agree with what the server will accept (breeding eligibility, and
+    /// whose pet a tamed mob is, by owner npub).
     pub fn facts(&self) -> crate::mob_uses::MobFacts {
         crate::mob_uses::MobFacts {
             kind: self.kind,
-            can_breed: !self.baby,
+            can_breed: self.can_breed(),
             product_ready: !self.product_not_ready,
             tethered: self.tethered,
             tamed: self.tamed,
-            own_pet: self.tamed,
+            own_pet: self.own_pet,
         }
     }
 
@@ -139,8 +155,8 @@ impl MirrorTarget {
     /// mount it (anything in hand, MP-D2c-1); a Lead taken off a tethered mob
     /// (anything but a Lead in hand); a villager (talk / trade — D2c-3); a
     /// Bone on a wolf (Mixed Berries on a Nostrich never get there: it is a
-    /// steed, mounted first, as in single-player); an empty hand on a tamed
-    /// pet (sit / follow — the server checks it is ours). `None`: the item's
+    /// steed, mounted first, as in single-player); an empty hand on your
+    /// own tamed pet (sit / follow — the server says whose it is, `own_pet`). `None`: the item's
     /// own use goes ahead — eating, a bow, a bucket at water, a block beside
     /// a cow (review D2a LOW-2).
     pub fn right_click_action(
@@ -160,7 +176,7 @@ impl MirrorTarget {
             return ask(InteractKind::LeadAttach);
         }
         if let Some(m) = mat
-            && crate::mob_uses::feeds(kind, !self.baby, sneak, m)
+            && crate::mob_uses::feeds(kind, self.can_breed(), sneak, m)
         {
             return ask(InteractKind::Feed);
         }
@@ -201,7 +217,7 @@ impl MirrorTarget {
         {
             return ask(InteractKind::Tame);
         }
-        if held.is_none() && self.tamed {
+        if held.is_none() && self.own_pet {
             return ask(InteractKind::SitToggle);
         }
         None
@@ -309,6 +325,7 @@ impl RemoteMobs {
             m.vel = vel;
             m.age = 0.0;
             m.flags = u.flags;
+            m.flags2 = u.flags2;
         }
         if let Ok(mut cart) = self.ecs.get::<&mut crate::cart::CartData>(e) {
             cart.facing = u.yaw;
@@ -382,6 +399,8 @@ impl RemoteMobs {
             baby: m.flags & entity_flags::BABY != 0,
             tethered: m.flags & entity_flags::TETHERED != 0,
             product_not_ready: m.flags & entity_flags::PRODUCT_NOT_READY != 0,
+            breed_blocked: m.flags2 & entity_flags2::BREED_BLOCKED != 0,
+            own_pet: m.flags2 & entity_flags2::OWN_PET != 0,
         })
     }
 
@@ -744,7 +763,7 @@ mod tests {
         let hit = m.ray_target(eye, look, 5.0).expect("the crosshair is on the wolf");
         assert_eq!(
             hit,
-            MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true, pack: false, baby: false, tethered: false, product_not_ready: false }
+            MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true, pack: false, baby: false, tethered: false, product_not_ready: false, breed_blocked: false, own_pet: false }
         );
         assert_eq!(m.ray_target(eye, Vec3::new(1.0, 0.0, 0.0), 5.0), None, "looking away misses");
         assert_eq!(m.ray_target(eye, look, 1.0), None, "out of reach (or behind a block)");
@@ -768,7 +787,7 @@ mod tests {
     }
 
     fn target(kind: MobType) -> MirrorTarget {
-        MirrorTarget { id: 1, kind, tamed: false, pack: false, baby: false, tethered: false, product_not_ready: false }
+        MirrorTarget { id: 1, kind, tamed: false, pack: false, baby: false, tethered: false, product_not_ready: false, breed_blocked: false, own_pet: false }
     }
 
     /// MP-D2b — a right-click on a mirror asks the server for what it would
@@ -806,7 +825,7 @@ mod tests {
             ask(Mount)
         );
         assert_eq!(target(MobType::Cat).right_click_action(Some(&mat(MaterialId::CatTreat)), false), ask(Tame));
-        let pet = MirrorTarget { tamed: true, ..target(MobType::Wolf) };
+        let pet = MirrorTarget { tamed: true, own_pet: true, ..target(MobType::Wolf) };
         assert_eq!(pet.right_click_action(None, false), ask(SitToggle), "sit / follow");
         // MP-D2c-1 — any steed is ridden by request, whatever is in hand.
         let stone = Item::Block(crate::block::STONE);
@@ -866,6 +885,64 @@ mod tests {
         let hit = m.ray_target(Vec3::new(0.0, 64.0, 0.0), Vec3::new(0.0, 0.0, -1.0), 5.0).expect("on the cow");
         assert!(hit.product_not_ready);
         assert_eq!(hit.right_click_action(Some(&bucket), false), None);
+    }
+
+    /// Off-hand review 4 finding 4: a joiner routes by the SERVER's facts. A cow already in
+    /// love, with wheat in one hand and a shield in the other: no feed request, the shield
+    /// raises (the old mirror knew only "baby" and asked again every frame). Someone else's
+    /// tamed wolf with an empty main hand and a shield off: the shield raises and no pet
+    /// command is sent; the same wolf marked as this joiner's own pet takes the command.
+    #[test]
+    fn a_joiner_routes_by_the_servers_breeding_and_ownership_facts() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        use crate::hands::{hand_with_use, shield_raises, use_hand, Hand, UseTarget};
+        use crate::item::{Item, MaterialId};
+        let shield = Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Iron));
+        let wheat = Item::Material(MaterialId::Wheat);
+        let (eye, look) = (Vec3::new(0.0, 63.5, 0.0), Vec3::new(0.0, 0.0, -1.0));
+        let aimed = |m: &mut RemoteMobs| {
+            m.advance(1.0);
+            m.ray_target(eye, look, 5.0).expect("on the mob")
+        };
+        let at = Vec3::new(0.0, 63.0, -2.0);
+
+        // A cow in love (or on cooldown): the flag is the server's word.
+        let mut m = RemoteMobs::default();
+        m.apply(&[spawn(5, EntityKind::Cow, at)], &[EntityUpdate { flags2: entity_flags2::BREED_BLOCKED, ..update(5, at, 0) }], &[]);
+        let cow = aimed(&mut m);
+        assert!(cow.breed_blocked && !cow.can_breed());
+        assert_eq!(cow.right_click_action(Some(&wheat), false), None, "no feed request");
+        let t = UseTarget { mob: true, mob_facts: Some(cow.facts()), ..UseTarget::default() };
+        for (main, off) in [(&wheat, &shield), (&shield, &wheat)] {
+            assert!(shield_raises(Some(main), Some(off), &t), "{main:?} / {off:?}: the shield raises");
+            let hand = use_hand(Some(main), Some(off), &t);
+            let held = if hand == Hand::Main { main } else { off };
+            assert_eq!(held, &shield, "the click goes to the shield");
+            assert_eq!(cow.right_click_action(Some(held), false), None, "and asks the server for nothing");
+        }
+        // The same cow once the server clears the flag: the wheat feeds again, from the wheat's hand.
+        m.apply(&[], &[update(5, at, 0)], &[]);
+        let ready = aimed(&mut m);
+        assert!(ready.can_breed());
+        let t = UseTarget { mob: true, mob_facts: Some(ready.facts()), ..UseTarget::default() };
+        assert_eq!(hand_with_use(Some(&shield), Some(&wheat), &t), Some(Hand::Off));
+        assert_eq!(ready.right_click_action(Some(&wheat), false), Some(MirrorClick::Interact(crate::protocol::InteractKind::Feed)));
+
+        // Someone else's tamed wolf: TAMED, not OWN_PET.
+        let mut m = RemoteMobs::default();
+        m.apply(&[spawn(6, EntityKind::Wolf, at)], &[update(6, at, entity_flags::TAMED)], &[]);
+        let theirs = aimed(&mut m);
+        assert!(theirs.tamed && !theirs.own_pet);
+        assert_eq!(theirs.right_click_action(None, false), None, "no pet command sent");
+        let t = UseTarget { mob: true, mob_facts: Some(theirs.facts()), ..UseTarget::default() };
+        assert!(shield_raises(None, Some(&shield), &t), "the shield raises");
+        // This joiner's own wolf: the server says so, an empty hand commands it, the shield waits.
+        m.apply(&[], &[EntityUpdate { flags2: entity_flags2::OWN_PET, ..update(6, at, entity_flags::TAMED) }], &[]);
+        let mine = aimed(&mut m);
+        assert!(mine.own_pet);
+        assert_eq!(mine.right_click_action(None, false), Some(MirrorClick::Interact(crate::protocol::InteractKind::SitToggle)));
+        let t = UseTarget { mob: true, mob_facts: Some(mine.facts()), ..UseTarget::default() };
+        assert!(!shield_raises(None, Some(&shield), &t), "the command wins");
     }
 
     /// MP-D2c-1 — a joiner's click on a track asks to ride the server cart
