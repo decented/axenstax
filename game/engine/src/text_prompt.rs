@@ -78,9 +78,33 @@ impl PromptKind {
     }
 }
 
+/// The cap of a name field ("World name", "Rename skin"). The desktop `TextEdit`s set
+/// none; the handover wire refuses a world name over 128 bytes
+/// (`handover/live/wire.rs`), which is 128 characters of the ASCII most names are.
+pub const NAME_MAX_CHARS: usize = 128;
+
+/// The cap of the Minecraft username field: a Java username is 1 to 16 characters
+/// (`mc_import::validate_username`).
+pub const MC_USERNAME_MAX_CHARS: usize = 16;
+
+/// The cap of every other menu field: a room code, a server address, a Keep link, an
+/// npub, a seed, or a world's name typed to confirm its delete. The join box's
+/// formats have no fixed longest: a Keep link is 145 characters, alone or inside a
+/// pasted message (`keeps::route_join` finds it there), and a `ws://`, `wss://` or
+/// `axenstax://` address with a `#op=npub1…` pin runs to about 340 (a 253-character
+/// host name, a port and a 63-character npub). 512 holds every one of them with room
+/// to spare, and is above the name cap, so any world's name can be typed to confirm.
+pub const TEXT_MAX_CHARS: usize = 512;
+
 /// The most a menu field's prompt lets you type (UTF-16 units on Android; the web
-/// prompt has no limit, as before).
-pub const FIELD_MAX_CHARS: usize = 128;
+/// prompt has no limit, as before), from its caption.
+pub fn field_max_chars(caption: &str) -> usize {
+    match caption {
+        "World name" | "Rename skin" => NAME_MAX_CHARS,
+        "Minecraft username" => MC_USERNAME_MAX_CHARS,
+        _ => TEXT_MAX_CHARS,
+    }
+}
 
 /// The touch Chat button's key.
 pub const CHAT_KEY: &str = "chat";
@@ -224,13 +248,15 @@ impl<B: PromptBackend> PromptBroker<B> {
     }
 
     /// A menu text field's turn, every frame it is drawn (`menu.rs`
-    /// `menu_text_field_tall`): a tap asks for a prompt with the field's own kind; a
-    /// typed answer is written into `buf`, but only while `buf` still holds the text
-    /// the prompt opened with (rule 5).
+    /// `menu_text_field_tall`): a tap asks for a prompt with the field's own kind
+    /// and cap ([`field_max_chars`], never below what the field already holds, so OK
+    /// on an untouched prefill cannot cut it); a typed answer is written into `buf`,
+    /// but only while `buf` still holds the text the prompt opened with (rule 5).
     pub fn field(&mut self, caption: &str, buf: &mut String, tapped: bool) {
         let key = field_key(caption);
         if tapped {
-            self.request(&key, caption, buf, PromptKind::for_field(caption), FIELD_MAX_CHARS);
+            let max_chars = field_max_chars(caption).max(buf.encode_utf16().count());
+            self.request(&key, caption, buf, PromptKind::for_field(caption), max_chars);
         }
         if let Some(Some(text)) = self.take_if(&key, |ticket| ticket.initial == *buf) {
             *buf = text;

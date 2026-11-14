@@ -1,6 +1,6 @@
-//! Tests for `text_prompt.rs`: the broker's rules on a scripted backend and the
-//! lobby's screens as prompt owners. Every test builds its own broker; the
-//! process-wide one is never touched.
+//! Tests for `text_prompt.rs`: the broker's rules on a scripted backend, the lobby's
+//! screens as prompt owners, and each menu field's cap. Every test builds its own
+//! broker; the process-wide one is never touched.
 
 use super::*;
 
@@ -11,6 +11,8 @@ const ANY_MAX: usize = 64;
 /// tells it to.
 struct Fake {
     shown: Vec<String>,
+    /// The cap each shown prompt was given.
+    caps: Vec<usize>,
     can_show: bool,
     next: PromptPoll,
     polls: usize,
@@ -18,14 +20,15 @@ struct Fake {
 
 impl Fake {
     fn new() -> Self {
-        Self { shown: Vec::new(), can_show: true, next: PromptPoll::Waiting, polls: 0 }
+        Self { shown: Vec::new(), caps: Vec::new(), can_show: true, next: PromptPoll::Waiting, polls: 0 }
     }
 }
 
 impl PromptBackend for Fake {
-    fn show(&mut self, label: &str, _initial: &str, _kind: PromptKind, _max: usize) -> bool {
+    fn show(&mut self, label: &str, _initial: &str, _kind: PromptKind, max: usize) -> bool {
         if self.can_show {
             self.shown.push(label.to_string());
+            self.caps.push(max);
             self.next = PromptPoll::Waiting;
         }
         self.can_show
@@ -392,4 +395,61 @@ mod lobby {
         menu.show_settings = true;
         assert_ne!(prompt_screen(&menu), play_together, "Settings over a page is its own screen");
     }
+}
+
+// ── Each field's own cap ────────────────────────────────────────────────────────
+
+#[test]
+fn each_menu_field_has_its_own_cap() {
+    assert_eq!(field_max_chars("World name"), NAME_MAX_CHARS);
+    assert_eq!(field_max_chars("Rename skin"), NAME_MAX_CHARS);
+    assert_eq!(field_max_chars("Minecraft username"), MC_USERNAME_MAX_CHARS);
+    for caption in ["Room code", "Seed (optional)", "Type the world name to confirm", "Server address"] {
+        assert_eq!(field_max_chars(caption), TEXT_MAX_CHARS, "{caption}");
+    }
+    assert!(TEXT_MAX_CHARS >= NAME_MAX_CHARS, "any world's name can be typed to confirm its delete");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_name_caps_are_the_limits_the_game_checks() {
+    assert!(crate::mc_import::validate_username(&"a".repeat(MC_USERNAME_MAX_CHARS)));
+    assert!(!crate::mc_import::validate_username(&"a".repeat(MC_USERNAME_MAX_CHARS + 1)));
+    assert_eq!(field_max_chars(crate::worlds_ui::words::LOOK_UP_HINT), TEXT_MAX_CHARS, "an npub look-up");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_145_character_keep_invite_survives_the_room_code_prompt_whole() {
+    use crate::keeps::{JoinRoute, LINK_PREFIX, route_join};
+    let link = fray_keep::format_invite_link(LINK_PREFIX, &[0xab; 32], &[0x01; 32]);
+    assert_eq!(link.len(), 145);
+    let message = format!("Come and build: {link} see you there!");
+    for pasted in [link.clone(), message] {
+        let mut b = PromptBroker::new(Fake::new());
+        let mut field = String::new();
+        b.field(crate::worlds_ui::words::ROOM_CODE, &mut field, true);
+        // Android's LengthFilter keeps at most the cap's worth of UTF-16 units.
+        let cap = *b.backend.caps.last().expect("a prompt was shown");
+        let kept: Vec<u16> = pasted.encode_utf16().take(cap).collect();
+        b.backend.next = PromptPoll::Answered(Some(String::from_utf16(&kept).unwrap()));
+        b.field(crate::worlds_ui::words::ROOM_CODE, &mut field, false);
+        assert_eq!(field, pasted, "nothing cut");
+        assert!(
+            matches!(route_join(&field, true, |_| false), JoinRoute::Confirm(_)),
+            "the join box reads it as a whole Keep link"
+        );
+    }
+}
+
+#[test]
+fn opening_a_prompt_never_cuts_what_the_field_already_holds() {
+    let mut b = PromptBroker::new(Fake::new());
+    let mut name = "N".repeat(NAME_MAX_CHARS + 20);
+    b.field("World name", &mut name, true);
+    assert_eq!(b.backend.caps, vec![NAME_MAX_CHARS + 20], "a longer name made elsewhere stays whole");
+    let mut short = "Castle".to_string();
+    b.backend.next = PromptPoll::Answered(None);
+    b.field("World name", &mut short, true);
+    assert_eq!(b.backend.caps[1], NAME_MAX_CHARS, "otherwise the field's own cap");
 }
