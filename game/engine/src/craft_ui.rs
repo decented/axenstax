@@ -46,6 +46,10 @@ impl IconSource for NoIcons {
     }
 }
 
+/// The window laid out to fit a small screen (a phone): see the module.
+#[path = "craft_ui_compact.rs"]
+mod compact;
+
 /// Theme colours for crafting UI.
 const OVERLAY_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 210);
 const SLOT_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(24, 24, 32, 255);
@@ -999,6 +1003,19 @@ pub fn draw_crafting_ui(
     .rect_filled(overlay_rect, 0.0, OVERLAY_BG);
 
 
+    // The viewport is in physical pixels (it doubles as the wgpu scissor rect); egui draws in
+    // points. On a phone (3.0 points per pixel on a OnePlus 8T) the difference is the whole
+    // window: the 2400-pixel viewport used as 2400 points put the panel's origin off the screen.
+    let screen_pts = viewport_points(ctx, viewport);
+    let touch = ctx.input(|i| i.has_touch_screen());
+    let show_offhand = !matches!(offhand, crate::hud_ui::OffhandBox::Hidden);
+    if let Some(plan) = compact::compact_plan(screen_pts.size(), grid_size, show_offhand) {
+        // A small screen: the whole window, laid out to fit (a touch screen cannot scroll it).
+        let out = compact::draw_compact(ctx, screen_pts, plan, player_index, ui_state, inventory, armour_slots, offhand, registry, icons, touch);
+        click_target = out.click;
+        focused_rect = out.focused_rect;
+        result_rect = out.result_rect;
+    } else {
     // Crafting panel centred within the viewport.
     let panel_origin = egui::pos2(
         viewport.x as f32 + viewport.width as f32 / 2.0 - 300.0,
@@ -1101,22 +1118,9 @@ pub fn draw_crafting_ui(
                                     if r >= station_size || c >= station_size {
                                         continue; // shown, never clicked (LOW-A)
                                     }
-                                    if response.clicked() {
-                                        click_target = ClickTarget::GridSlot(r, c, false);
-                                    } else if response.secondary_clicked() {
-                                        click_target = ClickTarget::GridSlot(r, c, true);
+                                    if let Some(target) = compact::grid_slot_target(&response, ui_state, (r, c), grid_size, drag_secondary) {
+                                        click_target = target;
                                     }
-                                    // #45 P3 — drag paint over grid cells.
-                                    let gid = (100 + r * grid_size + c) as u32;
-                                    if response.drag_started() {
-                                        ui_state.drag_paint = Some(drag_secondary);
-                                        ui_state.drag_visited.clear();
-                                        ui_state.drag_visited.insert(gid);
-                                        click_target = ClickTarget::DragGrid(r, c, drag_secondary);
-                                    } else if let Some(distribute) = ui_state.drag_paint
-                                        && response.hovered() && ui_state.drag_visited.insert(gid) {
-                                            click_target = ClickTarget::DragGrid(r, c, distribute);
-                                        }
                                 }
                             });
                         }
@@ -1182,34 +1186,9 @@ pub fn draw_crafting_ui(
                             if pad_focused {
                                 focused_rect = Some(response.rect);
                             }
-                            // #45 — Alt+click toggles the slot lock instead of moving.
-                            let alt = ui.input(|i| i.modifiers.alt);
-                            if response.clicked() {
-                                click_target = if alt {
-                                    ClickTarget::ToggleLock(slot_idx)
-                                } else {
-                                    ClickTarget::InventorySlot(slot_idx, false)
-                                };
-                            } else if response.secondary_clicked() {
-                                click_target = ClickTarget::InventorySlot(slot_idx, true);
-                            } else if response.hovered()
-                                && stack.is_some()
-                                && ui.input(|i| i.key_pressed(egui::Key::U))
-                            {
-                                // #46 — JEI "show uses" on the hovered item.
-                                click_target = ClickTarget::ShowUses(slot_idx);
+                            if let Some(target) = compact::inventory_slot_target(ui, &response, ui_state, slot_idx, stack.is_some(), drag_secondary) {
+                                click_target = target;
                             }
-                            // #45 P3 — drag paint over main-inventory slots.
-                            let iid = slot_idx as u32;
-                            if response.drag_started() {
-                                ui_state.drag_paint = Some(drag_secondary);
-                                ui_state.drag_visited.clear();
-                                ui_state.drag_visited.insert(iid);
-                                click_target = ClickTarget::DragInventory(slot_idx, drag_secondary);
-                            } else if let Some(distribute) = ui_state.drag_paint
-                                && response.hovered() && ui_state.drag_visited.insert(iid) {
-                                    click_target = ClickTarget::DragInventory(slot_idx, distribute);
-                                }
                         }
                     });
                 }
@@ -1240,32 +1219,9 @@ pub fn draw_crafting_ui(
                         if pad_focused {
                             focused_rect = Some(response.rect);
                         }
-                        let alt = ui.input(|i| i.modifiers.alt);
-                        if response.clicked() {
-                            click_target = if alt {
-                                ClickTarget::ToggleLock(i)
-                            } else {
-                                ClickTarget::InventorySlot(i, false)
-                            };
-                        } else if response.secondary_clicked() {
-                            click_target = ClickTarget::InventorySlot(i, true);
-                        } else if response.hovered()
-                            && stack.is_some()
-                            && ui.input(|inp| inp.key_pressed(egui::Key::U))
-                        {
-                            click_target = ClickTarget::ShowUses(i);
+                        if let Some(target) = compact::inventory_slot_target(ui, &response, ui_state, i, stack.is_some(), drag_secondary) {
+                            click_target = target;
                         }
-                        // #45 P3 — drag paint over hotbar slots (ids 0..9).
-                        let hid = i as u32;
-                        if response.drag_started() {
-                            ui_state.drag_paint = Some(drag_secondary);
-                            ui_state.drag_visited.clear();
-                            ui_state.drag_visited.insert(hid);
-                            click_target = ClickTarget::DragInventory(i, drag_secondary);
-                        } else if let Some(distribute) = ui_state.drag_paint
-                            && response.hovered() && ui_state.drag_visited.insert(hid) {
-                                click_target = ClickTarget::DragInventory(i, distribute);
-                            }
                     }
                 });
 
@@ -1330,6 +1286,8 @@ pub fn draw_crafting_ui(
             });
         });
 
+    }
+
     // Placement guide (2026-06-12) — "how to place it" mini-grid card pinned
     // to the right of the result slot. Shows the exact ingredient layout for
     // the recipe the player picked from the book, so they can replicate it.
@@ -1362,6 +1320,17 @@ pub fn draw_crafting_ui(
     click_target
 }
 
+/// A viewport (physical pixels, as the game passes it) in egui points, clipped to the content
+/// area, so layout and hit-tests are in the units egui draws in.
+fn viewport_points(ctx: &egui::Context, viewport: &crate::screen::ViewportRect) -> egui::Rect {
+    let ppp = ctx.pixels_per_point().max(1.0);
+    egui::Rect::from_min_size(
+        egui::pos2(viewport.x as f32 / ppp, viewport.y as f32 / ppp),
+        egui::vec2(viewport.width as f32 / ppp, viewport.height as f32 / ppp),
+    )
+    .intersect(ctx.content_rect())
+}
+
 /// A carried stack has no hit-test region, including outside the bag panel.
 /// Missing or another viewport's pointer uses a deterministic local anchor.
 #[allow(clippy::too_many_arguments)]
@@ -1376,10 +1345,7 @@ pub fn paint_carried_item(
     icons: &dyn IconSource,
 ) {
     let Some(cursor) = cursor else { return };
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(viewport.x as f32, viewport.y as f32),
-        egui::vec2(viewport.width as f32, viewport.height as f32),
-    );
+    let rect = viewport_points(ctx, viewport);
     let pointer = if controller_active { None } else { ctx.input(|i| i.pointer.latest_pos()).filter(|p| rect.contains(*p)) };
     let pos = controller_anchor.filter(|p| rect.contains(*p)).or(pointer).unwrap_or(rect.center() + egui::vec2(28.0, 28.0));
     let cursor_size = 48.0 * 0.8;
