@@ -5,8 +5,6 @@ import android.app.NativeActivity;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.os.Bundle;
-import android.os.Process;
-import android.os.SystemClock;
 import android.text.InputFilter;
 import android.text.InputType;
 import android.view.KeyEvent;
@@ -29,9 +27,10 @@ import android.widget.TextView;
  *    soft-keyboard request; showTextPrompt opens a dark AlertDialog with a one-line
  *    EditText instead. The native thread never waits for it: it polls
  *    textPromptState() while the prompt is open (game/engine/src/text_prompt.rs).
- * 3. The end of the process. The game's event loop can be built once per process, so
- *    a second android_main in a cached process could never start. onDestroy ends the
- *    process, after the game has saved (game/engine/src/android_lifecycle.rs).
+ * 3. The destroy flag. The game's event loop can be built once per process, so a
+ *    second android_main in a cached process could never start: the game ends the
+ *    process itself once it has ended and saved (game/engine/src/android_lifecycle.rs).
+ *    onDestroy only tells it the activity is going.
  */
 public class AxenstaxActivity extends NativeActivity {
     // Text prompt kinds (text_prompt.rs PromptKind::code): 0 name, 1 chat, 2 plain.
@@ -42,14 +41,6 @@ public class AxenstaxActivity extends NativeActivity {
     private static final int PROMPT_OPEN = 1;
     private static final int PROMPT_DONE = 2;
 
-    /**
-     * The longest onDestroy waits for the game to save and end before ending the process
-     * anyway: the save, plus the exit function's bounded grace for a handover still being
-     * published (world_exit.rs EXIT_GRACE, 10 s; cut short, it resumes at the next start).
-     * The game never waits on this thread, so the wait cannot deadlock; at worst it ends.
-     */
-    private static final long GAME_END_WAIT_MS = 12000;
-
     private final Object promptLock = new Object();
     private int promptState = PROMPT_NONE; // guarded by promptLock
     private int promptSerial; // guarded by promptLock
@@ -57,8 +48,6 @@ public class AxenstaxActivity extends NativeActivity {
     private AlertDialog promptDialog; // UI thread only
 
     private volatile boolean destroying;
-    private final Object endLock = new Object();
-    private boolean gameEnded; // guarded by endLock
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -237,52 +226,27 @@ public class AxenstaxActivity extends NativeActivity {
         }
     }
 
-    // ── The end of the process ──────────────────────────────────────────────────
+    // ── The destroy flag ────────────────────────────────────────────────────────
 
-    /** Whether onDestroy has started. Polled by the game a few times a second. */
+    /** Whether onDestroy has started. Polled by the game every quarter second. */
     public boolean isBeingDestroyed() {
         return destroying;
     }
 
-    /** The game has ended: its loop returned after its save, or it panicked. */
-    public void reportGameEnded() {
-        synchronized (endLock) {
-            gameEnded = true;
-            endLock.notifyAll();
-        }
-    }
-
     /**
-     * Ends the process, so the next launch is a cold start: the game's event loop can be
-     * built once per process (winit), so a second android_main in this process would fail.
+     * Tells the game the activity is going, then carries on. The game sees `destroying`, saves a
+     * live world through its exit function, ends its loop and then ends the process itself
+     * (android_lifecycle.rs), so the next launch is a cold start.
      *
-     * The order matters. The game sees `destroying`, saves a live world through its exit
-     * function, ends its loop and reports; only then is the process killed. The kill comes
-     * BEFORE super.onDestroy(): NativeActivity's onDestroy tears down the window and the input
-     * queue, each a wait on the game's loop, and then waits for android_main to return, which
-     * winit's loop never does on its own. After the bounded wait the process ends anyway.
-     *
-     * Process.killProcess (SIGKILL), not System.exit: it runs no atexit handlers, C++ static
-     * destructors or Java shutdown hooks while the game's audio, GPU and network threads are
-     * still running, the same end as any cached process the system reclaims.
+     * Nothing here waits for the game or ends the process. super.onDestroy() starts
+     * NativeActivity's teardown, whose waits on the game's loop (the window, the input queue,
+     * then android_main returning) all end when the game ends the process. A slow save holds
+     * them for as long as it takes and is never cut short by a timer; a wait here first would
+     * only change which wait this thread sits in.
      */
     @Override
     protected void onDestroy() {
         destroying = true;
-        long deadline = SystemClock.uptimeMillis() + GAME_END_WAIT_MS;
-        synchronized (endLock) {
-            long left = GAME_END_WAIT_MS;
-            while (!gameEnded && left > 0) {
-                try {
-                    endLock.wait(left);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-                left = deadline - SystemClock.uptimeMillis();
-            }
-        }
-        Process.killProcess(Process.myPid());
         super.onDestroy();
     }
 }

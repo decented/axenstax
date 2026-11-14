@@ -8,7 +8,7 @@
 //!
 //! The ask is ASYNC on every platform. A screen calls [`request_text_prompt`] once
 //! (on a tap) and [`take_text_prompt_result`] every frame it is drawn, until the
-//! answer arrives:
+//! answer arrives (a menu field does both through [`text_field_prompt`]):
 //!
 //! - **Web:** `window.prompt()` at request time. It blocks the page, so the answer is
 //!   there on the very next poll (the same frame, since callers poll right after
@@ -20,7 +20,7 @@
 //! - **Desktop:** no prompt (fields are egui `TextEdit`s there); a request is
 //!   answered "cancelled" at once.
 //!
-//! Broker rules (each has a test below):
+//! Broker rules (each has a test in `text_prompt_tests.rs`):
 //! 1. One prompt at a time: a request while one is open is ignored.
 //! 2. An answer is delivered at most once, and only to the key that asked.
 //! 3. An answer nobody collected (its screen went away) is dropped when the next
@@ -28,10 +28,18 @@
 //! 4. No dead keyboard: a backend that cannot show a prompt, or reports its prompt
 //!    gone (the activity no longer knows it), frees the broker with a cancel to the
 //!    key that asked, so the next tap opens a new prompt.
+//! 5. A prompt belongs to the screen that asked. Every frame the lobby
+//!    (`menu::draw_main_menu`, naming its page or dialog with `menu::prompt_screen`)
+//!    or the world (the game loop's touch Chat block) says which screen is on show
+//!    ([`enter_screen`]). Another screen is another owner: an answer for the old one,
+//!    held or still to come, is dropped, even when a screen of the same kind opens
+//!    again. And a menu field takes an answer only while it still holds the text its
+//!    prompt opened with, so a link that replaces Join Game with a new Join Game
+//!    keeps its address.
 //!
 //! The broker is a plain struct over a pluggable [`PromptBackend`]. Tests build
-//! their own instance; the process-wide one behind the two free functions is
-//! never touched by a test (the whole suite shares one process).
+//! their own instance; the process-wide one behind the free functions is never
+//! touched by a test (the whole suite shares one process).
 
 use std::cell::RefCell;
 
@@ -70,12 +78,51 @@ impl PromptKind {
     }
 }
 
+/// The cap of a name field ("World name", "Rename skin"). The desktop `TextEdit`s set
+/// none; the handover wire refuses a world name over 128 bytes
+/// (`handover/live/wire.rs`), which is 128 characters of the ASCII most names are.
+pub const NAME_MAX_CHARS: usize = 128;
+
+/// The cap of the Minecraft username field: a Java username is 1 to 16 characters
+/// (`mc_import::validate_username`).
+pub const MC_USERNAME_MAX_CHARS: usize = 16;
+
+/// The cap of every other menu field: a room code, a server address, a Keep link, an
+/// npub, a seed, or a world's name typed to confirm its delete. The join box's
+/// formats have no fixed longest: a Keep link is 145 characters, alone or inside a
+/// pasted message (`keeps::route_join` finds it there), and a `ws://`, `wss://` or
+/// `axenstax://` address with a `#op=npub1…` pin runs to about 340 (a 253-character
+/// host name, a port and a 63-character npub). 512 holds every one of them with room
+/// to spare, and is above the name cap, so any world's name can be typed to confirm.
+pub const TEXT_MAX_CHARS: usize = 512;
+
 /// The most a menu field's prompt lets you type (UTF-16 units on Android; the web
-/// prompt has no limit, as before).
-pub const FIELD_MAX_CHARS: usize = 128;
+/// prompt has no limit, as before), from its caption.
+pub fn field_max_chars(caption: &str) -> usize {
+    match caption {
+        "World name" | "Rename skin" => NAME_MAX_CHARS,
+        "Minecraft username" => MC_USERNAME_MAX_CHARS,
+        _ => TEXT_MAX_CHARS,
+    }
+}
 
 /// The touch Chat button's key.
 pub const CHAT_KEY: &str = "chat";
+
+/// A menu field's key: its caption. Which screen it is on is the broker's owner
+/// (rule 5), so the same caption on two screens never shares an answer.
+fn field_key(caption: &str) -> String {
+    format!("field:{caption}")
+}
+
+/// Names a screen for [`enter_screen`]: equal for the same screen, different for
+/// another (the lobby hashes its page or its dialog's kind, the world a tag).
+pub fn screen_id(screen: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    screen.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// What a backend says when asked about the prompt it is showing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,22 +158,53 @@ impl<B: PromptBackend + ?Sized> PromptBackend for Box<B> {
     }
 }
 
-/// One prompt at a time, each answer to the key that asked (see the module doc).
+/// Who a prompt belongs to: the screen on show when it was asked for, and which
+/// entry into that screen (a screen that closes and opens again is a new owner).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Owner {
+    screen: u64,
+    entry: u64,
+}
+
+/// One prompt asked for: its owner, its key and the text it opened with.
+#[derive(Clone, Debug)]
+struct Ticket {
+    owner: Owner,
+    key: String,
+    initial: String,
+}
+
+/// One prompt at a time, each answer to the key and screen that asked (see the
+/// module doc).
 pub struct PromptBroker<B> {
     backend: B,
-    /// The key whose prompt is open.
-    open: Option<String>,
-    /// An answer not yet collected, with the key it belongs to.
-    answer: Option<(String, Option<String>)>,
+    /// The screen on show now (rule 5).
+    owner: Owner,
+    /// The prompt that is open.
+    open: Option<Ticket>,
+    /// An answer not yet collected, with the prompt it answers.
+    answer: Option<(Ticket, Option<String>)>,
 }
 
 impl<B: PromptBackend> PromptBroker<B> {
     pub fn new(backend: B) -> Self {
-        Self { backend, open: None, answer: None }
+        Self { backend, owner: Owner { screen: 0, entry: 0 }, open: None, answer: None }
     }
 
-    /// Ask for a prompt for `key`. Returns whether one was asked for: `false`
-    /// when a prompt is already open (rule 1).
+    /// Say which screen is on show (rule 5). Called every frame; only a change
+    /// counts. A new screen is a new owner: an answer held for the old one is
+    /// dropped now, and one still to come (its dialog is still up) when it
+    /// arrives. Asks the backend nothing.
+    pub fn enter_screen(&mut self, screen: u64) {
+        if screen == self.owner.screen {
+            return;
+        }
+        self.owner = Owner { screen, entry: self.owner.entry.wrapping_add(1) };
+        self.answer = None;
+    }
+
+    /// Ask for a prompt for `key`, owned by the screen on show. Returns whether
+    /// one was asked for: `false` when a prompt is already open (rule 1).
     pub fn request(
         &mut self,
         key: &str,
@@ -142,23 +220,47 @@ impl<B: PromptBackend> PromptBroker<B> {
         }
         // Rule 3: an answer still here is stale (its screen never collected it).
         self.answer = None;
+        let ticket = Ticket { owner: self.owner, key: key.to_string(), initial: initial.to_string() };
         if self.backend.show(label, initial, kind, max_chars) {
-            self.open = Some(key.to_string());
+            self.open = Some(ticket);
         } else {
             // Rule 4: nothing could be shown, so the asker hears "cancelled" now.
-            self.answer = Some((key.to_string(), None));
+            self.answer = Some((ticket, None));
         }
         true
     }
 
-    /// The answer for `key`, once: outer `None` = not ready (or not this key's),
-    /// `Some(None)` = cancelled, `Some(Some(text))` = typed.
+    /// The answer for `key` on the screen on show, once: outer `None` = not ready
+    /// (or not this key's), `Some(None)` = cancelled, `Some(Some(text))` = typed.
     pub fn take(&mut self, key: &str) -> Option<Option<String>> {
+        self.take_if(key, |_| true)
+    }
+
+    /// [`take`](Self::take), and the answer is delivered only if `still_wanted`
+    /// agrees; if not, it is dropped (it was for a field that has since changed).
+    fn take_if(&mut self, key: &str, still_wanted: impl FnOnce(&Ticket) -> bool) -> Option<Option<String>> {
         self.collect();
-        if self.answer.as_ref().is_some_and(|(k, _)| k == key) {
-            return self.answer.take().map(|(_, answer)| answer);
+        if !self.answer.as_ref().is_some_and(|(t, _)| t.owner == self.owner && t.key == key) {
+            return None;
         }
-        None
+        let (ticket, answer) = self.answer.take()?;
+        still_wanted(&ticket).then_some(answer)
+    }
+
+    /// A menu text field's turn, every frame it is drawn (`menu.rs`
+    /// `menu_text_field_tall`): a tap asks for a prompt with the field's own kind
+    /// and cap ([`field_max_chars`], never below what the field already holds, so OK
+    /// on an untouched prefill cannot cut it); a typed answer is written into `buf`,
+    /// but only while `buf` still holds the text the prompt opened with (rule 5).
+    pub fn field(&mut self, caption: &str, buf: &mut String, tapped: bool) {
+        let key = field_key(caption);
+        if tapped {
+            let max_chars = field_max_chars(caption).max(buf.encode_utf16().count());
+            self.request(&key, caption, buf, PromptKind::for_field(caption), max_chars);
+        }
+        if let Some(Some(text)) = self.take_if(&key, |ticket| ticket.initial == *buf) {
+            *buf = text;
+        }
     }
 
     /// Move a closed prompt's answer (or a gone prompt's cancel) out of the
@@ -173,7 +275,9 @@ impl<B: PromptBackend> PromptBroker<B> {
             PromptPoll::Answered(answer) => answer,
             PromptPoll::Gone => None,
         };
-        self.answer = self.open.take().map(|key| (key, answer));
+        let Some(ticket) = self.open.take() else { return };
+        // Rule 5: an answer for a screen that has gone is dropped as it arrives.
+        self.answer = (ticket.owner == self.owner).then_some((ticket, answer));
     }
 
     /// Whether a prompt is open.
@@ -243,6 +347,17 @@ thread_local! {
         RefCell::new(PromptBroker::new(platform_backend()));
 }
 
+/// Run `f` on the process's broker. `try_borrow_mut`: if a browser ever ran a frame
+/// inside `window.prompt()`, the inner call is simply skipped rather than panicking.
+fn with_broker<T>(f: impl FnOnce(&mut PromptBroker<Box<dyn PromptBackend>>) -> T) -> Option<T> {
+    BROKER.with(|b| b.try_borrow_mut().ok().map(|mut b| f(&mut b)))
+}
+
+/// Say which screen is on show (rule 5; see [`PromptBroker::enter_screen`]).
+pub fn enter_screen(screen: u64) {
+    with_broker(|b| b.enter_screen(screen));
+}
+
 /// Ask the platform for a text prompt for `key` (see the module doc). Ignored
 /// (returns `false`) while another prompt is open.
 pub fn request_text_prompt(
@@ -252,207 +367,21 @@ pub fn request_text_prompt(
     kind: PromptKind,
     max_chars: usize,
 ) -> bool {
-    // `try_borrow_mut`: if a browser ever ran a frame inside `window.prompt()`,
-    // the inner call is simply ignored rather than panicking.
-    BROKER.with(|b| {
-        b.try_borrow_mut()
-            .map(|mut b| b.request(key, label, initial, kind, max_chars))
-            .unwrap_or(false)
-    })
+    with_broker(|b| b.request(key, label, initial, kind, max_chars)).unwrap_or(false)
 }
 
 /// Collect `key`'s answer, once: `None` = not ready, `Some(None)` = cancelled,
 /// `Some(Some(text))` = typed. Poll every frame the asking screen is drawn.
 pub fn take_text_prompt_result(key: &str) -> Option<Option<String>> {
-    BROKER.with(|b| b.try_borrow_mut().ok().and_then(|mut b| b.take(key)))
+    with_broker(|b| b.take(key)).flatten()
+}
+
+/// A menu text field's turn: ask on a tap, fill `buf` when its answer comes (see
+/// [`PromptBroker::field`]).
+pub fn text_field_prompt(caption: &str, buf: &mut String, tapped: bool) {
+    with_broker(|b| b.field(caption, buf, tapped));
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A scripted backend: counts the prompts it showed and answers what the test
-    /// tells it to.
-    struct Fake {
-        shown: Vec<String>,
-        can_show: bool,
-        next: PromptPoll,
-        polls: usize,
-    }
-
-    impl Fake {
-        fn new() -> Self {
-            Self { shown: Vec::new(), can_show: true, next: PromptPoll::Waiting, polls: 0 }
-        }
-    }
-
-    impl PromptBackend for Fake {
-        fn show(&mut self, label: &str, _initial: &str, _kind: PromptKind, _max: usize) -> bool {
-            if self.can_show {
-                self.shown.push(label.to_string());
-                self.next = PromptPoll::Waiting;
-            }
-            self.can_show
-        }
-        fn poll(&mut self) -> PromptPoll {
-            self.polls += 1;
-            // A closed prompt answers once; after that the backend knows nothing.
-            match &self.next {
-                PromptPoll::Waiting => PromptPoll::Waiting,
-                _ => std::mem::replace(&mut self.next, PromptPoll::Gone),
-            }
-        }
-    }
-
-    fn ask(b: &mut PromptBroker<Fake>, key: &str) -> bool {
-        b.request(key, key, "", PromptKind::Plain, FIELD_MAX_CHARS)
-    }
-
-    #[test]
-    fn a_request_is_answered_once_to_its_key() {
-        let mut b = PromptBroker::new(Fake::new());
-        assert!(ask(&mut b, "name"));
-        assert_eq!(b.backend.shown, vec!["name"]);
-        assert_eq!(b.take("name"), None, "nothing typed yet");
-        b.backend.next = PromptPoll::Answered(Some("Phone Test".into()));
-        assert_eq!(b.take("name"), Some(Some("Phone Test".into())));
-        assert_eq!(b.take("name"), None, "delivered at most once");
-        assert!(!b.is_open());
-    }
-
-    #[test]
-    fn a_second_request_while_one_is_open_is_ignored() {
-        let mut b = PromptBroker::new(Fake::new());
-        assert!(ask(&mut b, "name"));
-        assert!(!ask(&mut b, "seed"), "one prompt at a time");
-        assert!(!ask(&mut b, "name"), "not even the same field twice");
-        assert_eq!(b.backend.shown, vec!["name"], "only the first dialog was shown");
-        b.backend.next = PromptPoll::Answered(Some("x".into()));
-        assert_eq!(b.take("seed"), None, "the ignored request gets nothing");
-        assert_eq!(b.take("name"), Some(Some("x".into())));
-    }
-
-    #[test]
-    fn an_answer_is_never_delivered_to_another_key() {
-        let mut b = PromptBroker::new(Fake::new());
-        assert!(ask(&mut b, "name"));
-        b.backend.next = PromptPoll::Answered(Some("Castle".into()));
-        assert_eq!(b.take(CHAT_KEY), None, "chat polls every frame; it must not get the name");
-        assert_eq!(b.take("seed"), None);
-        assert_eq!(b.take("name"), Some(Some("Castle".into())));
-    }
-
-    #[test]
-    fn a_stale_answer_is_dropped_by_the_next_request() {
-        let mut b = PromptBroker::new(Fake::new());
-        assert!(ask(&mut b, "rename"));
-        b.backend.next = PromptPoll::Answered(Some("Old".into()));
-        // Its screen closed before collecting: another screen polls its own key...
-        assert_eq!(b.take("seed"), None);
-        // ...and then asks for a prompt of its own.
-        assert!(ask(&mut b, "seed"), "a closed prompt frees the broker");
-        assert_eq!(b.take("rename"), None, "the stale answer was dropped");
-        b.backend.next = PromptPoll::Answered(Some("12345".into()));
-        assert_eq!(b.take("seed"), Some(Some("12345".into())), "the new field gets only its own answer");
-        assert_eq!(b.take("rename"), None);
-    }
-
-    #[test]
-    fn a_stale_answer_nobody_polled_is_dropped_too() {
-        // The answer arrives after its screen stopped polling and no other
-        // screen polled either: the next request must still clear it.
-        let mut b = PromptBroker::new(Fake::new());
-        assert!(ask(&mut b, "rename"));
-        b.backend.next = PromptPoll::Answered(Some("Old".into()));
-        assert!(ask(&mut b, "seed"), "an answered prompt is not an open one");
-        assert_eq!(b.take("rename"), None);
-        assert_eq!(b.backend.shown, vec!["rename", "seed"]);
-    }
-
-    #[test]
-    fn a_backend_that_never_answers_does_not_leave_a_dead_keyboard() {
-        let mut b = PromptBroker::new(Fake::new());
-        assert!(ask(&mut b, "name"));
-        // The dialog never posts a result (the activity was recreated under it)...
-        for _ in 0..100 {
-            assert_eq!(b.take("name"), None);
-        }
-        assert!(!ask(&mut b, "name"), "still open as far as the backend says");
-        // ...and the activity reports it no longer knows the prompt.
-        b.backend.next = PromptPoll::Gone;
-        assert_eq!(b.take("name"), Some(None), "the asker hears a cancel");
-        assert!(ask(&mut b, "name"), "the next tap opens a new prompt");
-        assert_eq!(b.backend.shown.len(), 2);
-        b.backend.next = PromptPoll::Answered(Some("Back".into()));
-        assert_eq!(b.take("name"), Some(Some("Back".into())));
-    }
-
-    #[test]
-    fn a_backend_that_cannot_show_answers_cancel_at_once() {
-        let mut b = PromptBroker::new(Fake::new());
-        b.backend.can_show = false;
-        assert!(ask(&mut b, "name"), "asked, even though nothing could be shown");
-        assert!(!b.is_open());
-        assert_eq!(b.take("name"), Some(None));
-        b.backend.can_show = true;
-        assert!(ask(&mut b, "name"), "and the next tap still works");
-        assert!(b.is_open());
-    }
-
-    #[test]
-    fn cancel_is_delivered_as_none_once() {
-        let mut b = PromptBroker::new(Fake::new());
-        assert!(ask(&mut b, CHAT_KEY));
-        b.backend.next = PromptPoll::Answered(None);
-        assert_eq!(b.take(CHAT_KEY), Some(None), "Cancel / Back / outside tap");
-        assert_eq!(b.take(CHAT_KEY), None, "and only once: nothing re-opens it");
-        assert_eq!(b.backend.shown.len(), 1);
-    }
-
-    #[test]
-    fn the_backend_is_polled_only_while_a_prompt_is_open() {
-        let mut b = PromptBroker::new(Fake::new());
-        for _ in 0..10 {
-            assert_eq!(b.take(CHAT_KEY), None);
-        }
-        assert_eq!(b.backend.polls, 0, "no JNI call per frame when nothing is open");
-        assert!(ask(&mut b, CHAT_KEY));
-        b.backend.next = PromptPoll::Answered(Some("hi".into()));
-        assert_eq!(b.take(CHAT_KEY), Some(Some("hi".into())));
-        let after = b.backend.polls;
-        for _ in 0..10 {
-            assert_eq!(b.take(CHAT_KEY), None);
-        }
-        assert_eq!(b.backend.polls, after);
-    }
-
-    #[test]
-    fn a_web_style_backend_answers_in_the_same_frame() {
-        // window.prompt() answers inside `show`; the caller polls right after
-        // asking, so the field fills on the tap's own frame, as it always did.
-        struct Blocking(Option<Option<String>>);
-        impl PromptBackend for Blocking {
-            fn show(&mut self, _l: &str, initial: &str, _k: PromptKind, _m: usize) -> bool {
-                self.0 = Some(Some(format!("{initial}!")));
-                true
-            }
-            fn poll(&mut self) -> PromptPoll {
-                self.0.take().map_or(PromptPoll::Gone, PromptPoll::Answered)
-            }
-        }
-        let mut b = PromptBroker::new(Blocking(None));
-        assert!(b.request("name", "World name", "My World", PromptKind::Name, FIELD_MAX_CHARS));
-        assert_eq!(b.take("name"), Some(Some("My World!".into())));
-    }
-
-    #[test]
-    fn field_kinds_follow_their_captions() {
-        assert_eq!(PromptKind::for_field("World name"), PromptKind::Name);
-        assert_eq!(PromptKind::for_field("Rename skin"), PromptKind::Name);
-        assert_eq!(PromptKind::for_field("Seed (optional)"), PromptKind::Plain);
-        assert_eq!(PromptKind::for_field("Type the world name to confirm"), PromptKind::Plain);
-        assert_eq!(PromptKind::for_field("Minecraft username"), PromptKind::Plain);
-        let codes = [PromptKind::Name.code(), PromptKind::Chat.code(), PromptKind::Plain.code()];
-        assert_eq!(codes, [0, 1, 2], "AxenstaxActivity's KIND_* constants");
-    }
-}
+#[path = "text_prompt_tests.rs"]
+mod tests;
