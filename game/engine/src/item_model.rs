@@ -916,7 +916,7 @@ mod tests {
         use crate::protocol::item_kind;
         let reg = test_registry();
         let slab = pos_set(&held_item_mesh(ItemRef::Tool(2).into(), &reg, HandSide::Right));
-        for byte in [12u8, 99, 200, 254] {
+        for byte in [13u8, 99, 200, 254] {
             let held = HeldItem::from_wire(HeldWire { kind: item_kind::TOOL, id: 2, tool: byte });
             assert_eq!(held.tool, None, "byte {byte}");
             assert_eq!(pos_set(&held_item_mesh(held, &reg, HandSide::Right)), slab, "byte {byte} is the slab");

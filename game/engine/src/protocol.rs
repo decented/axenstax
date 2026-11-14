@@ -3621,15 +3621,16 @@ mod tests {
         tail.push(1);
         // v101: each use tag then carries its hand (Main = 0).
         tail.extend_from_slice(&0u32.to_le_bytes());
-        // v101: held_tool u8, off_kind u8, off_id u16, off_tool u8 close the
-        // packet (all zero in a default-built one).
-        tail.extend_from_slice(&[0, 0, 0, 0, 0]);
+        // v101: held_tool u8, off_kind u8, off_id u16, off_tool u8 and then
+        // shield_raised (a bool, one byte) close the packet (all zero in a
+        // default-built one).
+        tail.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
         // Everything before the appended fields is unchanged, and the
         // appended fields close the packet in append order (`None` is one
         // `0` byte).
         let prefix = bytes.len() - tail.len();
         assert_eq!(&bytes[prefix..], &tail[..]);
-        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8 + 4 + 8 + 8 + 5)]);
+        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8 + 4 + 8 + 8 + 6)]);
     }
 
     #[test]

@@ -165,7 +165,7 @@ fn game_harness_shield_shots() {
                 let slot = |ui: &egui::Ui, at: egui::Pos2, side: f32| {
                     let rect = egui::Rect::from_min_size(at, egui::vec2(side, side));
                     ui.painter().rect_filled(rect, 3.0, egui::Color32::from_rgba_unmultiplied(20, 20, 24, 230));
-                    ui.painter().rect_stroke(rect, 3.0, egui::Stroke::new(1.0, egui::Color32::GRAY), egui::StrokeKind::Inside);
+                    ui.painter().rect_stroke(rect, 3.0, egui::Stroke::new(1.0_f32, egui::Color32::GRAY), egui::StrokeKind::Inside);
                     crate::hud_ui::paint_shield_icon(ui, rect.shrink(4.0), ei);
                 };
                 slot(ui, egui::pos2(60.0, 60.0), 280.0);

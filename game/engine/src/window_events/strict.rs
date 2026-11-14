@@ -461,6 +461,26 @@ mod tests {
         assert_eq!(staged.raw.after.view().inv.slot(0).unwrap().item, Item::Block(crate::block::DIRT));
         assert!(sp.inventory.slot(0).is_none(), "proof must not materialise the pending grant into raw R");
     }
+    /// Off-hand release (slice 5): a pending `WearShield` folds on a Strict seat like armour
+    /// wear, in either hand, and the raw window stays unworn until the event is applied.
+    #[test]
+    fn a_strict_seat_folds_a_pending_shield_wear_in_either_hand() {
+        use crate::hands::Hand;
+        let shield = crate::crafting::Tool::new(crate::crafting::ToolType::Shield, crate::crafting::ToolMaterial::Wood);
+        let full = shield.durability;
+        let mut sp = player();
+        sp.inventory.set_slot(0, Some(ItemStack { item: Item::Tool(shield), count: 1 }));
+        sp.offhand = Some(ItemStack { item: Item::Tool(shield), count: 1 });
+        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Main, amount: 5 }, 0);
+        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Off, amount: 7 }, 0);
+        let registry = crate::block::BlockRegistry::new();
+        let mut effective = strict_effective_marker(&sp, &registry).expect("a pending shield wear is no unpaid obligation");
+        let view = effective.view();
+        assert!(matches!(view.inv.slot(0).unwrap().item, Item::Tool(t) if t.durability == full - 5), "the main-hand shield wore 5");
+        assert!(matches!(&view.offhand.as_ref().unwrap().item, Item::Tool(t) if t.durability == full - 7), "the off-hand shield wore 7");
+        assert!(matches!(sp.inventory.slot(0).unwrap().item, Item::Tool(t) if t.durability == full), "raw is unworn until applied");
+        assert!(strict_obligations(&sp, &registry).is_ok());
+    }
     #[test]
     fn c3d_actual_authorised_pending_wear_backs_only_the_same_surviving_piece() {
         let mut sp = player();

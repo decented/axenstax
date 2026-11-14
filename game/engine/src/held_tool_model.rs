@@ -333,8 +333,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_wire_table_lists_twelve_tool_types() {
-        assert_eq!(all_tool_types().len(), 12, "a new tool type needs a shape in held_tool_model::parts");
+    fn the_wire_table_lists_thirteen_tool_types() {
+        assert_eq!(all_tool_types().len(), 13, "a new tool type needs a shape in held_tool_model::parts");
     }
 
     #[test]

@@ -10,10 +10,6 @@ use crate::shield::RAISE_TICKS;
 
 const NORMAL: crate::survival::Difficulty = crate::survival::Difficulty::Normal;
 
-fn shield() -> Item {
-    Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))
-}
-
 /// A rig (Peaceful until a [`bite`]) whose joiner (facing +Z) holds a shield in its main hand
 /// in the server's copy (`with_shield`), past its spawn protection, and a brigand
 /// standing well off. The raise is not latched yet ([`raise`]).

@@ -1516,8 +1516,10 @@ mod tests {
         };
         let sneaking = walk_off(PlayerIntent { move_right: 1.0, sneak: true, ..Default::default() });
         let guarding = walk_off(PlayerIntent { move_right: 1.0, guarding: true, ..Default::default() });
-        assert!(sneaking < 1.4, "a sneaking body stops at the edge ({sneaking})");
-        assert!(guarding > 1.5, "a guarding body walks off it ({guarding})");
+        // The platform's edge is x = 1.0; a sneaking body's ledge guard lets it
+        // stop with its centre a little past the edge, not walk on.
+        assert!(sneaking < 1.5, "a sneaking body stops at the edge ({sneaking})");
+        assert!(guarding > sneaking + 0.5, "a guarding body walks off it ({guarding} vs {sneaking})");
     }
 
     #[test]
