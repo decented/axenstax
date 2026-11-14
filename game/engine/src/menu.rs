@@ -4097,7 +4097,29 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                 }
                 };
 
-                if compact {
+                // A wide, short phone (a landscape one) has room beside the buttons that leave
+                // but not under them: they take a column of their own on the left and the rest
+                // scrolls in a column on the right, the whole height of the screen, so a thumb
+                // can drag it from anywhere on it. (Under the buttons, on a screen that short,
+                // the scrolling part was a strip a few points tall.)
+                let columns = pause_columns(ui.available_rect_before_wrap(), ctx.content_rect().height());
+                if let (true, Some((left, right))) = (compact, columns) {
+                    let left = if confirming { left.translate(egui::vec2((right.right() - left.right()) / 2.0, 0.0)) } else { left };
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
+                        body(ui, PausePart::Leave);
+                    });
+                    if !confirming {
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(right.height())
+                                .auto_shrink([false, false])
+                                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                                .show(ui, |ui| {
+                                    ui.vertical_centered(|ui| body(ui, PausePart::Rest));
+                                });
+                        });
+                    }
+                } else if compact {
                     body(ui, PausePart::Leave);
                     // The rest scrolls in what is left of the screen; a confirm prompt has
                     // nothing under it.
@@ -4119,6 +4141,29 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
 
     clicked
 }
+
+/// The pause menu's two columns on a wide, short compact screen, or `None` where there is not
+/// room for both (a portrait phone keeps one column: the buttons that leave, pinned, and the
+/// rest scrolling under them). `free` is what is left of the screen under the title; the
+/// columns are centred in it and take all its height.
+fn pause_columns(free: egui::Rect, screen_height: f32) -> Option<(egui::Rect, egui::Rect)> {
+    let total = PAUSE_LEAVE_COLUMN_WIDTH + PAUSE_COLUMN_GAP + PAUSE_REST_COLUMN_WIDTH;
+    if screen_height >= PAUSE_TWO_COLUMNS_BELOW || free.width() < total {
+        return None;
+    }
+    let height = (free.height() - 8.0).max(60.0);
+    let left = egui::Rect::from_min_size(egui::pos2(free.center().x - total / 2.0, free.top()), egui::vec2(PAUSE_LEAVE_COLUMN_WIDTH, height));
+    let right = egui::Rect::from_min_size(left.right_top() + egui::vec2(PAUSE_COLUMN_GAP, 0.0), egui::vec2(PAUSE_REST_COLUMN_WIDTH, height));
+    Some((left, right))
+}
+
+/// Screens shorter than this (in points) get the pause menu's two columns, if they are wide enough.
+const PAUSE_TWO_COLUMNS_BELOW: f32 = 540.0;
+/// The column of buttons that leave (a 260-wide button and its margins).
+const PAUSE_LEAVE_COLUMN_WIDTH: f32 = 280.0;
+/// The scrolling column: the difficulty row, a scroll bar and their margins.
+const PAUSE_REST_COLUMN_WIDTH: f32 = PAUSE_DIFFICULTY_ROW_WIDTH + 24.0;
+const PAUSE_COLUMN_GAP: f32 = 20.0;
 
 /// Which of the pause menu's two parts to draw (see `draw_pause_menu`).
 #[derive(Clone, Copy, PartialEq)]
