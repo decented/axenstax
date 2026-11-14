@@ -165,10 +165,25 @@ pub fn use_hand(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> 
 /// unclaimed asks (a raised shield: a door or a mob should win). A shield in a hand
 /// answers for itself too ([`item_has_use`]: its use is the raise, so it has one
 /// wherever no block or mob claims the click).
-// Ready for the shield's raise rule (a door or a mob should win) and tested here; no caller yet.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn either_hand_has_use(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> bool {
     hand_with_use(main, off, target).is_some()
+}
+
+/// Does a held use button raise a shield against `target`? Only when the click's
+/// use is the shield's: a shield in a hand, neither hand with another use for what
+/// the crosshair is on (a door, a chest or a mob under it wins, and so does a
+/// torch about to be placed), and the hand that has the use ([`use_hand`]) holding
+/// the shield. A shield alone in the main hand aimed at a door has no use there
+/// ([`item_has_use`]), and the main hand being the fallback hand does not make it
+/// one. The one decision behind the frame path's raise latch.
+pub fn shield_raises(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> bool {
+    if !(crate::shield::is_shield(main) || crate::shield::is_shield(off)) || !either_hand_has_use(main, off, target) {
+        return false;
+    }
+    crate::shield::is_shield(match use_hand(main, off, target) {
+        Hand::Main => main,
+        Hand::Off => off,
+    })
 }
 
 /// Which hands swing when the player acts: `(main, off)`. Mining and attacking
@@ -622,6 +637,36 @@ mod tests {
         assert!(either_hand_has_use(Some(&sword), Some(&shield), &UseTarget::default()), "in the open the shield has its use");
         // A block that takes the held item counts as the main hand's.
         assert_eq!(hand_with_use(None, Some(&torch), &aimed(block::COMPOSTER, UP)), Some(Hand::Main));
+    }
+
+    /// Review 2 finding 5: the target's own use wins over raising. A shield alone in
+    /// the main hand aimed at a door or a mob does NOT raise (the main hand being the
+    /// fallback hand is not a use); on air or stone it does.
+    #[test]
+    fn a_shield_raises_only_where_the_target_has_no_other_use() {
+        let (shield, sword, pick, torch) =
+            (tool(ToolType::Shield), tool(ToolType::Sword), tool(ToolType::Pickaxe), Item::Block(block::TORCH));
+        let door = aimed(block::OAK_DOOR, UP);
+        let chest = aimed(block::CHEST, UP);
+        let mob = UseTarget { mob: true, mob_kind: Some(crate::mob::MobType::Cow), ..UseTarget::default() };
+        // A main-hand shield, an empty off-hand.
+        assert!(!shield_raises(Some(&shield), None, &door), "a door toggles, the shield stays down");
+        assert!(!shield_raises(Some(&shield), None, &chest), "a chest opens");
+        assert!(!shield_raises(Some(&shield), None, &mob), "a mob under the crosshair");
+        assert!(shield_raises(Some(&shield), None, &UseTarget::default()), "air");
+        assert!(shield_raises(Some(&shield), None, &stone_target()), "stone");
+        // The same from the off-hand.
+        assert!(!shield_raises(Some(&sword), Some(&shield), &door));
+        assert!(!shield_raises(Some(&sword), Some(&shield), &mob));
+        assert!(shield_raises(Some(&sword), Some(&shield), &UseTarget::default()));
+        assert!(shield_raises(Some(&pick), Some(&shield), &stone_target()));
+        // No shield, nothing to raise.
+        assert!(!shield_raises(Some(&sword), None, &UseTarget::default()));
+        assert!(!shield_raises(None, None, &stone_target()));
+        // Another item with a use on this target takes the click: a torch about to be
+        // placed on stone is placed, and on air the shield behind it raises.
+        assert!(!shield_raises(Some(&torch), Some(&shield), &stone_target()), "the torch is placed");
+        assert!(shield_raises(Some(&torch), Some(&shield), &UseTarget::default()), "nothing to place against: the shield");
     }
 
     #[test]

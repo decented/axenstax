@@ -4638,6 +4638,21 @@ impl super::GameState {
         }
     }
 
+    /// Off-hand release — does player `pidx`'s held use button raise a shield this
+    /// frame (`hands::shield_raises`: a shield in a hand, and neither hand has a use
+    /// on what the crosshair is on)? Cheap when no shield is held.
+    fn shield_raise_wanted(&self, pidx: usize, intent: &PlayerIntent) -> bool {
+        let p = &self.players[pidx];
+        if !((intent.place_block || intent.use_held) && intent.cursor_captured) || p.combat.dead {
+            return false;
+        }
+        let (main, off) = p.hands_items();
+        if !(crate::shield::is_shield(main) || crate::shield::is_shield(off)) {
+            return false;
+        }
+        crate::hands::shield_raises(main, off, &self.use_target(pidx))
+    }
+
     /// Does this client's block edit (and its `mined` tag) reach the server it
     /// joined? True only when joined AND native: a joined client's edits and
     /// mined tags are queued for the server on native only (L-web-edit, the
@@ -7235,6 +7250,11 @@ impl super::GameState {
                 && intent.cursor_captured
                 && !self.players[i].combat.dead
                 && !self.players[i].seated();
+            // A raised shield attacks and mines nothing (the frame path's gate, for
+            // the swing and the input the server hears).
+            if intent.guarding {
+                intent.break_block = false;
+            }
         }
 
         // Stash player 0's final (post-gate) intent so network_send_input can
@@ -11673,6 +11693,14 @@ impl super::GameState {
                 intent.place_block = false;
             }
 
+            // Off-hand release — no attacking or mining while a shield is raised: a left
+            // click does nothing and a break in progress stops (its progress resets
+            // in the `!should_break` branch below). A client gate only, local and
+            // joined; the server does not enforce it this release.
+            if self.shield_raise_wanted(pidx, intent) {
+                intent.break_block = false;
+            }
+
             // Kiosk click-to-collect (Spec 2026-06-19 §10): a requested left-click
             // collects the nearest exhibit the look ray strikes within reach, into
             // the visitor's ephemeral basket (dedupe-by-image). Local player only.
@@ -13758,19 +13786,9 @@ impl super::GameState {
             // the click has no other use: the hand `use_hand` picks holds a shield.
             // The chain below still runs (a shield has no arm to take the click),
             // so raising is a latch the tick turns into `guarding`, never a swallow.
-            let use_down = (intent.place_block || intent.use_held) && intent.cursor_captured;
-            let raise = use_down && !self.players[pidx].combat.dead && {
-                let (main, off) = self.players[pidx].hands_items();
-                (crate::shield::is_shield(main) || crate::shield::is_shield(off)) && {
-                    let target = self.use_target(pidx);
-                    let (main, off) = self.players[pidx].hands_items();
-                    let picked = crate::hands::use_hand(main, off, &target);
-                    crate::shield::is_shield(match picked {
-                        crate::hands::Hand::Main => main,
-                        crate::hands::Hand::Off => off,
-                    })
-                }
-            };
+            // The target's own use wins (a door, a chest, a mob): see
+            // `hands::shield_raises`.
+            let raise = self.shield_raise_wanted(pidx, intent);
             if raise {
                 self.local_guard.insert(pidx);
             } else {
