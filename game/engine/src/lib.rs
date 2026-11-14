@@ -207,6 +207,9 @@ mod android_intent;
 // The OS text prompt a touch text field or the touch Chat button asks for: async,
 // one at a time (web `window.prompt()`, Android the activity's text dialog).
 mod text_prompt;
+// Android: AxenstaxActivity's text dialog and end-of-process handshake, over JNI.
+#[cfg(target_os = "android")]
+mod android_jni;
 // Online play by contact — the per-install runtime key + its persona
 // attestation. Native only (bunker signing, profile/ files).
 #[cfg(not(target_arch = "wasm32"))]

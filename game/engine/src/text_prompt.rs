@@ -50,7 +50,7 @@ pub enum PromptKind {
 
 impl PromptKind {
     /// The number `AxenstaxActivity.showTextPrompt` takes (its `KIND_*` constants).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn code(self) -> i32 {
         match self {
             PromptKind::Name => 0,
@@ -81,11 +81,11 @@ pub const CHAT_KEY: &str = "chat";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PromptPoll {
     /// Still open, no answer yet.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     Waiting,
     /// Closed: `Some(text)` from OK / Done / Enter, `None` from Cancel, Back or a
     /// tap outside.
-    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    #[cfg_attr(not(any(target_arch = "wasm32", target_os = "android", test)), allow(dead_code))]
     Answered(Option<String>),
     /// The backend no longer knows this prompt (no dialog open, no answer held:
     /// e.g. a new activity instance, or the dialog never got shown). Taken as a
@@ -207,12 +207,11 @@ impl PromptBackend for WebPrompt {
     }
 }
 
-/// Desktop (and Android until its dialog lands): no prompt; fields are egui
-/// `TextEdit`s, typed on a real keyboard.
-#[cfg(not(target_arch = "wasm32"))]
+/// Desktop: no prompt (its fields are egui `TextEdit`s, typed on a real keyboard).
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 struct NoPrompt;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 impl PromptBackend for NoPrompt {
     fn show(&mut self, _label: &str, _initial: &str, _kind: PromptKind, _max_chars: usize) -> bool {
         false
@@ -227,7 +226,12 @@ fn platform_backend() -> Box<dyn PromptBackend> {
     Box::new(WebPrompt::default())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_os = "android")]
+fn platform_backend() -> Box<dyn PromptBackend> {
+    Box::new(crate::android_jni::ActivityPrompt)
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn platform_backend() -> Box<dyn PromptBackend> {
     Box::new(NoPrompt)
 }

@@ -61,9 +61,10 @@ use crate::player_intent::PlayerIntent;
 pub const TOUCH_PLATFORM: bool = cfg!(any(target_arch = "wasm32", target_os = "android"));
 
 /// True where `text_prompt::request_text_prompt` can actually summon a soft
-/// keyboard: the web (`window.prompt()`). On a touch device there, a menu text
-/// field is a tap-to-type button; elsewhere it stays an egui `TextEdit`.
-pub const OS_KEYBOARD_PROMPT: bool = cfg!(target_arch = "wasm32");
+/// keyboard: the web (`window.prompt()`) and Android (the activity's text
+/// dialog). On a touch device there, a menu text field is a tap-to-type button;
+/// on desktop it stays an egui `TextEdit`.
+pub const OS_KEYBOARD_PROMPT: bool = cfg!(any(target_arch = "wasm32", target_os = "android"));
 
 /// Global "this is a touch device" flag, set once at WASM startup from
 /// `navigator.maxTouchPoints` (and unconditionally by `android_main`). Read from places that can't reach a `TouchInput`
