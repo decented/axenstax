@@ -127,9 +127,10 @@ pub fn plan_hint_text(aiming_at_wall: bool) -> &'static str {
 /// (The old guidance was a single 4-second toast at gift time — gone by the
 /// time a kid experimented; this stays up while the plan is in hand.)
 pub fn draw_plan_hint(ctx: &egui::Context, viewport: &ViewportRect, player_index: usize, aiming_at_wall: bool) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - 210.0,
-        viewport.y as f32 + viewport.height as f32 - 96.0,
+        vp.x + vp.width / 2.0 - 210.0,
+        vp.y + vp.height - 96.0,
     );
     egui::Area::new(egui::Id::new(("plan_hint", player_index)))
         .fixed_pos(origin)
@@ -150,9 +151,10 @@ pub fn draw_plan_hint(ctx: &egui::Context, viewport: &ViewportRect, player_index
 
 /// TB-10 — persistent ghost-placement controls (replaces the 4-second toast).
 pub fn draw_ghost_controls(ctx: &egui::Context, viewport: &ViewportRect, player_index: usize) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - 180.0,
-        viewport.y as f32 + viewport.height as f32 - 96.0,
+        vp.x + vp.width / 2.0 - 180.0,
+        vp.y + vp.height - 96.0,
     );
     egui::Area::new(egui::Id::new(("ghost_controls", player_index)))
         .fixed_pos(origin)
@@ -326,9 +328,10 @@ pub fn draw_build_choice(
     player_index: usize,
     plan_name: &str,
 ) -> BuildChoice {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let overlay_rect = egui::Rect::from_min_size(
-        egui::pos2(viewport.x as f32, viewport.y as f32),
-        egui::vec2(viewport.width as f32, viewport.height as f32),
+        egui::pos2(vp.x, vp.y),
+        egui::vec2(vp.width, vp.height),
     );
     ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
@@ -338,10 +341,10 @@ pub fn draw_build_choice(
 
     let panel_w = 460.0;
     let origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0,
+        vp.x + vp.width / 2.0 - panel_w / 2.0,
         // Four buttons + the strapline — taller than the original two-button
         // panel, so lift the origin to keep it centred.
-        viewport.y as f32 + viewport.height as f32 / 2.0 - 150.0,
+        vp.y + vp.height / 2.0 - 150.0,
     );
     let mut choice = BuildChoice::None;
     egui::Area::new(egui::Id::new(("build_choice", player_index)))
@@ -515,12 +518,13 @@ pub fn draw_trial_complete(
     is_best: bool,
     postcard: crate::postcard_flow::PostcardSlot,
 ) -> crate::trials::TrialDoneAction {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     use crate::trials::TrialDoneAction;
     let card_size = egui::vec2(288.0, 162.0);
     let has_card = postcard != crate::postcard_flow::PostcardSlot::None;
     let overlay = egui::Rect::from_min_size(
-        egui::pos2(viewport.x as f32, viewport.y as f32),
-        egui::vec2(viewport.width as f32, viewport.height as f32),
+        egui::pos2(vp.x, vp.y),
+        egui::vec2(vp.width, vp.height),
     );
     ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
@@ -530,8 +534,8 @@ pub fn draw_trial_complete(
 
     let panel_w = 380.0;
     let origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0,
-        viewport.y as f32 + viewport.height as f32 / 2.0
+        vp.x + vp.width / 2.0 - panel_w / 2.0,
+        vp.y + vp.height / 2.0
             - 120.0
             - if has_card { (card_size.y + 12.0) / 2.0 } else { 0.0 },
     );
@@ -1120,10 +1124,11 @@ pub fn draw_nostrich_vow_badge(
     player_index: usize,
     vow: Option<&crate::nostrich_vow::NostrichVow>,
 ) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let Some(v) = vow else { return };
     let origin = egui::pos2(
-        viewport.x as f32 + 16.0,
-        viewport.y as f32 + 16.0,
+        vp.x + 16.0,
+        vp.y + 16.0,
     );
     let mins = v.minutes_remaining();
     let secs_total = v.ticks_remaining / 20;
@@ -2100,12 +2105,13 @@ fn draw_debug_overlay(
     perf: PerfSamples,
     debug: DebugReadout,
 ) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let mode = if flying { "FLY" } else { "SURV" };
     let hours = (world_time % 24000) * 24 / 24000;
     let mins = ((world_time % 24000) * 24 * 60 / 24000) % 60;
 
     egui::Area::new(egui::Id::new(("debug", player_index)))
-        .fixed_pos(egui::pos2(viewport.x as f32 + 8.0, viewport.y as f32 + 8.0))
+        .fixed_pos(egui::pos2(vp.x + 8.0, vp.y + 8.0))
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::new()
@@ -2196,12 +2202,6 @@ fn draw_debug_overlay(
         });
 }
 
-/// A "Close" chip in the top-right corner, drawn on a touch device while the
-/// inventory / crafting window is open. The touch buttons are hidden behind any
-/// panel (so a tap never acts on the world from behind it), and the Inventory
-/// button was the only touch way to close this window; the chip replaces it.
-/// Returns true on the frame it is tapped.
-pub fn draw_touch_close_chip(ctx: &egui::Context) -> bool {
 /// How big the Close chip is, in points.
 const TOUCH_CLOSE_CHIP_SIZE: egui::Vec2 = egui::vec2(88.0, 40.0);
 /// How far in from the top-right corner it sits, in points.
@@ -2216,16 +2216,22 @@ pub fn touch_close_chip_rect(screen: egui::Rect) -> egui::Rect {
     )
 }
 
+/// A "Close" chip in the top-right corner, drawn on a touch device while the
+/// inventory / crafting window is open. The touch buttons are hidden behind any
+/// panel (so a tap never acts on the world from behind it), and the Inventory
+/// button was the only touch way to close this window; the chip replaces it.
+/// Its rectangle is [`touch_close_chip_rect`], kept clear of the inventory
+/// window on the phone and tablet sizes by `craft_ui_phone_tests`.
+/// Returns true on the frame it is tapped.
+pub fn draw_touch_close_chip(ctx: &egui::Context) -> bool {
     let mut tapped = false;
+    let rect = touch_close_chip_rect(ctx.content_rect());
     egui::Area::new(egui::Id::new("touch_close_chip"))
         .fixed_pos(rect.min)
         .order(egui::Order::Foreground)
-/// Its rectangle is [`touch_close_chip_rect`], kept clear of the inventory
-/// window on the phone and tablet sizes by `craft_ui_phone_tests`.
         .interactable(true)
         .show(ctx, |ui| {
             let label = egui::RichText::new("Close").size(18.0).color(egui::Color32::WHITE);
-    let rect = touch_close_chip_rect(ctx.content_rect());
             let button = egui::Button::new(label)
                 .min_size(rect.size())
                 .fill(egui::Color32::from_rgba_unmultiplied(40, 40, 46, 230));
@@ -2327,10 +2333,11 @@ pub fn draw_objective_panel(
     how_to: &str,
     progress: &str,
 ) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let w = 460.0_f32;
     let origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - w / 2.0,
-        viewport.y as f32 + viewport.height as f32 * 0.16,
+        vp.x + vp.width / 2.0 - w / 2.0,
+        vp.y + vp.height * 0.16,
     );
     egui::Area::new(egui::Id::new("objective_panel"))
         .fixed_pos(origin)
@@ -2375,10 +2382,11 @@ pub fn draw_objective_panel(
 /// Non-blocking and self-dismissing: a warm "Satoshi:" speech bubble that lets
 /// the kid hear the guide before they glance at the steps (H). Player 0 only.
 pub fn draw_satoshi_brief(ctx: &egui::Context, viewport: &ViewportRect, title: &str, intro: &str) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let w = 520.0_f32;
     let origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - w / 2.0,
-        viewport.y as f32 + viewport.height as f32 * 0.05,
+        vp.x + vp.width / 2.0 - w / 2.0,
+        vp.y + vp.height * 0.05,
     );
     egui::Area::new(egui::Id::new("satoshi_brief"))
         .fixed_pos(origin)
@@ -2428,6 +2436,7 @@ pub fn draw_satoshi_brief(ctx: &egui::Context, viewport: &ViewportRect, title: &
 /// badge). A wind-up bar that fills as the bird builds speed, flashing
 /// "💧 WATER-READY!" once you're fast enough to skim across water.
 pub fn draw_nostrich_speed(ctx: &egui::Context, viewport: &ViewportRect, speed: f32) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let frac = (speed / crate::nostrich_ride::MAX_SPEED).clamp(0.0, 1.0);
     let water_ready = speed >= crate::nostrich_ride::WATER_RUN_SPEED;
     let bars = (frac * 12.0).round() as usize;
@@ -2439,8 +2448,8 @@ pub fn draw_nostrich_speed(ctx: &egui::Context, viewport: &ViewportRect, speed: 
     };
     let approx_w = 240.0_f32;
     let origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - approx_w / 2.0,
-        viewport.y as f32 + 46.0,
+        vp.x + vp.width / 2.0 - approx_w / 2.0,
+        vp.y + 46.0,
     );
     let (fill, fg) = if water_ready {
         (
@@ -2470,6 +2479,7 @@ pub fn draw_scenario_hud(
     player_index: usize,
     scenario: &crate::scenario::ScenarioState,
 ) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     // The badge content depends on objective + state. Timed runs count DOWN and
     // hand off to a blocking modal on end; the Satori speedrun counts UP and ends
     // with a NON-blocking "Genesis Block!" celebration (the player keeps playing).
@@ -2556,8 +2566,8 @@ pub fn draw_scenario_hud(
     };
     let approx_w = 200.0_f32;
     let origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - approx_w / 2.0,
-        viewport.y as f32 + 12.0,
+        vp.x + vp.width / 2.0 - approx_w / 2.0,
+        vp.y + 12.0,
     );
     egui::Area::new(egui::Id::new(("scenario_hud", player_index)))
         .fixed_pos(origin)
@@ -2633,6 +2643,7 @@ pub fn draw_scenario_end_screen(
     scenario: &crate::scenario::ScenarioState,
     postcard: crate::postcard_flow::PostcardSlot,
 ) -> ScenarioEndAction {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let mut action = ScenarioEndAction::None;
     let (headline, detail) = scenario_result_text(scenario);
     let card_size = egui::vec2(300.0, 169.0);
@@ -2645,8 +2656,8 @@ pub fn draw_scenario_end_screen(
     let panel_h = 200.0_f32
         + if has_card { card_size.y + 14.0 } else { 0.0 }
         + if scenario.place_recovery().is_some() { 230.0 } else { 0.0 };
-    let x = viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0;
-    let y = viewport.y as f32 + viewport.height as f32 / 2.0 - panel_h / 2.0;
+    let x = vp.x + vp.width / 2.0 - panel_w / 2.0;
+    let y = vp.y + vp.height / 2.0 - panel_h / 2.0;
 
     egui::Area::new(egui::Id::new(("scenario_end", player_index)))
         .fixed_pos(egui::pos2(x, y))
@@ -2757,16 +2768,17 @@ pub enum ScenarioEndAction {
 /// paints a flat dark fill + a single line of join-prompt text so the empty
 /// slot looks intentional and obviously invites P4.
 pub fn draw_empty_quadrant_prompt(ctx: &egui::Context, viewport: &ViewportRect) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let fill = egui::Color32::from_rgba_premultiplied(20, 20, 25, 255);
     let text_colour = egui::Color32::from_rgba_premultiplied(220, 220, 230, 220);
 
     egui::Area::new(egui::Id::new("empty_quadrant_prompt"))
-        .fixed_pos(egui::pos2(viewport.x as f32, viewport.y as f32))
+        .fixed_pos(egui::pos2(vp.x, vp.y))
         .interactable(false)
         .show(ctx, |ui| {
             let rect = egui::Rect::from_min_size(
-                egui::pos2(viewport.x as f32, viewport.y as f32),
-                egui::vec2(viewport.width as f32, viewport.height as f32),
+                egui::pos2(vp.x, vp.y),
+                egui::vec2(vp.width, vp.height),
             );
             ui.painter().rect_filled(rect, 0.0, fill);
             ui.painter().text(
@@ -2817,12 +2829,13 @@ pub fn draw_reserve_gauge(
     reserve: &ReserveState,
     cursor_captured: bool,
 ) -> bool {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let tier = reserve.tier();
     let colour = tier_colour(tier);
 
     let panel_w = 240.0_f32;
-    let panel_x = viewport.x as f32 + viewport.width as f32 - panel_w - 12.0;
-    let panel_y = viewport.y as f32 + 12.0;
+    let panel_x = vp.x + vp.width - panel_w - 12.0;
+    let panel_y = vp.y + 12.0;
 
     let mut clicked = false;
 
@@ -2967,6 +2980,7 @@ pub fn draw_fund_dialog(
     player_index: usize,
     state: &mut FundDialogState,
 ) -> FundDialogAction {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     // Default split percentages (Spec 6 §5.2 standard template).
     let pool_pct = 50;
     let creator_pct = 30;
@@ -2977,8 +2991,8 @@ pub fn draw_fund_dialog(
 
     let panel_w = 460.0_f32;
     let panel_h = 380.0_f32;
-    let panel_x = viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0;
-    let panel_y = viewport.y as f32 + viewport.height as f32 / 2.0 - panel_h / 2.0;
+    let panel_x = vp.x + vp.width / 2.0 - panel_w / 2.0;
+    let panel_y = vp.y + vp.height / 2.0 - panel_h / 2.0;
 
     egui::Area::new(egui::Id::new(("fund_dialog", player_index)))
         .fixed_pos(egui::pos2(panel_x, panel_y))
@@ -3358,5 +3372,74 @@ mod plan_hint_tests {
     fn plan_hint_warns_about_the_wall_overload() {
         assert!(plan_hint_text(true).contains("WALL"), "wall aim warns about hanging");
         assert!(plan_hint_text(false).contains("Right-click the ground"));
+    }
+}
+
+/// HUD panels on a phone: the viewport is in physical pixels (2400 x 1080 on a 3.0 points-per-pixel
+/// phone), egui places in points (800 x 360), so a panel centred on `viewport.width / 2` lands at
+/// 1200 "points" and egui drags it back to the screen's right edge.
+#[cfg(test)]
+mod phone_placement_tests {
+    use super::*;
+
+    const PPP: f32 = 3.0;
+    const SCREEN: egui::Vec2 = egui::vec2(800.0, 360.0);
+
+    /// Run `draw` for a few frames on the phone and say where the area `id` ended up.
+    fn placed(viewport: ViewportRect, id: egui::Id, draw: impl FnMut(&egui::Context, &ViewportRect)) -> egui::Rect {
+        placed_on(SCREEN, viewport, id, draw)
+    }
+
+    fn placed_on(screen: egui::Vec2, viewport: ViewportRect, id: egui::Id, mut draw: impl FnMut(&egui::Context, &ViewportRect)) -> egui::Rect {
+        let ctx = egui::Context::default();
+        crate::egui_integration::configure_style_for(&ctx, true);
+        ctx.set_pixels_per_point(PPP);
+        for _ in 0..6 {
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)), ..Default::default() };
+            ctx.run(input, |ctx| draw(ctx, &viewport));
+        }
+        ctx.memory(|m| m.area_rect(id)).unwrap_or_else(|| panic!("{id:?} was never drawn"))
+    }
+
+    fn phone_viewport() -> ViewportRect {
+        ViewportRect::full((SCREEN.x * PPP) as u32, (SCREEN.y * PPP) as u32)
+    }
+
+    /// The panel was placed to be `declared_w` wide and centred across `across` (its content may
+    /// come out narrower), so its left edge is half that width left of the middle, and all of it
+    /// is inside.
+    fn assert_centred_across(rect: egui::Rect, across: egui::Rangef, declared_w: f32, what: &str) {
+        let left = (across.min + across.max) / 2.0 - declared_w / 2.0;
+        assert!((rect.left() - left).abs() < 1.0, "{what} starts at x = {} instead of {left}: {rect:?}", rect.left());
+        assert!(rect.left() >= across.min - 0.5 && rect.right() <= across.max + 0.5, "{what} {rect:?} is not inside {across:?}");
+    }
+
+    #[test]
+    fn the_objective_panel_is_inside_a_phone_screen_and_centred() {
+        let rect = placed(phone_viewport(), egui::Id::new("objective_panel"), |ctx, vp| {
+            draw_objective_panel(ctx, vp, "Grey Quarry", "Break the stone", "0 / 3");
+        });
+        assert_centred_across(rect, egui::Rangef::new(0.0, SCREEN.x), 460.0, "the objective panel");
+        assert!(rect.top() >= 0.0 && rect.bottom() <= SCREEN.y, "the objective panel {rect:?} is off the screen");
+    }
+
+    #[test]
+    fn the_build_choice_panel_is_inside_a_phone_screen_and_centred() {
+        let rect = placed(phone_viewport(), egui::Id::new(("build_choice", 0usize)), |ctx, vp| {
+            draw_build_choice(ctx, vp, 0, "Cottage");
+        });
+        assert_centred_across(rect, egui::Rangef::new(0.0, SCREEN.x), 460.0, "the build-choice panel");
+        assert!(rect.top() >= 0.0, "the build-choice panel {rect:?} starts above the screen");
+    }
+
+    #[test]
+    fn a_split_screen_viewport_centres_its_panel_on_its_own_half() {
+        // A 1200 x 360 point window split in two: the right half is physical x 1800..3600, which is
+        // points 600..1200.
+        let right_half = ViewportRect { x: 1800, y: 0, width: 1800, height: 1080 };
+        let rect = placed_on(egui::vec2(1200.0, 360.0), right_half, egui::Id::new("objective_panel"), |ctx, vp| {
+            draw_objective_panel(ctx, vp, "Grey Quarry", "Break the stone", "0 / 3");
+        });
+        assert_centred_across(rect, egui::Rangef::new(600.0, 1200.0), 460.0, "the objective panel");
     }
 }

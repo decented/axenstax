@@ -1322,7 +1322,7 @@ pub fn draw_crafting_ui(
 
 /// A viewport (physical pixels, as the game passes it) in egui points, clipped to the content
 /// area, so layout and hit-tests are in the units egui draws in.
-fn viewport_points(ctx: &egui::Context, viewport: &crate::screen::ViewportRect) -> egui::Rect {
+pub(crate) fn viewport_points(ctx: &egui::Context, viewport: &crate::screen::ViewportRect) -> egui::Rect {
     let ppp = ctx.pixels_per_point().max(1.0);
     egui::Rect::from_min_size(
         egui::pos2(viewport.x as f32 / ppp, viewport.y as f32 / ppp),

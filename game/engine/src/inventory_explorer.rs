@@ -482,10 +482,9 @@ pub fn draw_inventory_explorer(
 ) -> ExplorerOutcome {
     let mut outcome = ExplorerOutcome::InProgress;
 
-    let overlay_rect = egui::Rect::from_min_size(
-        egui::pos2(viewport.x as f32, viewport.y as f32),
-        egui::vec2(viewport.width as f32, viewport.height as f32),
-    );
+    // The viewport is in physical pixels; egui places in points (a phone has 3 pixels to a point).
+    let area = crate::craft_ui::viewport_points(ctx, viewport);
+    let overlay_rect = area;
     ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
         egui::Id::new(("explorer_overlay", player_index)),
@@ -498,8 +497,8 @@ pub fn draw_inventory_explorer(
 
     let panel_w = 560.0;
     let panel_origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0,
-        viewport.y as f32 + 60.0,
+        area.center().x - panel_w / 2.0,
+        area.top() + 60.0,
     );
 
     egui::Area::new(egui::Id::new(("explorer_panel", player_index)))
@@ -684,6 +683,34 @@ fn count_in_inventory(inventory: &crate::inventory::Inventory, target: &Item) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On a phone the viewport is in physical pixels (2400 x 1080) and egui places in points
+    /// (800 x 360 at 3.0 per pixel). Centred on 1200 "points", the panel was pushed against the
+    /// screen's right edge.
+    #[test]
+    fn the_explorer_panel_is_centred_across_a_phone_screen() {
+        let (screen, ppp) = (egui::vec2(800.0, 360.0), 3.0_f32);
+        let ctx = egui::Context::default();
+        crate::egui_integration::configure_style_for(&ctx, true);
+        ctx.set_pixels_per_point(ppp);
+        let registry = BlockRegistry::new();
+        let entries = enumerate_all_items(&registry);
+        let mut state = ExplorerState::new();
+        let viewport = crate::screen::ViewportRect::full((screen.x * ppp) as u32, (screen.y * ppp) as u32);
+        let inventory = crate::inventory::Inventory::new();
+        for _ in 0..6 {
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)), ..Default::default() };
+            ctx.run(input, |ctx| {
+                draw_inventory_explorer(ctx, &viewport, 0, true, &inventory, &registry, &mut state, &entries);
+            });
+        }
+        let rect = ctx.memory(|m| m.area_rect(egui::Id::new(("explorer_panel", 0usize)))).expect("the explorer panel was never drawn");
+        // Placed 560 wide, centred: its left edge is 120 points in. (Its height, a 360-point list
+        // plus the search and close rows, is more than a phone's 360 points, so egui moves it up
+        // to the top edge: that is left open, and not asserted.)
+        assert!((rect.left() - 120.0).abs() < 1.0, "the panel starts at x = {} instead of 120: {rect:?}", rect.left());
+        assert!(rect.left() >= 0.0 && rect.right() <= screen.x, "the panel {rect:?} is not inside the {screen:?} screen");
+    }
 
     #[test]
     fn material_id_table_matches_enum_size() {
