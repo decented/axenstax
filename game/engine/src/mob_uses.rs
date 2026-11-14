@@ -134,12 +134,12 @@ pub fn hand_mob_use(item: Option<&Item>, f: &MobFacts, sneak: bool) -> MobUse {
         return MobUse::Acts;
     }
     if mat == Some(MaterialId::Bucket) && f.kind == MobType::Cow {
-        return if f.product_ready { MobUse::Acts } else { MobUse::Refused };
+        return if milks(f.kind, f.product_ready) { MobUse::Acts } else { MobUse::Refused };
     }
     if matches!(item, Some(Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shears)
         && crate::tool_uses::shears_cut(f.kind)
     {
-        return if f.product_ready { MobUse::Acts } else { MobUse::Refused };
+        return if shears(f.kind, f.product_ready) { MobUse::Acts } else { MobUse::Refused };
     }
     if mat.is_some_and(|m| tames_with(f.kind, f.tamed, m)) {
         return MobUse::Acts;
@@ -157,6 +157,7 @@ pub fn hand_mob_use(item: Option<&Item>, f: &MobFacts, sneak: bool) -> MobUse {
 /// a Lead, breeding food, a bucket, shears, taming food. The empty hand is
 /// [`commands_pet`] and the unconditional arms (riding, trading, a Lead taken off),
 /// all of them in [`hand_mob_use`].
+#[cfg(test)]
 pub fn item_works_on(item: &Item, f: &MobFacts, sneak: bool) -> bool {
     match item {
         Item::Material(m) => {

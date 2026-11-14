@@ -317,6 +317,7 @@ pub fn swing_hands(break_block: bool, place_block: bool, place_uses_off_hand: bo
 /// the click. Errs toward "yes" only for what no predicate can tell. A mob under
 /// the crosshair counts ([`crate::mob_uses::hand_mob_use`]); a shield's use is its
 /// raise, wherever no block with a use of its own is aimed at.
+#[cfg(test)]
 pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
     if crate::shield::is_shield(Some(item)) {
         return !target.block.is_some_and(block_has_use);
