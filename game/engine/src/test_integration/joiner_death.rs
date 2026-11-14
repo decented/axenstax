@@ -311,6 +311,34 @@ fn a_respawn_request_from_a_living_joiner_is_ignored() {
     assert!(inbox.respawned(slot).is_empty());
 }
 
+/// Creative never cancels a death that has happened. A joiner dead on the server
+/// stays dead where it fell when the world switches to Creative (a host's
+/// `/gamemode` reaches its server through `align_local_rules`, then
+/// `GameServer::set_play_mode`); it used to stand up there, with no Respawn asked.
+/// Its Respawn still brings it back.
+#[test]
+fn a_switch_to_creative_never_revives_a_dead_joiner() {
+    let mut hs = start_dedicated_server("creative-switch");
+    let (client, slot) = join_guest(&mut hs, "Fallen");
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, slot);
+    assert!(hs.server.players[slot].combat.take_damage(1000.0));
+    tick_n(&mut hs, &client, &mut inbox, 5);
+    assert_eq!(inbox.died(slot), 1, "the joiner is told it died");
+
+    hs.server.set_play_mode(crate::play_mode::PlayMode::Creative);
+    tick_n(&mut hs, &client, &mut inbox, 30);
+    let sp = &hs.server.players[slot];
+    assert!(sp.combat.dead, "still dead: Creative does not revive it");
+    assert_eq!(sp.player.pos, at, "the body stays where it fell");
+    assert!(inbox.respawned(slot).is_empty(), "nobody asked to respawn");
+
+    send_respawn(&client);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert!(!hs.server.players[slot].combat.dead, "its Respawn brings it back");
+    assert_eq!(inbox.respawned(slot).len(), 1);
+}
+
 #[test]
 fn mobs_do_not_target_a_dead_joiner() {
     let mut hs = start_dedicated_server("mobs");

@@ -435,3 +435,47 @@ fn game_harness_spawn_a_house_sited_a_minute_late_still_finds_a_site() {
     }
     assert!(failures.is_empty(), "worlds that ticked a minute first and then got no house: {failures:?}");
 }
+
+/// Creative never cancels a death that has happened. Dead in Survival, away from the
+/// spawn point, `/gamemode creative` is refused (the reply says to press Respawn first):
+/// the mode stays Survival, the death screen stays up and the body stays where it fell
+/// (it used to stand up there, alive, with its items left in the grave). After Respawn the
+/// switch works, and a lethal hit does not kill a living Creative player.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test --lib -- --ignored game_harness_spawn"]
+fn game_harness_spawn_creative_never_revives_a_dead_player() {
+    use crate::play_mode::PlayMode;
+    super::isolate_saves();
+    let mut hg = HeadlessGame::boot_into_world("harness-creative-dead");
+    hg.state.set_play_mode(PlayMode::Survival);
+    let feet = clear_pad(&mut hg, None);
+    hg.state.players[0].player.pos = Vec3::new(feet[0] as f32 + 3.5, feet[1] as f32, feet[2] as f32 + 0.5);
+    hg.ticks(2);
+    hg.state.players[0].combat.take_damage(1000.0);
+    hg.ticks(2);
+    assert!(hg.state.players[0].combat.dead, "dead");
+    let fell = hg.state.players[0].player.pos;
+    assert!(fell.distance(hg.state.players[0].spawn_pos) > 2.0, "the body fell away from the spawn point");
+
+    hg.state.submit_command_line("/gamemode creative".to_string());
+    hg.ticks(3);
+    hg.frames(2);
+    let p = &hg.state.players[0];
+    assert!(p.combat.dead, "still dead: the death screen stays up");
+    assert!(p.player.pos.distance(fell) < 0.01, "the body stays where it fell: {:?} -> {:?}", fell, p.player.pos);
+    assert_eq!(hg.state.play_mode, PlayMode::Survival, "the mode did not change");
+    assert!(
+        hg.state.chat.log.iter().any(|l| l.text.contains("Respawn")),
+        "the reply says to press Respawn first"
+    );
+
+    // Respawned, the switch works, and a living Creative player takes no lethal hit.
+    assert!(hg.state.players[0].combat.request_respawn());
+    hg.ticks(2);
+    assert!(!hg.state.players[0].combat.dead, "respawned");
+    hg.state.submit_command_line("/gamemode creative".to_string());
+    assert_eq!(hg.state.play_mode, PlayMode::Creative);
+    hg.state.players[0].combat.take_damage(1000.0);
+    hg.ticks(2);
+    assert!(!hg.state.players[0].combat.dead, "a living Creative player is not killed");
+}

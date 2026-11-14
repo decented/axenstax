@@ -294,6 +294,11 @@ pub struct PlayerCombat {
     pub last_damage: crate::survival::DamageCause,
     /// W2 — air supply / drowning state. Transient; reset on respawn.
     pub breath: crate::survival::Breath,
+    /// The creative exemption is on (Spec 05 §8.2, §6.7): no hit lands on this body
+    /// and nothing kills it ([`Self::take_damage_from`] and a reported loss land
+    /// nothing). Set by [`Self::keep_creative_whole`], cleared by
+    /// [`Self::leave_creative`]. A death recorded before it stays.
+    pub in_creative: bool,
 }
 
 /// How long between hunger ticks (Wave 24). 600 ticks = 30 seconds at
@@ -342,6 +347,7 @@ impl PlayerCombat {
             starvation_floor: crate::survival::Difficulty::Normal.rules().starvation_floor,
             last_damage: crate::survival::DamageCause::Generic,
             breath: crate::survival::Breath::FULL,
+            in_creative: false,
         }
     }
 
@@ -486,7 +492,7 @@ impl PlayerCombat {
     /// armour-reduced sources go through
     /// `PlayerSlot::take_damage_with_armour_from`.
     pub fn take_damage_from(&mut self, amount: f32, cause: crate::survival::DamageCause) -> bool {
-        if self.dead {
+        if self.dead || self.in_creative {
             return false;
         }
         let applied = if self.invincible_timer > 0 {
@@ -528,7 +534,7 @@ impl PlayerCombat {
     /// kills a body the server holds lower than its client knew — a hit the
     /// server landed is still on its way to it (review D2a HIGH-1).
     pub fn apply_reported_change(&mut self, delta: f32) -> bool {
-        if self.dead || !delta.is_finite() || delta == 0.0 {
+        if self.dead || !delta.is_finite() || delta == 0.0 || (self.in_creative && delta < 0.0) {
             return false;
         }
         self.health = (self.health + delta).clamp(0.0, self.max_health);
@@ -593,14 +599,25 @@ impl PlayerCombat {
         // just_died stays false — only the death transition sets it.
     }
 
-    /// The creative exemption (Spec 05 §8.2): a creative body is never hurt
-    /// and never dead — full health, no death pending, every tick. The one
-    /// rule: the client's death loop applies it to its players, a server
-    /// (C2a) to every joiner's body in a creative world.
+    /// The creative exemption (Spec 05 §8.2): a LIVING creative body is kept
+    /// whole, full health, and while the exemption is on ([`Self::in_creative`])
+    /// no hit lands on it, so nothing kills it in Creative. It never clears a death
+    /// already recorded: a body that died before Creative stays dead, its death
+    /// screen up, until Respawn (Creative never cancels a death that has happened;
+    /// it used to stand the body up where it fell, its items left in the grave). The
+    /// one rule: the client's death loop applies it to its players every tick, a
+    /// server (C2a) to every joiner's body in a creative world, and a switch to
+    /// Creative at once.
     pub fn keep_creative_whole(&mut self) {
-        self.health = self.max_health;
-        self.dead = false;
-        self.just_died = false;
+        self.in_creative = true;
+        if !self.dead {
+            self.health = self.max_health;
+        }
+    }
+
+    /// Out of Creative: the exemption is off and hits land again.
+    pub fn leave_creative(&mut self) {
+        self.in_creative = false;
     }
 
     /// The player chose Respawn on the death screen. No-op unless dead (a stale
@@ -1407,6 +1424,44 @@ mod tests {
         assert!(!p.dead);
         assert!(!p.respawn_requested, "respawn() consumes the request");
         assert!(!p.should_respawn());
+    }
+
+    /// Creative never cancels a death that has happened: a body that died before
+    /// Creative (its death handled: the grave, the death screen) stays dead under
+    /// `keep_creative_whole`, however many ticks run, until Respawn.
+    #[test]
+    fn keep_creative_whole_never_clears_a_recorded_death() {
+        let mut p = PlayerCombat::new();
+        p.die(crate::survival::DamageCause::Generic);
+        p.just_died = false; // the death loop handled it
+        for _ in 0..3 {
+            p.keep_creative_whole();
+        }
+        assert!(p.dead, "Creative does not revive a dead body");
+        assert_eq!(p.health, 0.0);
+        assert!(p.request_respawn(), "Respawn is the way back");
+        p.respawn();
+        p.keep_creative_whole();
+        assert!(!p.dead);
+        assert_eq!(p.health, p.max_health);
+    }
+
+    /// A living Creative body is kept whole: a lethal hit between two ticks of the
+    /// exemption does not leave it dead. It does not land at all, nor does a
+    /// reported loss; out of Creative, hits land again.
+    #[test]
+    fn a_living_creative_body_is_never_killed() {
+        let mut p = PlayerCombat::new();
+        p.keep_creative_whole();
+        p.take_damage(1000.0);
+        p.keep_creative_whole();
+        assert!(!p.dead);
+        assert_eq!(p.health, p.max_health);
+        assert!(!p.take_damage(1000.0), "no hit lands in Creative");
+        assert!(!p.apply_reported_change(-50.0), "nor a reported loss");
+        assert!(!p.dead && !p.just_died);
+        p.leave_creative();
+        assert!(p.take_damage(5.0), "out of Creative, hits land again");
     }
 
     #[test]

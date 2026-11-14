@@ -296,3 +296,83 @@ fn game_harness_a_raised_shield_neither_mines_nor_attacks() {
     run(&mut hg, 12);
     assert!(hg.state.ecs.get::<&crate::combat::Health>(cow).is_ok_and(|h| h.current < max) || !hg.state.ecs.contains(cow), "lowered: the cow takes a hit");
 }
+
+/// Review 5, should-fix 1: a Strict seat runs only its main hand's actions, so an
+/// off-hand action it cannot run must not block the click. A Strict joiner holds shears in
+/// the main hand and a shield in the off-hand and holds use on a tethered sheep whose wool
+/// is still growing. The shears refuse, and the off-hand's Lead removal never runs on a
+/// Strict seat (its typed actions carry no hand), so the click is the shield's: it rises,
+/// the server hears the raise, and the Lead stays on. It used to do nothing at all: the
+/// raise was declined for the off-hand's Lead removal and execution, kept to the main
+/// hand, sent nothing.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+fn game_harness_strict_seat_raises_a_shield_past_a_lead_it_cannot_take_off() {
+    use crate::entity::{Position, ProtocolId};
+    isolate_saves();
+    let (mut hg, mut server, slot) =
+        joined_window_client_mode("strict-shears-shield", crate::action_identity::InventoryMode::Strict);
+    clear_pad(&mut hg, Some(&mut server));
+    let shears = ItemStack::new_tool(Tool::new(ToolType::Shears, ToolMaterial::Iron));
+    // Both copies of the window: the client's and the server's.
+    hg.state.players[0].hotbar_slot = 0;
+    hg.state.players[0].inventory.set_slot(0, Some(shears.clone()));
+    hg.state.players[0].offhand = Some(shield_item());
+    let sp = &mut server.server.players[slot];
+    sp.hotbar_slot = 0;
+    sp.inventory.set_slot(0, Some(shears));
+    sp.offhand = Some(shield_item());
+    // The sheep, just shorn (its wool growing, by the server's clock) and on a Lead the
+    // joiner holds.
+    let at = server.server.players[slot].player.pos + glam::Vec3::new(0.0, 0.0, -2.0);
+    let sheep = crate::entity::spawn_mob(&mut server.server.ecs, crate::mob::MobType::Sheep, at);
+    let now = server.server.tick_counter;
+    let mut shorn = crate::animal_products::AnimalProductState::new();
+    shorn.last_action_tick = Some(now);
+    server.server.ecs.insert_one(sheep, shorn).unwrap();
+    server
+        .server
+        .ecs
+        .insert_one(sheep, crate::tether::Tethered { target: crate::tether::TetherTarget::Player(slot) })
+        .unwrap();
+    for _ in 0..6 {
+        server.server.ecs.get::<&mut Position>(sheep).unwrap().0 = at;
+        harness_step(&mut server, &mut hg);
+    }
+    server.server.ecs.get::<&mut Position>(sheep).unwrap().0 = at;
+    let id = server.server.ecs.get::<&ProtocolId>(sheep).expect("broadcast").0;
+    let drawn = hg.state.remote_mobs.position_of(id).expect("the joiner mirrors the sheep");
+    aim_at(&mut hg, drawn + glam::Vec3::new(0.0, 0.7, 0.0));
+
+    // The premise: a Strict seat, and under its crosshair that sheep, tethered, wool growing.
+    assert!(hg.state.strict_window_connection(), "a Strict seat");
+    let p = &hg.state.players[0];
+    let target = hg
+        .state
+        .remote_mobs
+        .ray_target(p.player.eye_pos(), p.camera.forward(), crate::combat::ATTACK_REACH)
+        .expect("a mirrored mob under the crosshair");
+    assert_eq!(target.id, id, "the sheep is under the crosshair");
+    assert!(target.tethered && target.product_not_ready, "tethered, its wool growing: {target:?}");
+
+    // Hold use on it.
+    hg.state.players[0].place_cooldown = 0;
+    hold(&mut hg, winit::event::MouseButton::Right, true);
+    for _ in 0..3 {
+        harness_step(&mut server, &mut hg);
+    }
+    assert!(
+        hg.state.local_guard.contains(&0),
+        "the shears refuse and a Strict seat cannot take the Lead off with its off-hand: the shield rises"
+    );
+    for _ in 0..40 {
+        if server.server.players[slot].shield_latch {
+            break;
+        }
+        harness_step(&mut server, &mut hg);
+    }
+    assert!(server.server.players[slot].shield_latch, "the server hears the raise");
+    assert!(server.server.ecs.get::<&crate::tether::Tethered>(sheep).is_ok(), "the Lead stays on");
+    hold(&mut hg, winit::event::MouseButton::Right, false);
+    harness_step(&mut server, &mut hg);
+}

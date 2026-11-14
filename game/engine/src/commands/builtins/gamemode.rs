@@ -56,9 +56,25 @@ impl Command for GamemodeCommand {
             ctx.info(format!("already in {}", mode.label().to_lowercase()));
             return CommandResult::Silent;
         }
+        // Creative never cancels a death that has happened, and no mode changes
+        // under a death screen: Respawn comes first (the pause menu's switch is
+        // locked the same way, `world_exit::creative_switch_locked`).
+        if ctx.players.iter().any(|p| p.combat.dead) {
+            let msg = "Press Respawn first.".to_string();
+            ctx.error(msg.clone());
+            return CommandResult::Error(msg);
+        }
         // Set the source of truth + keep the is_creative projection in lock-step.
         *ctx.play_mode = mode;
         *ctx.is_creative = mode.is_creative();
+        // The creative exemption follows at once (`GameState::set_play_mode`'s rule).
+        for slot in ctx.players.iter_mut() {
+            if mode.is_creative() {
+                slot.combat.keep_creative_whole();
+            } else {
+                slot.combat.leave_creative();
+            }
+        }
         // Flight: Creative+Spectator fly; grounded modes drop the player.
         if let Some(slot) = ctx.players.get_mut(ctx.player_idx) {
             slot.player.flying = mode.flies();
@@ -83,11 +99,15 @@ mod tests {
     use crate::player_slot::PlayerSlot;
 
     fn run(args: &[&str], mode: PlayMode) -> (CommandResult, PlayMode, bool, bool) {
+        let mut players = vec![PlayerSlot::new(0, glam::Vec3::ZERO, 0.5)];
+        run_for(&mut players, args, mode)
+    }
+
+    fn run_for(players: &mut Vec<PlayerSlot>, args: &[&str], mode: PlayMode) -> (CommandResult, PlayMode, bool, bool) {
         let cmd = GamemodeCommand;
         let mut world = World::new();
         let mut t = 0u32;
         let mut s = 4u32;
-        let mut players = vec![PlayerSlot::new(0, glam::Vec3::ZERO, 0.5)];
         let mut log = Vec::new();
         let mut pm = mode;
         let mut ch = false;
@@ -103,7 +123,7 @@ mod tests {
             play_mode: &mut pm,
             seed: 42,
             world_name: "test",
-            players: &mut players,
+            players,
             player_idx: 0,
             op_level: OpLevel::Op,
             current_tick: 0,
@@ -116,6 +136,28 @@ mod tests {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let r = cmd.execute(&mut ctx, &owned);
         (r, pm, ev, ps)
+    }
+
+    /// Creative never cancels a death that has happened: while a player here is
+    /// dead (the death screen waiting for Respawn) the mode does not change, to
+    /// Creative or to anything else, the ledger is not stamped, and the reply says
+    /// what to do. Alive again, the switch works.
+    #[test]
+    fn a_dead_player_presses_respawn_before_the_mode_changes() {
+        let mut players = vec![PlayerSlot::new(0, glam::Vec3::ZERO, 0.5)];
+        players[0].combat.die(crate::survival::DamageCause::Generic);
+        for (args, from) in [(&["creative"][..], PlayMode::Survival), (&["sp"][..], PlayMode::Survival), (&["survival"][..], PlayMode::Creative)] {
+            let (r, pm, ev, ps) = run_for(&mut players, args, from);
+            let CommandResult::Error(msg) = &r else { panic!("{args:?} while dead: {r:?}, not refused") };
+            assert!(msg.contains("Respawn"), "the reply says to press Respawn: {msg}");
+            assert_eq!(pm, from, "{args:?}: the mode does not change");
+            assert!(!ev && !ps, "nothing is stamped on the ledger");
+        }
+        assert!(players[0].combat.dead, "and the player is still dead");
+        assert!(!players[0].player.flying);
+        players[0].combat.respawn();
+        let (r, pm, _, _) = run_for(&mut players, &["creative"], PlayMode::Survival);
+        assert_eq!((r, pm), (CommandResult::Success, PlayMode::Creative));
     }
 
     #[test]

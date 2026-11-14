@@ -4656,20 +4656,99 @@ impl super::GameState {
     /// hand, and no other use for what the crosshair is on) when the press starts, then
     /// the outcome kept until the button is released (`hands::shield_press`, the
     /// seat's [`Press`](crate::hands::Press) in `shield_press`: nothing re-asks the
-    /// target while the button stays held). A Strict seat's off-hand counts only as a
-    /// shield (`hands::usable_off_hand`: its other off-hand uses never run). Pure of
-    /// state (the caller commits the press), cheap when no shield is held.
+    /// target while the button stays held). A Strict seat's raise is chosen from its
+    /// main hand's actions only (`hands::seat_shield_raises`: no off-hand action runs
+    /// there, so none may claim the click, and a shield in either hand still raises;
+    /// execution keeps the main hand on the same seats). Pure of state (the caller
+    /// commits the press), cheap when no shield is held.
     fn shield_hold(&self, pidx: usize, intent: &PlayerIntent) -> (crate::hands::ShieldHold, crate::hands::Press) {
         let p = &self.players[pidx];
         let holding = (intent.place_block || intent.use_held) && intent.cursor_captured && !p.combat.dead;
         let (main, off) = p.hands_items();
-        let off = crate::hands::usable_off_hand(self.strict_window_connection(), off);
+        let strict = self.strict_window_connection();
         let shield_in_hand = crate::shield::is_shield(main) || crate::shield::is_shield(off);
         let prev = self.shield_press.get(&pidx).copied().unwrap_or_default();
         // The target is asked only when it can decide: the press frame.
         crate::hands::shield_press(prev, holding, shield_in_hand, || {
-            crate::hands::shield_raises(main, off, &self.use_target(pidx, intent.sneak))
+            crate::hands::seat_shield_raises(strict, main, off, &self.use_target(pidx, intent.sneak))
         })
+    }
+
+    /// A panel owns seat `i`'s input: its crafting screen, a dialogue, a container, a
+    /// sign, the Explorer, and for player 0 the Workshop painter, the Wardrobe, the
+    /// challenge board, the controls card, the Rig Studio, the Trials completion card
+    /// and the Director. The tick's per-seat `menu_open` gate (before player 0's egui
+    /// focus fold) and the frame path's use press (`use_press_ends`) ask this one.
+    fn seat_modal_open(&self, i: usize) -> bool {
+        self.players[i].crafting_ui.open
+            || (i == 0 && self.joined_quest_open())
+            || self.players[i].dialogue_villager.is_some()
+            || self.players[i].dialogue_satoshi.is_some()
+            || self.players[i].pending_build_choice.is_some()
+            || self.players[i].pending_capture.is_some()
+            || self.players[i].pending_inspect.is_some()
+            || self.players[i].pending_plaque.is_some()
+            || self.players[i].open_furnace.is_some()
+            || self.players[i].open_vendor.is_some()
+            || self.players[i].open_chest.is_some()
+            || self.players[i].open_sign.is_some()
+            || self.players[i].open_site_board.is_some()
+            || self.players[i].explorer_state.is_some()
+            // Spec 40 — the Workshop painter (player 0) is a modal editor.
+            || (i == 0 && self.workshop_painter.open)
+            // Workshop Phase 5 Task 6 — Wardrobe panel (player 0).
+            || (i == 0 && self.wardrobe_open)
+            // Wave 6 — challenge board (player 0) is a modal menu.
+            || (i == 0 && self.challenge_board_open)
+            // The controls card (player 0) is a modal panel.
+            || (i == 0 && self.controls_card_open)
+            // #19 — Rig Studio (player 0) is a modal authoring panel.
+            || (i == 0 && self.rig_studio_open)
+            // Trials — the "Well done!" Race completion panel (player 0).
+            // Touch already treats it as modal (p0_ui_modal_open); freeze
+            // desktop movement too so the avatar can't stroll off a cliff /
+            // into lava behind the celebration card.
+            || (i == 0 && self.trial_outcome.is_some())
+            // Cinematic Director (Phase 1) — freeze the avatar while the
+            // render camera detaches to fly. This zeroes slot-0 movement,
+            // break (6843)/place, jump, flight, and camera_cycle, so the
+            // body stays put + F5/F3 can't fight the Director.
+            || (i == 0 && self.director_active())
+    }
+
+    /// Review 5, should-fix 2 — does seat `pidx`'s use press end on this frame?
+    /// Whenever the seat is not holding use in play: the button up or the cursor free,
+    /// dead, seated, a panel over its view ([`Self::seat_modal_open`], and player 0's
+    /// chat or map), and on a fresh press of the mouse button (a release and a press
+    /// between two frames). Asked before the frame path's dead and seated skips, so a
+    /// release there is never lost and the next press asks the target again.
+    fn use_press_ends(&self, pidx: usize, intent: &PlayerIntent) -> bool {
+        let p = &self.players[pidx];
+        let held = (intent.place_block || intent.use_held) && intent.cursor_captured;
+        let fresh_press = pidx == 0 && self.input.right_click;
+        !held
+            || fresh_press
+            || p.combat.dead
+            || p.seated()
+            || self.seat_modal_open(pidx)
+            || (pidx == 0 && self.p0_ui_modal_open())
+    }
+
+    /// End seat `pidx`'s use press: its classification (`shield_press`), its raised
+    /// shield (`local_guard`) and its off-hand swing (`local_off_use`) together, so the
+    /// next press asks the target again.
+    fn end_use_press(&mut self, pidx: usize) {
+        self.shield_press.remove(&pidx);
+        self.local_guard.remove(&pidx);
+        self.local_off_use.remove(&pidx);
+    }
+
+    /// [`Self::end_use_press`] for every seat: the pause, where the frame path never
+    /// sees a button.
+    fn end_all_use_presses(&mut self) {
+        self.shield_press.clear();
+        self.local_guard.clear();
+        self.local_off_use.clear();
     }
 
     /// Does this client's block edit (and its `mined` tag) reach the server it
@@ -7209,40 +7288,7 @@ impl super::GameState {
         let egui_wants_pointer = self.renderer.egui.wants_pointer_input();
         for (i, intent) in intents.iter_mut().enumerate() {
             if i >= self.players.len() { break; }
-            let modal_open = self.players[i].crafting_ui.open
-                || (i == 0 && self.joined_quest_open())
-                || self.players[i].dialogue_villager.is_some()
-                || self.players[i].dialogue_satoshi.is_some()
-                || self.players[i].pending_build_choice.is_some()
-                || self.players[i].pending_capture.is_some()
-                || self.players[i].pending_inspect.is_some()
-                || self.players[i].pending_plaque.is_some()
-                || self.players[i].open_furnace.is_some()
-                || self.players[i].open_vendor.is_some()
-                || self.players[i].open_chest.is_some()
-                || self.players[i].open_sign.is_some()
-                || self.players[i].open_site_board.is_some()
-                || self.players[i].explorer_state.is_some()
-                // Spec 40 — the Workshop painter (player 0) is a modal editor.
-                || (i == 0 && self.workshop_painter.open)
-                // Workshop Phase 5 Task 6 — Wardrobe panel (player 0).
-                || (i == 0 && self.wardrobe_open)
-                // Wave 6 — challenge board (player 0) is a modal menu.
-                || (i == 0 && self.challenge_board_open)
-                // The controls card (player 0) is a modal panel.
-                || (i == 0 && self.controls_card_open)
-                // #19 — Rig Studio (player 0) is a modal authoring panel.
-                || (i == 0 && self.rig_studio_open)
-                // Trials — the "Well done!" Race completion panel (player 0).
-                // Touch already treats it as modal (p0_ui_modal_open); freeze
-                // desktop movement too so the avatar can't stroll off a cliff /
-                // into lava behind the celebration card.
-                || (i == 0 && self.trial_outcome.is_some())
-                // Cinematic Director (Phase 1) — freeze the avatar while the
-                // render camera detaches to fly. This zeroes slot-0 movement,
-                // break (6843)/place, jump, flight, and camera_cycle, so the
-                // body stays put + F5/F3 can't fight the Director.
-                || (i == 0 && self.director_active());
+            let modal_open = self.seat_modal_open(i);
             let menu_open = if i == 0 {
                 gameplay_input_suppressed(modal_open, egui_wants_keyboard, egui_wants_pointer)
             } else {
@@ -7844,9 +7890,16 @@ impl super::GameState {
             }
             if self.is_creative {
                 // Creative players are invulnerable + don't drop inventory
-                // (the rule a server applies to joiners too, C2a).
+                // (the rule a server applies to joiners too, C2a): a LIVING body
+                // is kept whole. A death recorded before Creative is not
+                // cancelled: the body goes on below to its death screen and its
+                // Respawn, in any mode.
                 self.players[i].combat.keep_creative_whole();
-                continue;
+                if !self.players[i].combat.dead {
+                    continue;
+                }
+            } else {
+                self.players[i].combat.leave_creative();
             }
 
             // #47 — Inventory handling on death (Survival). Runs once per death
@@ -10461,6 +10514,13 @@ impl super::GameState {
             return;
         }
 
+        // Review 5, should-fix 2 — paused, the frame path never sees the use
+        // button, so every press ends here: the first press after Resume asks the
+        // target again, whatever the button did behind the menu.
+        if matches!(self.mode, GameMode::Paused { .. }) {
+            self.end_all_use_presses();
+        }
+
         // Pause mode: render world + pause overlay. After a failed save, or in
         // a session opened from the autosave, "Quit without saving" keeps the
         // autosave — and says so.
@@ -10832,6 +10892,7 @@ impl super::GameState {
             let lock_creative = crate::world_exit::creative_switch_locked(
                 self.scenario.as_ref().is_some_and(|s| s.def().lock_creative),
                 self.remote_client.is_some(),
+                self.players.iter().any(|p| p.combat.dead),
             );
             // A Trial (coverage Challenge or Race) is an ephemeral, retryable run —
             // the pause menu collapses to Resume / Try Again / Leave (no Save).
@@ -10974,12 +11035,14 @@ impl super::GameState {
                 crate::menu::PAUSE_SWITCH_CREATIVE if crate::world_exit::creative_switch_locked(
                     self.scenario.as_ref().is_some_and(|s| s.def().lock_creative),
                     self.remote_client.is_some(),
+                    self.players.iter().any(|p| p.combat.dead),
                 ) =>
                 {
                     // Belt-and-braces: the button is hidden when a locking
-                    // scenario is active or the world is someone else's, so this
-                    // can't normally fire — but never honour it then.
-                    log::warn!("ignored Switch-to-Creative (locked scenario or joined world)");
+                    // scenario is active, the world is someone else's or a
+                    // player here is dead, so this can't normally fire — but
+                    // never honour it then.
+                    log::warn!("ignored Switch-to-Creative (locked scenario, joined world or a death waiting for Respawn)");
                 }
                 crate::menu::PAUSE_SWITCH_CREATIVE => {
                     self.set_play_mode(crate::play_mode::PlayMode::Creative);
@@ -11359,7 +11422,13 @@ impl super::GameState {
             // handler (below, after the raycast) can suppress break/place
             // and the dual-meaning Q/E (rotate-ghost vs drop/inventory)
             // without mutating the shared frame_intents vector.
-            let mut intent_local = if pidx < frame_intents.len() { frame_intents[pidx].clone() } else { continue };
+            // A seat with no frame intent (a handover holding play) is not pressing.
+            let mut intent_local = if pidx < frame_intents.len() {
+                frame_intents[pidx].clone()
+            } else {
+                self.end_use_press(pidx);
+                continue;
+            };
             let intent = &mut intent_local;
 
             // Cinematic Director (Phase 1) — slot 0 only. Run the Director rig at
@@ -11415,6 +11484,13 @@ impl super::GameState {
                 intent.break_block = false;
                 intent.place_block = false;
                 intent.pick_block = false;
+            }
+
+            // Review 5, should-fix 2 — the use press ends on any frame its seat
+            // is not holding use in play, seen here, before the dead and seated skips,
+            // so a release on the death screen or a seat is never lost.
+            if self.use_press_ends(pidx, intent) {
+                self.end_use_press(pidx);
             }
 
             // Skip input for dead players (death screen is drawn in HUD section)
@@ -13798,6 +13874,8 @@ impl super::GameState {
             // packets carry the hand. A Strict seat keeps the main hand: its
             // typed actions don't carry one yet, and the server refuses an
             // off-hand claim from it rather than believe it.
+            // The raise (`shield_hold`) is chosen on a Strict seat from the main
+            // hand's actions only (`hands::seat_shield_raises`), so the two agree.
             // BRIDGE: off-hand use for Strict seats — replace when Strict seats get the off-hand use path
             let hand = if self.strict_window_connection()
                 || self.players[pidx].offhand.is_none()

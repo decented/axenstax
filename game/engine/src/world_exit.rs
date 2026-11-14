@@ -345,10 +345,12 @@ pub(crate) fn self_teleport_allowed(joined: bool) -> bool {
 
 
 /// Is the pause menu's "Switch to Creative" locked? During a creative-locked
-/// scenario, and always in someone else's world — the host owns the mode, and
-/// `/gamemode` is already refused there (review W3 S1).
-pub(crate) fn creative_switch_locked(scenario_locks: bool, joined: bool) -> bool {
-    scenario_locks || joined
+/// scenario, always in someone else's world — the host owns the mode, and
+/// `/gamemode` is already refused there (review W3 S1) — and while a player here
+/// is dead (`anyone_dead`): Creative never cancels a death that has happened, so
+/// the death screen's Respawn comes first, as `/gamemode` says.
+pub(crate) fn creative_switch_locked(scenario_locks: bool, joined: bool, anyone_dead: bool) -> bool {
+    scenario_locks || joined || anyone_dead
 }
 
 /// Only slot 0 is networked, so a second local seat is refused while hosting
@@ -960,9 +962,11 @@ mod tests {
     #[test]
     fn a_joiner_cannot_switch_to_creative_from_the_pause_menu() {
         // Review W3 S1.
-        assert!(creative_switch_locked(false, true));
-        assert!(creative_switch_locked(true, false));
-        assert!(!creative_switch_locked(false, false));
+        assert!(creative_switch_locked(false, true, false));
+        assert!(creative_switch_locked(true, false, false));
+        assert!(!creative_switch_locked(false, false, false));
+        // A player here dead: Respawn first.
+        assert!(creative_switch_locked(false, false, true));
     }
 
     #[test]

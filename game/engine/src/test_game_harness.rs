@@ -213,6 +213,9 @@ mod tests {
     #[path = "offhand.rs"]
     mod offhand;
     #[cfg(not(target_arch = "wasm32"))]
+    #[path = "use_press.rs"]
+    mod use_press;
+    #[cfg(not(target_arch = "wasm32"))]
     #[path = "spawn_safe.rs"]
     mod spawn_safe;
     #[cfg(not(target_arch = "wasm32"))]

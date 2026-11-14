@@ -24,7 +24,8 @@
 //!
 //! Since v101 a joined Mirror client's use packets carry the hand; a Strict
 //! seat keeps [`Hand::Main`] for its uses (a BRIDGE in `game_loop`), though its
-//! shots take their round off-hand first on both copies, as every seat's do.
+//! shots take their round off-hand first on both copies, as every seat's do. Its
+//! raise is chosen from the main hand's actions alone ([`seat_shield_raises`]).
 
 use crate::block::{self, BlockId};
 use crate::crafting::ToolType;
@@ -167,8 +168,11 @@ fn hand_acts(item: Option<&Item>, target: &UseTarget) -> bool {
 /// shield (the main hand's first). A shield's own use, the raise, is the last
 /// claimant: another hand's real use, a door or a chest, and a mob that a hand does
 /// something to all win over it, and nothing else does. An empty off-hand never
-/// takes a click (a pet is commanded by an empty MAIN hand).
-fn pick(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Option<Pick> {
+/// takes a click (a pet is commanded by an empty MAIN hand). `off_acts` false is a
+/// seat that runs its main hand only (a Strict seat): the off-hand takes no action
+/// whatever it holds, a shield's own Lead removal included, and counts only as a
+/// shield to raise.
+fn pick(main: Option<&Item>, off: Option<&Item>, target: &UseTarget, off_acts: bool) -> Option<Pick> {
     if target.block.is_some_and(block_takes_held_item) {
         return Some(Pick::Use(Hand::Main));
     }
@@ -177,6 +181,8 @@ fn pick(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Option<P
     }
     match off {
         None => {}
+        // A seat whose off-hand runs nothing (Strict): only its raise is left, below.
+        Some(_) if !off_acts => {}
         // BRIDGE: a Plan's Inspect dialog is keyed on a hotbar slot, so a Plan
         // in the off-hand never takes the click — replace when the dialog can
         // name the off-hand.
@@ -209,7 +215,7 @@ fn pick(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Option<P
 /// for its raise. An empty hand has no other use. The one decision behind
 /// [`use_hand`] and [`either_hand_has_use`].
 pub fn hand_with_use(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Option<Hand> {
-    pick(main, off, target).map(|p| match p {
+    pick(main, off, target, true).map(|p| match p {
         Pick::Use(h) | Pick::Raise(h) => h,
     })
 }
@@ -239,8 +245,24 @@ pub fn either_hand_has_use(main: Option<&Item>, off: Option<&Item>, target: &Use
 /// milking, shearing, riding, trading, a pet's command: `mob_uses`). A hostile mob,
 /// or one nothing held does anything to, never takes the click. The decision is made
 /// when the press starts ([`shield_press`] keeps it up while the button is held).
+/// The unrestricted seat's reading of [`seat_shield_raises`].
+#[cfg(test)]
 pub fn shield_raises(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> bool {
-    matches!(pick(main, off, target), Some(Pick::Raise(_)))
+    seat_shield_raises(false, main, off, target)
+}
+
+/// `shield_raises` on a seat. `strict` is a Strict seat, which runs its uses from
+/// the main hand only (a BRIDGE in `game_loop`: its typed actions carry no hand, and
+/// execution keeps the main hand there). On it only the main hand's actions are
+/// asked: an off-hand action never claims the click, a shield's own Lead removal
+/// included, and a shield in either hand is still a raise candidate. Raise selection
+/// asks this and execution keeps the main hand on the same seats, so the two agree:
+/// shears main (wool growing) and a shield off on a tethered sheep raise the shield,
+/// where they used to decline the raise for a Lead removal the seat cannot run and do
+/// nothing (review 5, should-fix 1). A main-hand shield's own actions (a Lead
+/// taken off, a mount, a trade) run on a Strict seat and still take the click.
+pub fn seat_shield_raises(strict: bool, main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> bool {
+    matches!(pick(main, off, target, !strict), Some(Pick::Raise(_)))
 }
 
 /// What the shield does this frame: `raised` is the state the frame applies,
@@ -292,15 +314,6 @@ pub fn shield_press(
             (ShieldHold { raised: up, held_over: up }, Press::Decided { raised: up })
         }
     }
-}
-
-/// The off-hand item a seat's click can really use. A Strict seat keeps the main
-/// hand for its uses (a BRIDGE in `game_loop`: its typed actions carry no hand), so
-/// an off-hand action that is not a shield can never run there and must not claim
-/// the click; an off-hand shield can still be raised. Raise selection and execution
-/// ask the same rule.
-pub fn usable_off_hand(strict: bool, off: Option<&Item>) -> Option<&Item> {
-    if strict && !crate::shield::is_shield(off) { None } else { off }
 }
 
 /// Which hands swing when the player acts: `(main, off)`. Mining and attacking
@@ -1044,20 +1057,29 @@ mod tests {
         assert!(hold.raised, "a new press asks again");
     }
 
-    /// Review 4 finding 6: a Strict seat's off-hand counts only as a shield, so a
-    /// shield main and a torch off, clicking stone, raises (the torch cannot be
-    /// placed on a Strict seat) while an unrestricted seat places the torch.
+    /// Review 4 finding 6 and review 5 should-fix 1: a Strict seat runs its main
+    /// hand only, so its off-hand counts only as a shield to raise. A shield main and a
+    /// torch off, clicking stone, raises (the torch cannot be placed on a Strict seat)
+    /// while an unrestricted seat places the torch. Shears main and a shield off on a
+    /// tethered sheep whose wool is growing raises (the off-hand's Lead removal cannot
+    /// run there) while an unrestricted seat takes the Lead off with the off-hand. A
+    /// shield MAIN on that sheep still takes the Lead off: the main hand runs on a
+    /// Strict seat too.
     #[test]
     fn a_strict_seat_raises_a_shield_past_an_off_hand_use_it_cannot_run() {
-        let (shield, torch, sword) = (tool(ToolType::Shield), Item::Block(block::TORCH), tool(ToolType::Sword));
-        let raises = |strict, main: &Item, off: &Item| shield_raises(Some(main), usable_off_hand(strict, Some(off)), &stone_target());
-        assert!(!raises(false, &shield, &torch), "a Mirror seat places the torch");
-        assert!(raises(true, &shield, &torch), "a Strict seat raises: the torch never runs there");
+        use crate::mob::MobType;
+        let (shield, torch, sword, shears) = (tool(ToolType::Shield), Item::Block(block::TORCH), tool(ToolType::Sword), tool(ToolType::Shears));
+        let raises = |strict, main: &Item, off: &Item, t: &UseTarget| seat_shield_raises(strict, Some(main), Some(off), t);
+        let stone = stone_target();
+        assert!(!raises(false, &shield, &torch, &stone), "a Mirror seat places the torch");
+        assert!(raises(true, &shield, &torch, &stone), "a Strict seat raises: the torch never runs there");
         // An off-hand shield is still a raise candidate on a Strict seat.
-        assert!(raises(true, &sword, &shield));
-        assert_eq!(usable_off_hand(true, Some(&shield)), Some(&shield));
-        assert_eq!(usable_off_hand(true, Some(&torch)), None);
-        assert_eq!(usable_off_hand(false, Some(&torch)), Some(&torch));
+        assert!(raises(true, &sword, &shield, &stone));
+        let growing = facts_at(crate::mob_uses::MobFacts { tethered: true, product_ready: false, ..crate::mob_uses::MobFacts::of(MobType::Sheep) });
+        assert!(!raises(false, &shears, &shield, &growing), "a Mirror seat takes the Lead off with its off-hand");
+        assert!(raises(true, &shears, &shield, &growing), "a Strict seat cannot: the shears refuse and the shield raises");
+        assert!(!raises(true, &shield, &shears, &growing), "a shield main takes the Lead off on a Strict seat too");
+        assert_eq!(shield_raises(Some(&shears), Some(&shield), &growing), raises(false, &shears, &shield, &growing));
     }
 
     #[test]
