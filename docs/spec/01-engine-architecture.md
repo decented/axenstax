@@ -560,28 +560,40 @@ so desktop and Android cannot drift. Tests are library tests: `cargo test --lib`
 - **No gamepads.** gilrs has no Android backend; `GamepadSystem` holds `Option<Gilrs>` and a missing backend degrades to "no gamepads" (this also removed a latent desktop panic).
 - **Link flag.** oboe (via cpal) compiles C++ and cargo-ndk omits libc++abi, so every Android build needs `RUSTFLAGS=-Clink-arg=-lc++abi` (set by `build-apk.sh`; `.cargo/config.toml` is gitignored).
 - **Touch, Back, surface loss** — see Spec 05 "Touch platforms + Android" and Spec 03 §1.7.
-- **The process ends when the activity is destroyed (2026-11-14).** winit builds one
+- **The process ends when the game ends (2026-11-14).** winit builds one
   event loop per process (`RecreationAttempt` the second time), and an Android
   process outlives its activity: Back at the lobby used to finish the activity, keep
   the process cached, and the next launch's second `android_main` panicked into a
-  permanent blank splash. Now every launch is a cold start. `AxenstaxActivity.onDestroy`
-  raises a volatile flag, waits (at most 12 s: the save plus the exit function's 10 s
-  handover grace) for the game to report it has ended, then
-  `Process.killProcess` (SIGKILL: no atexit handlers or C++ static destructors racing
-  the audio, GPU and network threads), **before** `super.onDestroy()`. On the native
-  side `drive_event_loop` runs `App` inside `android_lifecycle::AndroidShell`, which
-  forwards every winit call and, at most every 250 ms in `about_to_wait`, reads the
-  flag; when it is up it runs the one exit function `GameState::exit_app` (a live own
-  world is saved like Save & Quit; a failed close-save is tried once more, then quits
-  keeping the autosave) and ends the loop (`android_lifecycle::on_destroy_signal`,
-  unit-tested). `android_main` reports "ended" from a drop guard after the loop
-  returned and the game state dropped, or while a panic unwinds. Why not after
-  `super.onDestroy()`: android-activity 0.6's `on_destroy` waits for `android_main` to
-  return, but winit 0.30 ignores `MainEvent::Destroy` (it logs a TODO), and
-  `NativeActivity.onDestroy` first tears down the window and the input queue, each a
-  wait on the native loop; killing before that teardown deadlocks on neither. Home,
-  the screen turning off and a dialog on top are pause/stop/window termination or a
-  focus change, never Destroy: the flag stays down and the same process resumes.
+  permanent blank splash. Now every launch is a cold start. **The native side ends
+  the process:** `android_main`'s first local is a drop guard
+  (`android_lifecycle::EndOnDrop`), so as the function ends (the loop returned and
+  the `App` dropped, which is after the exit function's save; the event loop could not
+  be built; or a panic is unwinding) it sends SIGKILL to its own pid (`libc::kill`, the
+  signal `Process.killProcess` sends, with no JNI, so it works when JNI is what failed;
+  never `std::process::exit`, whose atexit handlers and C++ static destructors would
+  race the audio, GPU and network threads). A panic hook in `android_main` logs the
+  panic straight to logcat first, since the default hook's stderr is forwarded on
+  another thread. **The game ends** by lobby Quit or Back (the exit function, then the
+  loop ends), or by the activity's destroy flag: `AxenstaxActivity.onDestroy` sets a
+  volatile flag and goes straight on into `super.onDestroy()`; `drive_event_loop`
+  runs `App` inside `android_lifecycle::AndroidShell`, which forwards every winit call
+  and, at most every 250 ms in `about_to_wait`, reads the flag; when it is up it runs
+  the one exit function `GameState::exit_app` (a live own world is saved like Save &
+  Quit; a failed close-save is tried once more, then quits keeping the autosave) and
+  ends the loop (`android_lifecycle::on_destroy_signal`, unit-tested). **Nothing ends
+  the process on a timer**: the activity neither waits nor kills (a source test pins
+  `onDestroy` to those two statements), so a slow save is never cut short; it holds
+  the UI thread in NativeActivity's teardown for as long as it takes (an ANR risk on a
+  very slow save, accepted). Why the native side, before `android_main` returns:
+  android-activity 0.6's UI-thread callbacks each wait on the native loop (pause and
+  stop, the window and input-queue teardown, and `onDestroy`, which waits for
+  `android_main` to return), and winit 0.30 ignores `MainEvent::Destroy` (it logs a
+  TODO); once the loop has stopped, such a wait can only end with the process, so
+  ending it as soon as the game is done resolves them all without depending on the UI
+  thread reaching `onDestroy`. After `android_main` the glue would only finish the
+  activity, detach the thread, release the context and wake the UI thread. Home, the
+  screen turning off and a dialog on top are pause/stop/window termination or a focus
+  change, never Destroy: the flag stays down and the same process resumes.
   `android:configChanges` swallows every change the game cannot be affected by
   (rotation/size/density/uiMode, keyboard, navigation, touchscreen, font scale and
   weight, locale, layout direction, grammatical gender, mcc/mnc, colour mode, theme

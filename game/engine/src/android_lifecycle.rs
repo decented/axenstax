@@ -15,11 +15,14 @@
 //!   ([`end_process`]), what `Process.killProcess` sends, with no JNI, so it also works
 //!   when JNI or the activity is what failed.
 //! - **The game ends** in one of two ways. Lobby Quit or Back runs the exit function
-//!   and ends the loop. Or `AxenstaxActivity.onDestroy` raises a flag;
-//!   [`AndroidShell`] wraps the game's `App`,
+//!   and ends the loop. Or `AxenstaxActivity.onDestroy` raises a flag and carries
+//!   straight on into `super.onDestroy()`; [`AndroidShell`] wraps the game's `App`,
 //!   polls that flag, and when it is up runs the game's one exit function
 //!   (`GameState::exit_app`: a live world is saved like Save & Quit) and ends the
 //!   loop ([`on_destroy_signal`]).
+//! - **Nothing ends the process on a timer.** The activity never ends it: a slow save
+//!   holds the UI thread (in NativeActivity's teardown waits) for as long as it
+//!   takes, and the process ends when the game does.
 //!
 //! Why from the native side, before `android_main` returns: android-activity 0.6's
 //! UI-thread callbacks each wait for the native loop (`set_activity_state` for
@@ -45,8 +48,8 @@ use std::time::Instant;
 use winit::application::ApplicationHandler;
 
 /// How often the shell asks the activity whether it is being destroyed. One
-/// cheap JNI read; a quarter second is quick enough against the activity's
-/// bounded wait, which covers it plus the save.
+/// cheap JNI read; the UI thread sits in NativeActivity's teardown until the
+/// game ends, so a quarter second adds little to that.
 pub(crate) const DESTROY_POLL: Duration = Duration::from_millis(250);
 
 /// What the shell does after a look at the activity.
@@ -287,6 +290,73 @@ mod tests {
         }));
         assert!(unwound.is_err());
         assert_eq!(*log.borrow(), ["game state dropped", "process ends"]);
+    }
+
+    /// The activity's Java with its comments taken out, so prose can't satisfy or
+    /// break the checks below.
+    fn activity_code() -> String {
+        let src = include_str!("../../../tools/packaging/android/java/com/axenstax/game/AxenstaxActivity.java");
+        let mut code = String::new();
+        let mut rest = src;
+        loop {
+            let line = rest.find("//");
+            let block = rest.find("/*");
+            match (line, block) {
+                (None, None) => {
+                    code.push_str(rest);
+                    return code;
+                }
+                (Some(l), b) if b.is_none_or(|b| l < b) => {
+                    code.push_str(&rest[..l]);
+                    rest = rest[l..].find('\n').map_or("", |n| &rest[l + n..]);
+                }
+                (_, Some(b)) => {
+                    code.push_str(&rest[..b]);
+                    rest = rest[b..].find("*/").map_or("", |e| &rest[b + e + 2..]);
+                }
+                (Some(_), None) => unreachable!(),
+            }
+        }
+    }
+
+    /// The statements of the method whose body follows `signature`.
+    fn method_statements(code: &str, signature: &str) -> Vec<String> {
+        let at = code.find(signature).unwrap_or_else(|| panic!("no `{signature}` in the activity"));
+        let open = at + code[at..].find('{').expect("a method body");
+        let mut depth = 0;
+        for (i, c) in code[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return code[open + 1..open + i]
+                            .split(';')
+                            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("`{signature}` never closes");
+    }
+
+    #[test]
+    fn the_activity_raises_the_flag_and_never_ends_the_process_on_a_timer() {
+        // Pinned here because the Java has no tests of its own. onDestroy says the
+        // activity is going and carries on: no wait, no timer, no kill. The process
+        // ends only from `EndOnDrop`, after the game has ended, so a slow save is
+        // never cut short.
+        let code = activity_code();
+        assert_eq!(
+            method_statements(&code, "protected void onDestroy()"),
+            ["destroying = true", "super.onDestroy()"]
+        );
+        for never in ["killProcess", "sendSignal", "System.exit", "Runtime.getRuntime", ".wait("] {
+            assert!(!code.contains(never), "AxenstaxActivity must not use `{never}`");
+        }
     }
 
     #[test]

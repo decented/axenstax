@@ -3557,7 +3557,8 @@ fn drive_event_loop(event_loop: EventLoop<()>, local_routing: crate::local_routi
 ///    start. The drop guard below ends the process (SIGKILL) as this function
 ///    ends: after the loop returned and the game state dropped, so after the
 ///    exit function's save (lobby Quit or Back, or the activity's destroy flag),
-///    or while a panic unwinds. See `android_lifecycle.rs`.
+///    or while a panic unwinds. Nothing ends it on a timer. See
+///    `android_lifecycle.rs`.
 ///
 /// `unsafe(no_mangle)`: edition 2024 classes symbol-affecting attributes as
 /// unsafe (we assert the exported name collides with nothing in the link).
