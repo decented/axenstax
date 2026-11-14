@@ -192,11 +192,18 @@ pub fn guarding(main: Option<&crate::item::ItemStack>, off: Option<&crate::item:
 
 /// Where the shield a wear is owed against is NOW, for both copies of a joiner's
 /// window: a block named the shield by its `hand` (the main hand names hotbar slot
-/// `slot`) and the `durability` it had, and an F swap may have moved it since. The
-/// shield with exactly that durability wins (the named hand's place first, then the
-/// other), so two shields never swap bills; failing that, the shared hand-aware
+/// `slot`) and the `durability` it had, and a swap or a window move may have moved
+/// it since. The shield with exactly that durability wins, searched across EVERY
+/// eligible place (the named hand's place, the other hand's, then the whole
+/// inventory), so a shield moved to another slot is still the one that pays and a
+/// spare that took its place does not; failing that, the shared hand-aware
 /// resolution a swing's wear uses ([`crate::joiner_actions::where_now_hand`]) finds a
 /// shield by kind (it is single-tier), the named hand's place first.
+///
+/// Shields of equal durability are interchangeable: when two hold the same value
+/// the first found in that order pays, and both copies of the window find the same
+/// one (the one rule), so which of two identical shields pays is not a defect and no
+/// lineage is tracked for it.
 pub fn locate(
     inventory: &crate::inventory::Inventory,
     offhand: &Option<crate::item::ItemStack>,
@@ -213,7 +220,11 @@ pub fn locate(
         HeldAt::Slot(i) => inventory.slot(i),
         HeldAt::Offhand => offhand.as_ref(),
     };
-    if let Some(at) = places.into_iter().find(|&at| shield_durability(stack(at)) == Some(durability)) {
+    if let Some(at) = places
+        .into_iter()
+        .chain((0..36).map(HeldAt::Slot))
+        .find(|&at| shield_durability(stack(at)) == Some(durability))
+    {
         return Some(at);
     }
     let any = Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Shield, crate::crafting::ToolMaterial::Wood));

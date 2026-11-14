@@ -838,7 +838,10 @@ impl ServerPlayer {
             return None;
         }
         let owed = !self.shield_owed.is_empty();
-        let pending = self.window_events.has_waiting_shield_wear();
+        // ANY waiting event can change what the seat holds (an item frame's `Take`
+        // of its only shield, a move, a drop), not only a shield's own wear: the raw
+        // shortcut is for an empty queue.
+        let pending = self.window_events.waiting() > 0;
         if !owed && !pending {
             return crate::shield::guarding(self.inventory.hotbar_slot(self.hotbar_slot), self.offhand.as_ref());
         }
@@ -856,6 +859,12 @@ impl ServerPlayer {
     /// server's copy with the durability it effectively has. No shield there means
     /// no protection, whatever the flag.
     pub fn shield_guard(&self) -> Option<crate::shield::Guard> {
+        // The CURRENT latch too: a release already processed takes effect for every
+        // damage phase that runs after it, though the tick's raise count was taken
+        // earlier (a lent host drains its inputs after its early blasts).
+        if !self.shield_latch {
+            return None;
+        }
         let (hand, durability) = self.effective_shield()?;
         Some(crate::shield::Guard {
             victim: self.player.pos,
