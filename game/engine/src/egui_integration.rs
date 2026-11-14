@@ -427,6 +427,9 @@ pub(crate) fn configure_style(ctx: &egui::Context) {
     configure_style_for(ctx, cfg!(target_os = "android"));
 }
 
+/// How far a finger may slide during a tap, in points, before it is a drag.
+const TOUCH_MAX_CLICK_DIST: f32 = 10.0;
+
 /// [`configure_style`] with the touch sizing chosen by the caller, so a headless test can
 /// draw a menu exactly as the phone does (thumb-sized rows and spacing) on a Linux host.
 pub(crate) fn configure_style_for(ctx: &egui::Context, touch: bool) {
@@ -486,6 +489,12 @@ pub(crate) fn configure_style_for(ctx: &egui::Context, touch: bool) {
         // unconditionally: the 2026-05-21 playtest showed kids read a
         // clipped view as "that's all there is" rather than "scroll me".
         style.spacing.scroll.floating = false;
+        // egui's labels sense drags (to select their text), so a vertical drag that began on a
+        // label was the label's, and the menu behind it did not scroll. A phone selects no text.
+        style.interaction.selectable_labels = false;
+        // A fingertip drifts while it taps: egui's 6 points (a mouse's) made a tap that slid
+        // a few points a drag, and a drag on an inventory slot is not a tap.
+        ctx.options_mut(|o| o.input_options.max_click_dist = TOUCH_MAX_CLICK_DIST);
     }
 
     ctx.set_global_style(style);

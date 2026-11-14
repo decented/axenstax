@@ -604,7 +604,7 @@ fn a_horizontal_drag_on_a_slider_moves_it_and_does_not_scroll() {
         let before = rig.gfx.render_distance;
         let (x, y) = (rail_x(&rig, 10.0), row_y(&rig, "Render distance"));
         let y0 = rig.top("Render distance");
-        rig.play(touch_events::drag(egui::pos2(x, y), egui::pos2(x + 80.0, y), 8));
+        rig.play(touch_events::drag(egui::pos2(x, y), egui::pos2(x + 140.0, y), 8));
         assert!(rig.gfx.render_distance > before, "a horizontal drag did not raise Render distance at {size:?}: {before} -> {}", rig.gfx.render_distance);
         assert!(rig.changed_seen, "a horizontal drag on a slider was not reported as a change at {size:?}");
         assert!((rig.top("Render distance") - y0).abs() < 1.0, "a horizontal drag on a slider scrolled Settings at {size:?}");

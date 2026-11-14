@@ -2938,6 +2938,108 @@ fn dialog_is_compact(ctx: &egui::Context) -> bool {
     cfg!(target_os = "android") || ctx.content_rect().height() < 620.0
 }
 
+/// How far a finger may travel after landing on a slider before it is a drag, in points.
+const DIAL_TOUCH_SLOP: f32 = 8.0;
+
+#[derive(Clone, Copy, PartialEq)]
+enum DialGesture {
+    /// The finger has not moved far enough to say what it means.
+    Undecided,
+    /// Mostly vertical: the finger is scrolling the menu, and the slider keeps its value.
+    Scroll,
+    /// Mostly horizontal: the finger is moving the slider.
+    Dial,
+}
+
+/// One finger on one slider.
+#[derive(Clone, Copy)]
+struct DialPress {
+    gesture: DialGesture,
+    /// Where the finger landed.
+    origin: egui::Pos2,
+    /// The slider's value before the finger landed.
+    start: f64,
+    /// The value the finger's touch point asks for (what a plain tap sets).
+    asked: f64,
+    /// How far the menu has been scrolled by this finger so far.
+    scrolled: f32,
+}
+
+/// A slider that a finger can scroll past. On a touch screen a vertical drag that starts on a
+/// slider scrolls the menu and leaves the value alone; only a mostly horizontal drag moves it
+/// (a stock `egui::Slider` takes every drag that starts on it, so a thumb could not scroll a
+/// Settings panel made of sliders without changing them). A tap still sets the slider to where
+/// it landed. Mouse input is not touched. Returns whether the value changed.
+pub(crate) fn touch_slider<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &mut N,
+    make: impl for<'a> FnOnce(&'a mut N) -> egui::Slider<'a>,
+) -> bool {
+    let key = egui::Id::new(("touch-slider", ui.next_auto_id()));
+    let rest_key = key.with("rest");
+    let response = ui.add(make(&mut *value));
+    let mut changed = response.changed();
+    let ctx = ui.ctx().clone();
+    let down = response.is_pointer_button_down_on();
+    let mut press: Option<DialPress> = ctx.data(|d| d.get_temp(key));
+    if press.is_none() && down && ctx.input(|i| i.any_touches()) {
+        let origin = ctx.input(|i| i.pointer.press_origin().or(i.pointer.latest_pos())).unwrap_or_default();
+        // The value as it stood before this press moved the slider.
+        let start = ctx.data(|d| d.get_temp::<f64>(rest_key)).unwrap_or_else(|| value.to_f64());
+        press = Some(DialPress { gesture: DialGesture::Undecided, origin, start, asked: value.to_f64(), scrolled: 0.0 });
+    }
+    let Some(mut p) = press else {
+        if !down {
+            ctx.data_mut(|d| d.insert_temp(rest_key, value.to_f64()));
+        }
+        return changed;
+    };
+    if down {
+        if let Some(now) = ctx.input(|i| i.pointer.latest_pos()) {
+            let moved = now - p.origin;
+            if p.gesture == DialGesture::Undecided && moved.length() >= DIAL_TOUCH_SLOP {
+                p.gesture = if moved.y.abs() > moved.x.abs() { DialGesture::Scroll } else { DialGesture::Dial };
+            }
+            if p.gesture == DialGesture::Scroll {
+                let step = moved.y - p.scrolled;
+                ui.scroll_with_delta_animation(egui::vec2(0.0, step), egui::style::ScrollAnimation::none());
+                p.scrolled = moved.y;
+            }
+        }
+        match p.gesture {
+            DialGesture::Undecided => {
+                p.asked = value.to_f64();
+                *value = N::from_f64(p.start);
+                changed = false;
+            }
+            DialGesture::Scroll => {
+                *value = N::from_f64(p.start);
+                changed = false;
+            }
+            DialGesture::Dial => {}
+        }
+        ctx.data_mut(|d| d.insert_temp(key, p));
+    } else {
+        // The finger lifted. A press that never moved far was a tap: it sets the slider now.
+        match p.gesture {
+            DialGesture::Undecided => {
+                *value = N::from_f64(p.asked);
+                changed = p.asked != p.start;
+            }
+            DialGesture::Scroll => {
+                *value = N::from_f64(p.start);
+                changed = false;
+            }
+            DialGesture::Dial => {}
+        }
+        ctx.data_mut(|d| {
+            d.remove::<DialPress>(key);
+            d.insert_temp(rest_key, value.to_f64());
+        });
+    }
+    changed
+}
+
 fn draw_dialog_frame(ctx: &egui::Context, title: &str, title_color: egui::Color32, border_color: egui::Color32, inner: impl FnOnce(&mut egui::Ui) -> DialogResult) -> DialogResult {
     let mut result = DialogResult::Update(String::new(), String::new());
 
@@ -3204,7 +3306,7 @@ fn draw_create_dialog(
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new("WATER DEPTH (blocks)").size(11.0).color(egui::Color32::from_rgb(136, 136, 153)).strong());
                 ui.add_space(4.0);
-                ui.add(egui::Slider::new(&mut water_depth_buf, 1..=8));
+                touch_slider(ui, &mut water_depth_buf, |v| egui::Slider::new(v, 1..=8));
             }
 
             // Time of day
@@ -4832,9 +4934,20 @@ pub fn version_line() -> String {
     format!("AxeNStax v{}", env!("CARGO_PKG_VERSION"))
 }
 
-/// What a compact Settings Window spends on everything but its scroll area: its title bar,
-/// frame, the pinned Back button and the margin to the screen edges.
-const SETTINGS_COMPACT_CHROME: f32 = 150.0;
+/// A phone's Settings window sits this far from every screen edge, in points...
+const SETTINGS_PHONE_EDGE: f32 = 8.0;
+/// ...is no wider than this...
+const SETTINGS_PHONE_MAX_WIDTH: f32 = 760.0;
+/// ...spends this much height on everything but its scroll area (its frame, the header row
+/// with the title and the pinned Back, and the gaps), so the scroll area takes the rest...
+const SETTINGS_PHONE_CHROME: f32 = 78.0;
+/// ...and the Window's own frame is this much wider than the content it holds.
+const SETTINGS_PHONE_FRAME_WIDTH: f32 = 14.0;
+/// Its text is this much larger than a desktop panel's, and its sliders this wide.
+const SETTINGS_PHONE_TEXT_SCALE: f32 = 1.2;
+const SETTINGS_PHONE_SLIDER_WIDTH: f32 = 180.0;
+/// ...on a screen at least this wide (in points).
+const SETTINGS_PHONE_ROOMY_WIDTH: f32 = 560.0;
 
 /// Draw the Settings panel (graphics, chat, sound, camera). Mutates `gfx` in place and returns
 /// `Changed` when any dial/preset moved (caller applies live + persists), or
@@ -4860,27 +4973,62 @@ pub fn draw_settings_panel(
     let mut changed = false;
     let mut pack_changed = false;
 
-    // On a compact (phone) screen the dials sit in a scroll area, capped so the Window with
-    // its title and the pinned Back button fits the screen; Back stays outside the scroll
-    // area, so it is always reachable. A tall window keeps the panel as it was.
+    // On a compact (phone) screen the panel takes nearly the whole screen: a header row with the
+    // title and the pinned Back (so it is always reachable), and under it the dials in a scroll
+    // area that takes the rest of the height, in larger text. A thumb drags it from anywhere,
+    // sliders included (see `touch_slider`). A tall window keeps the panel as it was.
     let compact = dialog_is_compact(ctx);
-    // Inside the TV-safe area (home page overhaul §2), so the pinned Back is on screen.
-    let settings_scroll_h = (crate::ui_safe_area::rect(ctx).height() - SETTINGS_COMPACT_CHROME).max(120.0);
+    let content = ctx.content_rect();
+    let phone_width = (content.width() - 2.0 * SETTINGS_PHONE_EDGE).min(SETTINGS_PHONE_MAX_WIDTH);
+    let settings_scroll_h = (content.height() - 2.0 * SETTINGS_PHONE_EDGE - SETTINGS_PHONE_CHROME).max(120.0);
+    // Larger text and wider sliders need the room of a landscape phone; a portrait phone's
+    // rows (the frame-limit buttons, a slider with its label) would not fit beside them.
+    let roomy = compact && content.width() >= SETTINGS_PHONE_ROOMY_WIDTH;
+    let ts = if roomy { SETTINGS_PHONE_TEXT_SCALE } else { 1.0 };
 
-    egui::Window::new("Settings")
-        .max_width(crate::ui_safe_area::rect(ctx).width() - 24.0)
+    let window = egui::Window::new("Settings")
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.set_min_width(340.0);
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
+    let window = if compact {
+        window.title_bar(false).movable(false).max_width(phone_width)
+    } else {
+        // Inside the TV-safe area (home page overhaul §2).
+        window.max_width(crate::ui_safe_area::rect(ctx).width() - 24.0)
+    };
+    window.show(ctx, |ui| {
+            if compact {
+                ui.set_min_width(phone_width - SETTINGS_PHONE_FRAME_WIDTH);
+                for font in ui.style_mut().text_styles.values_mut() {
+                    font.size *= ts;
+                }
+                if roomy {
+                    ui.spacing_mut().slider_width = SETTINGS_PHONE_SLIDER_WIDTH;
+                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Settings").size(22.0 * ts).color(TITLE_COLOR).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let back = egui::Button::new(egui::RichText::new("Back").size(15.0 * ts).color(DIM_TEXT))
+                            .min_size(egui::vec2(110.0, 44.0))
+                            .fill(PANEL_BG)
+                            .corner_radius(egui::CornerRadius::same(4))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(50, 50, 60)));
+                        if ui.add(back).clicked() {
+                            action = SettingsPanelAction::Back;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+            } else {
+                ui.set_min_width(340.0);
+            }
 
             let mut settings_body = |ui: &mut egui::Ui| {
             // Preset row — highlight the derived current preset.
             let current = gfx.preset();
             ui.label(
                 egui::RichText::new(format!("Preset: {}", current.label()))
-                    .size(15.0)
+                    .size(15.0 * ts)
                     .color(TITLE_COLOR),
             );
             ui.add_space(4.0);
@@ -4894,7 +5042,7 @@ pub fn draw_settings_panel(
                     };
                     let btn = egui::Button::new(
                         egui::RichText::new(p.label())
-                            .size(13.0)
+                            .size(13.0 * ts)
                             .color(if selected { ACTION_BLUE } else { TEXT_COLOR }),
                     )
                     .min_size(egui::vec2(58.0, 32.0))
@@ -4923,7 +5071,7 @@ pub fn draw_settings_panel(
                 let mut sel = crate::texture_registry::active_pack_name();
                 let before = sel.clone();
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Texture pack").size(13.0).color(TEXT_COLOR));
+                    ui.label(egui::RichText::new("Texture pack").size(13.0 * ts).color(TEXT_COLOR));
                     egui::ComboBox::from_id_salt("texture_pack_combo")
                         .selected_text(sel.clone())
                         .show_ui(ui, |ui| {
@@ -4953,7 +5101,7 @@ pub fn draw_settings_panel(
                 let mut sel = crate::texture_packs_web::saved_selection();
                 let before = sel.clone();
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Texture pack").size(13.0).color(TEXT_COLOR));
+                    ui.label(egui::RichText::new("Texture pack").size(13.0 * ts).color(TEXT_COLOR));
                     egui::ComboBox::from_id_salt("texture_pack_combo_web")
                         .selected_text(sel.clone())
                         .show_ui(ui, |ui| {
@@ -4971,80 +5119,44 @@ pub fn draw_settings_panel(
             }
 
             // Individual dials. Touching any flips the preset to Custom.
-            if ui
-                .add(
-                    egui::Slider::new(
-                        &mut gfx.render_distance,
-                        RENDER_DISTANCE_MIN..=RENDER_DISTANCE_MAX,
-                    )
-                    .text("Render distance"),
-                )
-                .changed()
+            if touch_slider(ui, &mut gfx.render_distance, |v| egui::Slider::new(v, RENDER_DISTANCE_MIN..=RENDER_DISTANCE_MAX).text("Render distance"))
             {
                 changed = true;
             }
-            if ui
-                .add(
-                    egui::Slider::new(&mut gfx.render_scale, RENDER_SCALE_MIN..=RENDER_SCALE_MAX)
-                        .fixed_decimals(2)
-                        .text("Render scale"),
-                )
-                .changed()
+            if touch_slider(ui, &mut gfx.render_scale, |v| egui::Slider::new(v, RENDER_SCALE_MIN..=RENDER_SCALE_MAX).fixed_decimals(2)
+                        .text("Render scale"))
             {
                 changed = true;
             }
-            if ui
-                .add(
-                    egui::Slider::new(&mut gfx.fov_y, FOV_MIN..=FOV_MAX)
-                        .fixed_decimals(0)
-                        .text("Field of view"),
-                )
-                .changed()
+            if touch_slider(ui, &mut gfx.fov_y, |v| egui::Slider::new(v, FOV_MIN..=FOV_MAX).fixed_decimals(0)
+                        .text("Field of view"))
             {
                 changed = true;
             }
             // #44 — hold-to-zoom (C) field of view. Its own narrow range, below
             // the personal-FOV floor.
-            if ui
-                .add(
-                    egui::Slider::new(&mut gfx.zoom_fov, ZOOM_FOV_MIN..=ZOOM_FOV_MAX)
-                        .fixed_decimals(0)
-                        .text("Zoom field of view (hold C)"),
-                )
-                .changed()
+            if touch_slider(ui, &mut gfx.zoom_fov, |v| egui::Slider::new(v, ZOOM_FOV_MIN..=ZOOM_FOV_MAX).fixed_decimals(0)
+                        .text("Zoom field of view (hold C)"))
             {
                 changed = true;
             }
-            if ui
-                .add(
-                    egui::Slider::new(
-                        &mut gfx.mouse_sensitivity,
-                        SENSITIVITY_MIN..=SENSITIVITY_MAX,
-                    )
-                    .fixed_decimals(4)
-                    .text("Mouse sensitivity"),
-                )
-                .changed()
+            if touch_slider(ui, &mut gfx.mouse_sensitivity, |v| egui::Slider::new(v, SENSITIVITY_MIN..=SENSITIVITY_MAX).fixed_decimals(4)
+                    .text("Mouse sensitivity"))
             {
                 changed = true;
             }
             // Brightness — player-side answer to "it is too dark". Neutral at 1.0;
             // higher lifts shadows (gamma), lower darkens. Personal pref (doesn't
             // flip the preset). Applied live via the camera uniform.
-            if ui
-                .add(
-                    egui::Slider::new(&mut gfx.brightness, BRIGHTNESS_MIN..=BRIGHTNESS_MAX)
-                        .fixed_decimals(2)
-                        .text("Brightness"),
-                )
-                .changed()
+            if touch_slider(ui, &mut gfx.brightness, |v| egui::Slider::new(v, BRIGHTNESS_MIN..=BRIGHTNESS_MAX).fixed_decimals(2)
+                        .text("Brightness"))
             {
                 changed = true;
             }
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Frame limit").size(13.0).color(TEXT_COLOR));
+                ui.label(egui::RichText::new("Frame limit").size(13.0 * ts).color(TEXT_COLOR));
                 for (fl, label) in [
                     (FrameLimit::VSync, "VSync"),
                     (FrameLimit::Cap(30), "30"),
@@ -5062,7 +5174,7 @@ pub fn draw_settings_panel(
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Particles").size(13.0).color(TEXT_COLOR));
+                ui.label(egui::RichText::new("Particles").size(13.0 * ts).color(TEXT_COLOR));
                 for (pl, label) in [
                     (ParticleLevel::Off, "Off"),
                     (ParticleLevel::Reduced, "Reduced"),
@@ -5121,7 +5233,7 @@ pub fn draw_settings_panel(
                 changed = true;
             }
             if let Some(note) = state.governor_note.as_deref() {
-                ui.label(egui::RichText::new(note).size(11.0).color(SUBTITLE_COLOR));
+                ui.label(egui::RichText::new(note).size(11.0 * ts).color(SUBTITLE_COLOR));
             }
             // #44 — make the F3 debug overlay discoverable for players who don't
             // know the key. This is the on-load default; F3 still toggles live.
@@ -5155,13 +5267,8 @@ pub fn draw_settings_panel(
                 changed = true;
             }
             if gfx.minimap_enabled
-                && ui
-                    .add(
-                        egui::Slider::new(&mut gfx.minimap_zoom, MINIMAP_ZOOM_MIN..=MINIMAP_ZOOM_MAX)
-                            .fixed_decimals(1)
-                            .text("Minimap zoom (blocks/pixel)"),
-                    )
-                    .changed()
+                && touch_slider(ui, &mut gfx.minimap_zoom, |v| egui::Slider::new(v, MINIMAP_ZOOM_MIN..=MINIMAP_ZOOM_MAX).fixed_decimals(1)
+                            .text("Minimap zoom (blocks/pixel)"))
             {
                 changed = true;
             }
@@ -5182,23 +5289,15 @@ pub fn draw_settings_panel(
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new("Chat")
-                    .size(14.0)
+                    .size(14.0 * ts)
                     .color(TITLE_COLOR),
             );
             ui.add_space(4.0);
             let mut chat_pct = gfx.chat_text_scale * 100.0;
-            if ui
-                .add(
-                    egui::Slider::new(
-                        &mut chat_pct,
-                        (CHAT_TEXT_SCALE_MIN * 100.0)..=(CHAT_TEXT_SCALE_MAX * 100.0),
-                    )
-                    .step_by(f64::from(CHAT_TEXT_SCALE_STEP * 100.0))
+            if touch_slider(ui, &mut chat_pct, |v| egui::Slider::new(v, (CHAT_TEXT_SCALE_MIN * 100.0)..=(CHAT_TEXT_SCALE_MAX * 100.0)).step_by(f64::from(CHAT_TEXT_SCALE_STEP * 100.0))
                     .fixed_decimals(0)
                     .suffix("%")
-                    .text("Chat text size"),
-                )
-                .changed()
+                    .text("Chat text size"))
             {
                 gfx.chat_text_scale = (chat_pct / 100.0).clamp(CHAT_TEXT_SCALE_MIN, CHAT_TEXT_SCALE_MAX);
                 changed = true;
@@ -5217,19 +5316,14 @@ pub fn draw_settings_panel(
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new("Sound")
-                    .size(14.0)
+                    .size(14.0 * ts)
                     .color(TITLE_COLOR),
             );
             ui.add_space(4.0);
             let mut volume_pct = gfx.master_volume * 100.0;
-            if ui
-                .add(
-                    egui::Slider::new(&mut volume_pct, 0.0..=100.0)
-                        .fixed_decimals(0)
+            if touch_slider(ui, &mut volume_pct, |v| egui::Slider::new(v, 0.0..=100.0).fixed_decimals(0)
                         .suffix("%")
-                        .text("Volume"),
-                )
-                .changed()
+                        .text("Volume"))
             {
                 gfx.master_volume = (volume_pct / 100.0)
                     .clamp(MASTER_VOLUME_MIN, MASTER_VOLUME_MAX);
@@ -5241,14 +5335,9 @@ pub fn draw_settings_panel(
             // Thunder only: on top of Volume and Mute. Read when each rumble
             // plays, so it applies live with no engine call.
             let mut thunder_pct = gfx.thunder_volume * 100.0;
-            if ui
-                .add(
-                    egui::Slider::new(&mut thunder_pct, 0.0..=100.0)
-                        .fixed_decimals(0)
+            if touch_slider(ui, &mut thunder_pct, |v| egui::Slider::new(v, 0.0..=100.0).fixed_decimals(0)
                         .suffix("%")
-                        .text("Thunder"),
-                )
-                .changed()
+                        .text("Thunder"))
             {
                 gfx.thunder_volume = (thunder_pct / 100.0)
                     .clamp(THUNDER_VOLUME_MIN, THUNDER_VOLUME_MAX);
@@ -5262,17 +5351,12 @@ pub fn draw_settings_panel(
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new("Third-person camera")
-                    .size(14.0)
+                    .size(14.0 * ts)
                     .color(TITLE_COLOR),
             );
             ui.add_space(4.0);
-            if ui
-                .add(
-                    egui::Slider::new(&mut gfx.third_person_distance, TP_DISTANCE_MIN..=TP_DISTANCE_MAX)
-                        .fixed_decimals(2)
-                        .text("Camera distance"),
-                )
-                .changed()
+            if touch_slider(ui, &mut gfx.third_person_distance, |v| egui::Slider::new(v, TP_DISTANCE_MIN..=TP_DISTANCE_MAX).fixed_decimals(2)
+                        .text("Camera distance"))
             {
                 changed = true;
             }
@@ -5289,42 +5373,18 @@ pub fn draw_settings_panel(
                 changed = true;
             }
             if gfx.third_person_freelook {
-                if ui
-                    .add(
-                        egui::Slider::new(
-                            &mut gfx.freelook_sensitivity,
-                            FREELOOK_SENS_MIN..=FREELOOK_SENS_MAX,
-                        )
-                        .fixed_decimals(2)
-                        .text("Free-look sensitivity"),
-                    )
-                    .changed()
+                if touch_slider(ui, &mut gfx.freelook_sensitivity, |v| egui::Slider::new(v, FREELOOK_SENS_MIN..=FREELOOK_SENS_MAX).fixed_decimals(2)
+                        .text("Free-look sensitivity"))
                 {
                     changed = true;
                 }
-                if ui
-                    .add(
-                        egui::Slider::new(
-                            &mut gfx.auto_centre_delay,
-                            AUTO_CENTRE_DELAY_MIN..=AUTO_CENTRE_DELAY_MAX,
-                        )
-                        .fixed_decimals(2)
-                        .text("Auto-centre delay"),
-                    )
-                    .changed()
+                if touch_slider(ui, &mut gfx.auto_centre_delay, |v| egui::Slider::new(v, AUTO_CENTRE_DELAY_MIN..=AUTO_CENTRE_DELAY_MAX).fixed_decimals(2)
+                        .text("Auto-centre delay"))
                 {
                     changed = true;
                 }
-                if ui
-                    .add(
-                        egui::Slider::new(
-                            &mut gfx.auto_centre_speed,
-                            AUTO_CENTRE_SPEED_MIN..=AUTO_CENTRE_SPEED_MAX,
-                        )
-                        .fixed_decimals(1)
-                        .text("Auto-centre speed"),
-                    )
-                    .changed()
+                if touch_slider(ui, &mut gfx.auto_centre_speed, |v| egui::Slider::new(v, AUTO_CENTRE_SPEED_MIN..=AUTO_CENTRE_SPEED_MAX).fixed_decimals(1)
+                        .text("Auto-centre speed"))
                 {
                     changed = true;
                 }
@@ -5335,12 +5395,12 @@ pub fn draw_settings_panel(
             #[cfg(not(target_arch = "wasm32"))]
             {
                 ui.add_space(12.0);
-                ui.label(egui::RichText::new("Online").size(15.0).strong());
+                ui.label(egui::RichText::new("Online").size(15.0 * ts).strong());
                 ui.label(
                     egui::RichText::new(
                         "The port your device listens on when you host a world for a friend.",
                     )
-                    .size(11.0)
+                    .size(11.0 * ts)
                     .color(DIM_TEXT),
                 );
                 ui.add_space(4.0);
@@ -5357,7 +5417,7 @@ pub fn draw_settings_panel(
                     }
                     ui.label(
                         egui::RichText::new("0 = pick one automatically")
-                            .size(10.0)
+                            .size(10.0 * ts)
                             .color(DIM_TEXT),
                     );
                 });
@@ -5374,7 +5434,7 @@ pub fn draw_settings_panel(
 
             // Version line.
             ui.add_space(12.0);
-            ui.label(egui::RichText::new(version_line()).size(11.0).color(DIM_TEXT));
+            ui.label(egui::RichText::new(version_line()).size(11.0 * ts).color(DIM_TEXT));
             };
             if compact {
                 // `min_scrolled_height`, as in `draw_dialog_frame`: a Window's UI may only use
@@ -5390,14 +5450,16 @@ pub fn draw_settings_panel(
                 settings_body(ui);
             }
 
-            ui.add_space(10.0);
-            let back = egui::Button::new(egui::RichText::new("Back").size(15.0).color(DIM_TEXT))
-                .min_size(egui::vec2(320.0, 36.0))
-                .fill(PANEL_BG)
-                .corner_radius(egui::CornerRadius::same(4))
-                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(50, 50, 60)));
-            if ui.add(back).clicked() {
-                action = SettingsPanelAction::Back;
+            if !compact {
+                ui.add_space(10.0);
+                let back = egui::Button::new(egui::RichText::new("Back").size(15.0).color(DIM_TEXT))
+                    .min_size(egui::vec2(320.0, 36.0))
+                    .fill(PANEL_BG)
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(50, 50, 60)));
+                if ui.add(back).clicked() {
+                    action = SettingsPanelAction::Back;
+                }
             }
         });
 

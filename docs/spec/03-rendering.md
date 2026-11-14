@@ -1927,6 +1927,46 @@ The hotbar uses translucent Deep Frontier slots and a Lantern outline for the
 selected slot. Slot geometry, viewport clipping, touch hit targets, item icons
 and survival status colours retain their existing rules.
 
+### 8.3.3 Menus on a phone: touch scrolling, sliders, and the inventory fit (2026-11-14)
+
+The 0.2.37 device test (OnePlus 8T, 2400 x 1080 at 3.0 points per pixel, so an **800 x 360 point**
+screen) could not use the inventory, the pause menu or Settings. The headless tests had said they
+fitted, for three reasons, and the rules below close each: they drew in egui's stock mouse-sized
+style (a phone's rows are 44 points tall with 8 points between them, so what fitted on screen did
+not on the phone); they scrolled with mouse-wheel events a phone never sends; and they ran at
+640 x 360 and 914 x 411, not 800 x 360. The tests now apply `egui_integration::configure_style_for(ctx, true)`
+and drive `egui_integration::touch_events` (the `Touch` event plus the emulated mouse that
+egui-winit's `on_touch` emits), per context, with no global flag.
+
+- **Touch drag scrolls every menu scroll area**, starting on a button or a label (egui hands the drag
+  to the area behind a click-only widget). A tap still presses; a finger may slide up to 10 points
+  during a tap (`max_click_dist`, set by the touch style; a mouse keeps egui's 6).
+- **A slider takes only a mostly horizontal drag.** `menu::touch_slider` wraps `egui::Slider`: a touch
+  that lands on one is undecided until it has moved 8 points; if it is then more vertical than
+  horizontal the menu scrolls under the finger and the value is put back (nothing is reported
+  changed, so nothing is saved); otherwise the slider follows the finger. A tap, which never moves
+  that far, sets the slider where it landed when the finger lifts. Mouse input is untouched.
+- **Settings on a phone** is a window 8 points from every screen edge (at most 760 wide) with a header
+  row (title, and the pinned Back on the right) and one scroll area taking the rest of the height,
+  in text 1.2 times larger and sliders 180 points wide (on a screen at least 560 wide; a portrait phone keeps stock text).
+- **The pause menu on a short, wide phone (under 540 points tall, at least 614 wide)** is two columns:
+  the buttons that leave (Resume, Save, Save and Quit, Quit Without Saving, or a Trial's buttons) on
+  the left, never scrolled, and the rest (difficulty, Stash, Controls, Settings, Your look,
+  split-screen, Switch to Creative) in a scroll area on the right that takes the screen's whole
+  height, so a thumb can drag it from anywhere. A portrait phone keeps one column: the leave
+  buttons pinned and the rest scrolling under them.
+- **The inventory window fits without scrolling** (a scroll area would fight the taps that move
+  items). `craft_ui` passes the viewport in physical pixels; the window works in points
+  (`viewport / pixels_per_point`). Where the desktop panel (600 x 650 of 48-point slots) fits, nothing
+  changes. Otherwise `craft_ui_compact::compact_plan` picks the largest slot, from 48 down to a
+  **28-point minimum**, at which the whole window fits (4 armour slots, the off-hand, the crafting grid
+  and its output, the 27-slot bag, the hotbar, and Sort, Trash and Recipe Book) in one of two
+  arrangements: crafting above the bag (a portrait phone) or crafting beside it (a landscape phone,
+  which gets 47-point slots at 800 x 360 and full 48-point ones at 914 x 411). On touch the slots sense taps, not the
+  mouse's drag paint. The carried item is drawn in points too, so it is on the screen with no finger down.
+- "stays on this computer" and its neighbours now say "device" (the Stash hints, the pause
+  menu's Stash line, the create-world dialog, the skin and port notes).
+
 ### 8.4 Resolution Independence
 
 UI scaling is handled by `egui`'s `pixels_per_point` setting:
