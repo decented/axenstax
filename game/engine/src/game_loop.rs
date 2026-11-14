@@ -4656,19 +4656,21 @@ impl super::GameState {
     /// hand, and no other use for what the crosshair is on) when the press starts, then
     /// the outcome kept until the button is released (`hands::shield_press`, the
     /// seat's [`Press`](crate::hands::Press) in `shield_press`: nothing re-asks the
-    /// target while the button stays held). A Strict seat's off-hand counts only as a
-    /// shield (`hands::usable_off_hand`: its other off-hand uses never run). Pure of
-    /// state (the caller commits the press), cheap when no shield is held.
+    /// target while the button stays held). A Strict seat's raise is chosen from its
+    /// main hand's actions only (`hands::seat_shield_raises`: no off-hand action runs
+    /// there, so none may claim the click, and a shield in either hand still raises;
+    /// execution keeps the main hand on the same seats). Pure of state (the caller
+    /// commits the press), cheap when no shield is held.
     fn shield_hold(&self, pidx: usize, intent: &PlayerIntent) -> (crate::hands::ShieldHold, crate::hands::Press) {
         let p = &self.players[pidx];
         let holding = (intent.place_block || intent.use_held) && intent.cursor_captured && !p.combat.dead;
         let (main, off) = p.hands_items();
-        let off = crate::hands::usable_off_hand(self.strict_window_connection(), off);
+        let strict = self.strict_window_connection();
         let shield_in_hand = crate::shield::is_shield(main) || crate::shield::is_shield(off);
         let prev = self.shield_press.get(&pidx).copied().unwrap_or_default();
         // The target is asked only when it can decide: the press frame.
         crate::hands::shield_press(prev, holding, shield_in_hand, || {
-            crate::hands::shield_raises(main, off, &self.use_target(pidx, intent.sneak))
+            crate::hands::seat_shield_raises(strict, main, off, &self.use_target(pidx, intent.sneak))
         })
     }
 
@@ -13798,6 +13800,8 @@ impl super::GameState {
             // packets carry the hand. A Strict seat keeps the main hand: its
             // typed actions don't carry one yet, and the server refuses an
             // off-hand claim from it rather than believe it.
+            // The raise (`shield_hold`) is chosen on a Strict seat from the main
+            // hand's actions only (`hands::seat_shield_raises`), so the two agree.
             // BRIDGE: off-hand use for Strict seats — replace when Strict seats get the off-hand use path
             let hand = if self.strict_window_connection()
                 || self.players[pidx].offhand.is_none()
