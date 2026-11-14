@@ -62,8 +62,8 @@ pub(crate) mod words {
     pub const KEEP_OFF: &str = "Keep in your Stash: Off";
     pub const KEEP_ON_UNCONFIRMED: &str = "Keep in your Stash: On…";
     pub const KEEP_ON: &str = "Keep in your Stash: On";
-    pub const KEEP_OFF_HINT: &str = "Off — this world stays on this computer. Click to start stashing it.";
-    pub const KEEP_ON_HINT: &str = "On — this world is in your Stash; open it on any computer.";
+    pub const KEEP_OFF_HINT: &str = "Off — this world stays on this device. Tap or click to start stashing it.";
+    pub const KEEP_ON_HINT: &str = "On — this world is in your Stash; open it on any device.";
     pub const KEEP_ON_UNCONFIRMED_HINT: &str =
         "On — not in your Stash yet. Save the world (with a Stash sign-in) to upload it.";
 }
@@ -163,7 +163,7 @@ fn import_menu(ui: &mut egui::Ui, state: &mut MenuState, m: &Metrics) {
         if !android
             && ui
                 .add_enabled(!busy, menu_entry(m, "Open a world file…", brand::STONE))
-                .on_hover_text("Open a single .axeworld file from anywhere on your computer")
+                .on_hover_text("Open a single .axeworld file from anywhere on your device")
                 .clicked()
         {
             state.open_file_dialog(crate::native_file_dialog::FileDialogRequest::OpenWorld);

@@ -1014,7 +1014,7 @@ impl MenuState {
                             folder_name: e.name.clone(),
                             meta: save::WorldMeta {
                                 display_name: e.name.clone(),
-                                description: "📦 In your Stash — open it on any computer".to_string(),
+                                description: "📦 In your Stash — open it on any device".to_string(),
                                 game_mode: "survival".to_string(),
                                 created_at: String::new(),
                                 icon: None,
@@ -3276,8 +3276,8 @@ fn draw_create_dialog(
         });
 
         // Stash toggle — per-world cloud save, default OFF (privacy-first).
-        // OFF keeps the world on this computer; ON makes it open on any
-        // computer (pushed to the player's Stash on save). Stored in
+        // OFF keeps the world on this device; ON makes it open on any
+        // device (pushed to the player's Stash on save). Stored in
         // WorldMeta.cloud_save. Spec: 2026-06-02-stash-opt-in-toggle-design.md
         // Native-only: web is a login-free local sandbox with no Stash — the
         // lobby nudges to the desktop app instead. On web `cloud_buf` stays at
@@ -3288,9 +3288,9 @@ fn draw_create_dialog(
             ui.label(egui::RichText::new("SAVE TO YOUR STASH").size(11.0).color(egui::Color32::from_rgb(136, 136, 153)).strong());
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(if cloud_buf {
-                    "On — open this world on any computer"
+                    "On — open this world on any device"
                 } else {
-                    "Off — this world stays on this computer"
+                    "Off — this world stays on this device"
                 }).size(11.0).color(egui::Color32::from_rgb(85, 85, 102)));
             });
             ui.add_space(4.0);
@@ -3937,7 +3937,7 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                         let stash_label = if *cloud_save {
                             "📦 Stash: ON — also saved online (tap for off)"
                         } else {
-                            "📦 Stash: OFF — only on this computer (tap for on)"
+                            "📦 Stash: OFF — only on this device (tap for on)"
                         };
                         let stash_btn = egui::Button::new(
                             egui::RichText::new(stash_label)
@@ -4551,7 +4551,7 @@ pub fn draw_skin_panel(
                         "Saved ✓"
                     } else {
                         #[cfg(not(target_arch = "wasm32"))]
-                        { "Saved on this computer ✓" }
+                        { "Saved on this device ✓" }
                         #[cfg(target_arch = "wasm32")]
                         { "Saved on this device ✓" }
                     };
@@ -5293,7 +5293,7 @@ pub fn draw_settings_panel(
                 ui.label(egui::RichText::new("Online").size(15.0).strong());
                 ui.label(
                     egui::RichText::new(
-                        "The port your computer listens on when you host a world for a friend.",
+                        "The port your device listens on when you host a world for a friend.",
                     )
                     .size(11.0)
                     .color(DIM_TEXT),
