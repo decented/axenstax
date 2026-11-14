@@ -210,6 +210,10 @@ mod text_prompt;
 // Android: AxenstaxActivity's text dialog and end-of-process handshake, over JNI.
 #[cfg(target_os = "android")]
 mod android_jni;
+// Android: the process ends once the activity is destroyed (one winit event loop
+// per process). Its decision is pure and tested on every target.
+#[cfg(any(target_os = "android", test))]
+mod android_lifecycle;
 // Online play by contact — the per-install runtime key + its persona
 // attestation. Native only (bunker signing, profile/ files).
 #[cfg(not(target_arch = "wasm32"))]
@@ -3513,13 +3517,20 @@ fn native_boot_services() {
 }
 
 /// Shared tail of every native entry point: set the control flow and hand the
-/// loop our [`App`]. Desktop and Android differ ONLY in how the `EventLoop` is
-/// constructed — Android must thread the `AndroidApp` through
-/// `with_android_app`.
+/// loop our [`App`]. Desktop and Android differ in how the `EventLoop` is
+/// constructed (Android must thread the `AndroidApp` through
+/// `with_android_app`) and in one wrapper: on Android the `App` runs inside
+/// `android_lifecycle::AndroidShell`, which ends the loop (after the exit
+/// function's save) when the activity is being destroyed.
 #[cfg(not(target_arch = "wasm32"))]
 fn drive_event_loop(event_loop: EventLoop<()>, local_routing: crate::local_routing::LocalRouting) {
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     let mut app = App::new(local_routing);
+    #[cfg(target_os = "android")]
+    event_loop
+        .run_app(&mut crate::android_lifecycle::AndroidShell::new(&mut app))
+        .unwrap();
+    #[cfg(not(target_os = "android"))]
     event_loop.run_app(&mut app).unwrap();
 }
 
@@ -3541,6 +3552,12 @@ fn drive_event_loop(event_loop: EventLoop<()>, local_routing: crate::local_routi
 ///    `self_update` is additionally gated on a running AppImage.
 /// 5. **The event loop is built from the `AndroidApp`**; `EventLoop::new()`
 ///    cannot reach the activity.
+/// 6. **The process ends with the activity.** winit builds one event loop per
+///    process, so a second `android_main` in a cached process could never
+///    start. `AxenstaxActivity.onDestroy` waits for this function to report it
+///    has ended (the drop guard below: after the loop returned and the game
+///    state dropped, or while a panic unwinds), then kills the process. See
+///    `android_lifecycle.rs`.
 ///
 /// `unsafe(no_mangle)`: edition 2024 classes symbol-affecting attributes as
 /// unsafe (we assert the exported name collides with nothing in the link).
@@ -3555,6 +3572,10 @@ pub fn android_main(app: android_activity::AndroidApp) {
             .with_tag("axenstax"),
     );
     log::info!("Axe'n'Stax {} starting on Android", env!("CARGO_PKG_VERSION"));
+
+    // Dropped last, however this function ends: tells the activity the game
+    // has ended, so its onDestroy may end the process (android_lifecycle.rs).
+    let _report_end = crate::android_lifecycle::ReportEndOnDrop;
 
     // The web build reads `navigator.maxTouchPoints`; on Android the answer is
     // simply "yes". This drives `controls_visible()`, which shows the on-screen
@@ -3580,10 +3601,17 @@ pub fn android_main(app: android_activity::AndroidApp) {
 
     native_boot_services();
 
-    let event_loop = EventLoop::builder()
-        .with_android_app(app)
-        .build()
-        .expect("failed to build Android event loop");
+    let event_loop = match EventLoop::builder().with_android_app(app).build() {
+        Ok(event_loop) => event_loop,
+        Err(e) => {
+            // `RecreationAttempt` cannot happen now the process ends with its
+            // activity. Should it, return rather than panic: the activity
+            // finishes, its onDestroy ends this process (the drop guard above
+            // reports at once) and the next launch is a cold start.
+            log::error!("failed to build Android event loop: {e}");
+            return;
+        }
+    };
     // No argument dispatch on Android: always standalone single-player.
     drive_event_loop(event_loop, crate::local_routing::LocalRouting::Standalone);
 }

@@ -560,6 +560,33 @@ so desktop and Android cannot drift. Tests are library tests: `cargo test --lib`
 - **No gamepads.** gilrs has no Android backend; `GamepadSystem` holds `Option<Gilrs>` and a missing backend degrades to "no gamepads" (this also removed a latent desktop panic).
 - **Link flag.** oboe (via cpal) compiles C++ and cargo-ndk omits libc++abi, so every Android build needs `RUSTFLAGS=-Clink-arg=-lc++abi` (set by `build-apk.sh`; `.cargo/config.toml` is gitignored).
 - **Touch, Back, surface loss** — see Spec 05 "Touch platforms + Android" and Spec 03 §1.7.
+- **The process ends when the activity is destroyed (2026-11-14).** winit builds one
+  event loop per process (`RecreationAttempt` the second time), and an Android
+  process outlives its activity: Back at the lobby used to finish the activity, keep
+  the process cached, and the next launch's second `android_main` panicked into a
+  permanent blank splash. Now every launch is a cold start. `AxenstaxActivity.onDestroy`
+  raises a volatile flag, waits (at most 12 s: the save plus the exit function's 10 s
+  handover grace) for the game to report it has ended, then
+  `Process.killProcess` (SIGKILL: no atexit handlers or C++ static destructors racing
+  the audio, GPU and network threads), **before** `super.onDestroy()`. On the native
+  side `drive_event_loop` runs `App` inside `android_lifecycle::AndroidShell`, which
+  forwards every winit call and, at most every 250 ms in `about_to_wait`, reads the
+  flag; when it is up it runs the one exit function `GameState::exit_app` (a live own
+  world is saved like Save & Quit; a failed close-save is tried once more, then quits
+  keeping the autosave) and ends the loop (`android_lifecycle::on_destroy_signal`,
+  unit-tested). `android_main` reports "ended" from a drop guard after the loop
+  returned and the game state dropped, or while a panic unwinds. Why not after
+  `super.onDestroy()`: android-activity 0.6's `on_destroy` waits for `android_main` to
+  return, but winit 0.30 ignores `MainEvent::Destroy` (it logs a TODO), and
+  `NativeActivity.onDestroy` first tears down the window and the input queue, each a
+  wait on the native loop; killing before that teardown deadlocks on neither. Home,
+  the screen turning off and a dialog on top are pause/stop/window termination or a
+  focus change, never Destroy: the flag stays down and the same process resumes.
+  `android:configChanges` swallows every change the game cannot be affected by
+  (rotation/size/density/uiMode, keyboard, navigation, touchscreen, font scale and
+  weight, locale, layout direction, grammatical gender, mcc/mnc, colour mode, theme
+  overlays via `assetsPaths`), so a hardware keyboard or a new wallpaper never
+  recreates the activity mid-game.
 
 ### 3.3 Build Commands
 

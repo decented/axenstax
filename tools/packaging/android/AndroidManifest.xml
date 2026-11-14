@@ -6,10 +6,15 @@
                               (java/com/axenstax/game/), compiled to classes.dex by
                               build-apk.sh with javac + d8. No Gradle. The game
                               itself is still libaxenstax_engine.so.
-  AxenstaxActivity          — a NativeActivity subclass whose only job is
-                              onNewIntent -> setIntent. Stock NativeActivity drops
-                              onNewIntent, so a link tapped while the game runs
-                              would leave getIntent() on the launch intent.
+  AxenstaxActivity          — a NativeActivity subclass with three jobs: onNewIntent ->
+                              setIntent (stock NativeActivity drops onNewIntent, so a
+                              link tapped while the game runs would leave getIntent()
+                              on the launch intent); the text prompt dialog that types
+                              a world name, a seed or a chat line (NativeActivity has
+                              no text-editor view, so Android ignores a soft-keyboard
+                              request); and onDestroy ends the process once the game
+                              has saved (one winit event loop per process, so every
+                              launch must be a cold start).
   launchMode="singleTask"   — one game instance: tapping an axenstax: link while the
                               game runs brings it forward and delivers onNewIntent
                               rather than starting a second copy.
@@ -27,10 +32,18 @@
   Theme.NoTitleBar.Fullscreen
                             — without it NativeActivity gets a title bar and
                               status bar over the game.
-  configChanges             — swallow rotation/resize/keyboard changes instead
-                              of letting Android destroy and recreate the
-                              Activity, which would tear down the wgpu surface
-                              and the whole world with it.
+  configChanges             — swallow every configuration change instead of letting
+                              Android destroy and recreate the Activity, which would
+                              tear down the wgpu surface and end the process (see
+                              onDestroy). The game uses no Android resources that
+                              these change (no layouts, strings or fonts; the text
+                              prompt dialog is built in code), so each is safe to
+                              swallow: rotation/resize/density/uiMode, a hardware
+                              keyboard or d-pad attached (keyboard, navigation,
+                              touchscreen), the system font size or weight, the
+                              language (locale, layoutDirection, grammaticalGender),
+                              a SIM change (mcc, mnc), the colour mode, and a new
+                              wallpaper's theme overlay (assetsPaths).
   android:icon              — Copperline launcher icon from res/ (adaptive on API 26+,
                               legacy PNG on 24-25). Regenerate with
                               `node brand/render-rasters.mjs`. res/ is compiled by
@@ -75,7 +88,7 @@
             android:label="Axe'n'Stax"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:screenOrientation="sensorLandscape"
-            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|smallestScreenSize|uiMode">
+            android:configChanges="orientation|keyboardHidden|keyboard|navigation|touchscreen|screenSize|screenLayout|density|smallestScreenSize|uiMode|fontScale|fontWeightAdjustment|locale|layoutDirection|grammaticalGender|mcc|mnc|colorMode|assetsPaths">
 
             <meta-data
                 android:name="android.app.lib_name"

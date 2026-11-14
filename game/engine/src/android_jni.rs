@@ -1,12 +1,14 @@
 //! Android only: `AxenstaxActivity`'s own methods, called over JNI: the text
-//! prompt dialog (`text_prompt.rs`'s Android backend).
+//! prompt dialog (`text_prompt.rs`'s Android backend) and the end-of-process
+//! handshake (`android_lifecycle.rs`).
 //!
 //! Every call is an instance method on the activity object android-activity hands
 //! `ndk-context`, as `android_intent.rs` reads the intent: no `FindClass` by name
 //! from this thread (it would search the system class loader, which cannot see
 //! our class) and no Java `native` methods. None of them waits for the UI thread:
-//! the dialog is posted with `runOnUiThread` and then polled, under a lock the UI
-//! thread only ever holds for a few field writes.
+//! the dialog is posted with `runOnUiThread` and then polled, the destroy flag is
+//! a volatile read, and the rest take a lock the UI thread only ever holds for a
+//! few field writes.
 #![cfg(target_os = "android")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -120,5 +122,28 @@ impl PromptBackend for ActivityPrompt {
             // never a keyboard that stays dead until restart.
             _ => PromptPoll::Gone,
         }
+    }
+}
+
+/// Whether `AxenstaxActivity.onDestroy` has started (its volatile flag). A failed
+/// read counts as "no".
+pub(crate) fn activity_destroying() -> bool {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    with_activity(&WARNED, "reading the destroy flag", |env, act| {
+        env.call_method(act, "isBeingDestroyed", "()Z", &[])?.z()
+    })
+    .unwrap_or(false)
+}
+
+/// Tell the activity the game has ended (its loop returned after the exit
+/// function's save, or it panicked): its onDestroy may end the process now.
+pub(crate) fn report_game_ended() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let told = with_activity(&WARNED, "reporting the game's end", |env, act| {
+        env.call_method(act, "reportGameEnded", "()V", &[])?;
+        Ok(())
+    });
+    if told.is_some() {
+        log::info!("Android: game ended; the activity may end the process");
     }
 }
