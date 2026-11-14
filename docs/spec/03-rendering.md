@@ -1545,7 +1545,10 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
     the pair is shifted until the board's edge nearest the centre is 0.12 NDC from it and its middle
     is at -0.10 NDC high, so it covers the lower middle of the view (at least 30% of its height)
     and the crosshair's centre +-5% stays clear at every aspect. The shift is computed per aspect (a
-    phone in portrait is narrow, so the same board is wider on screen) and scaled by the raise's
+    phone in portrait is narrow, so the same board is wider on screen); where the board is then
+    shorter than 0.64 NDC on screen (a portrait view, where its outer edge is already at the screen
+    edge and cannot grow wider) it is stretched taller about its middle, by at most 1.6x
+    (`RAISED_MIN_HEIGHT_NDC`); the shift and the stretch are scaled by the raise's
     progress (`shield_ticks / RAISE_TICKS`), so the pose eases in over the five ticks. A raised
     shield swings no hand.
   - *Third person (the self-avatar and every peer),* in the avatar's model space (arms at +-X, the

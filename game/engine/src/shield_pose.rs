@@ -40,6 +40,13 @@ pub const RAISED_ROLL_DEG: f32 = 8.0;
 pub const CENTRE_CLEAR_NDC: f32 = 0.12;
 /// First person, raised: where the board's middle sits vertically (NDC, up positive).
 pub const RAISED_CENTRE_Y_NDC: f32 = -0.10;
+/// First person, raised: the board is at least this tall on screen (NDC, 2 = the
+/// whole view; the layout spec wants 30% of the view's height, 0.60). A fixed-size
+/// board in a narrow (portrait) view is short against the view's height and cannot
+/// grow wider (its outer edge is on screen), so it is stretched upward only.
+pub const RAISED_MIN_HEIGHT_NDC: f32 = 0.64;
+/// The most the board is stretched taller to reach [`RAISED_MIN_HEIGHT_NDC`].
+const RAISED_MAX_STRETCH: f32 = 1.6;
 
 /// Third person: the board's centre on the outside of a lowered forearm, away from
 /// the arm's own centre by half the arm and a little more.
@@ -136,7 +143,19 @@ pub fn raise_first_person(arm: &mut [Vertex], shield: &mut [Vertex], side: HandS
         let mid = centre_of(&full) + shift;
         shift.y += (RAISED_CENTRE_Y_NDC - ndc_y(mid)) * tan_half * depth;
     }
+    // How much taller the full pose must be to reach the minimum height on screen.
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for v in &full {
+        let y = ndc_y(Vec3::from(v.position) + shift);
+        lo = lo.min(y);
+        hi = hi.max(y);
+    }
+    let stretch = (RAISED_MIN_HEIGHT_NDC / (hi - lo).max(1e-4)).clamp(1.0, RAISED_MAX_STRETCH);
     transform_vertices(shield, &(Mat4::from_translation(shift * t) * turn(t, c0)));
+    let (pivot_y, k) = (centre_of(shield).y, 1.0 + (stretch - 1.0) * t);
+    for v in shield.iter_mut() {
+        v.position[1] = pivot_y + (v.position[1] - pivot_y) * k;
+    }
     transform_vertices(arm, &Mat4::from_translation(shift * t));
 }
 
