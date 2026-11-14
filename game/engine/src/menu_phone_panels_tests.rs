@@ -305,15 +305,25 @@ impl PauseRig {
         }
     }
 
-    /// Reach `label` the way a thumb does: drag up from the lowest control on screen, over
-    /// whatever button or label is there, until it shows.
+    /// Reach `label` the way a thumb does: drag over whatever button or label is on screen,
+    /// up when the label is further down the menu than anything showing, down when it is
+    /// further up, until it shows.
     fn reveal_by_touch(&mut self, label: &str) {
+        let order = |l: &str| REST_LABELS.iter().position(|r| *r == l).unwrap_or_else(|| panic!("{l:?} is not a scrolling control"));
+        let target = order(label);
         for _ in 0..40 {
             if self.on_screen(label) {
                 return;
             }
-            let from = self.rest_point();
-            let to = egui::pos2(from.x, (from.y - 60.0).max(4.0));
+            let shown: Vec<usize> = REST_LABELS.iter().filter(|l| self.on_screen(l)).map(|l| order(l)).collect();
+            let down = shown.iter().min().is_some_and(|first| *first > target);
+            let from = if down {
+                // Over the highest control showing, dragging down.
+                REST_LABELS.iter().filter(|l| self.on_screen(l)).map(|l| placed(&self.output, l).unwrap().0.center()).min_by(|a, b| a.y.total_cmp(&b.y)).unwrap()
+            } else {
+                self.rest_point()
+            };
+            let to = if down { egui::pos2(from.x, (from.y + 60.0).min(self.size.y - 4.0)) } else { egui::pos2(from.x, (from.y - 60.0).max(4.0)) };
             self.play(touch_events::drag(from, to, 8));
         }
         panic!("{label:?} never scrolled into view by touch at {:?}: {:?}", self.size, texts(&self.output));
