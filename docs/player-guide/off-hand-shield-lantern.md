@@ -12,6 +12,7 @@ You have two hands. The one you use for the selected hotbar slot is your **main 
 
 - **Right-click uses your main hand first.** If your main-hand item has nothing to do with what you are pointing at, your off-hand item gets the click instead.
   - Hold a **pickaxe**, keep a **torch** in the off-hand, and right-click a block: you put the torch down without putting the pickaxe away.
+  - Hold a **shield** in the main hand and a **torch** in the off-hand, and right-click stone: the torch goes down.
   - Hold a **sword**, keep **bread** in the off-hand, and right-click when you are hungry: you eat it.
 - **Left-click always uses your main hand.** The off-hand never mines or attacks.
 - **A bow or slingshot** takes its ammo from the off-hand first, then from your bag.
@@ -35,9 +36,10 @@ P = Planks   I = Iron Ingot
 **Use it:**
 
 1. Hold the shield in either hand.
-2. **Hold right-click.** Point at open air or plain ground. If you point at a chest, a door or a mob, the click does that job instead and the shield stays down.
+2. **Hold right-click.** The shield goes up. The one time it does not is when the click has a job to do: a **chest** or a **door**, or a mob you can **do something to** (feed it, tame it, put a Lead on it, milk it, shear it, ride it, trade with it, or give your own pet a command). Then the click does that job instead and the shield stays down. An **enemy** such as a brigand, marauder or berserker is not one of those, so facing one, the shield goes up. That is the point of a shield.
 3. It starts working after a quarter of a second. The shield lifts in front of you.
-4. Let go to lower it.
+4. Once it is up, it **stays up** for as long as you hold the button, whatever you point at.
+5. Let go to lower it.
 
 **While it is up:**
 

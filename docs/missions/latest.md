@@ -283,9 +283,9 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 **Do:**
 1. **Make one.** At a workbench (3 by 3 grid) put planks, iron ingot, planks along the top; planks, planks, planks across the middle; one plank at the bottom middle. That is a Y shape. (Or `/give shield`, but make one at least once.) Test items: `/give planks 6`, `/give iron_ingot`.
 2. Hold the shield in either hand. Point at **open air or plain ground** and **hold right-click**. Count a quarter of a second (a quick "one-two"); the shield lifts in front of you.
-3. Point at a **chest or a door** and right-click: that opens or toggles it, and the shield does **not** raise.
+3. Point at a **chest or a door** and right-click: that opens or toggles it, and the shield does **not** raise. Do the same at a **sheep or cow** with wheat or a Lead in your other hand: it takes the click (feeding, or the Lead) and the shield stays down.
 4. With the shield up, **walk**, then try to sprint. Then **left-click** a block and a mob.
-5. Type `/gm s`, then `/spawn brigand`. Face it and keep the shield up while it hits you. Look at the shield's durability bar after each clack.
+5. Type `/gm s`, then `/spawn brigand`. Raise the shield while the brigand walks at you from the front: no damage, a clack. (The game has no zombies; the brigand is the enemy to use.) Keep it up while the brigand hits you, and look at the shield's durability bar after each clack. Once the shield is up, it stays up while you hold the button, even with the brigand under the crosshair.
 6. Turn so the brigand is **behind** you, with the shield still up.
 
 **Look for:**
@@ -301,12 +301,15 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 - The shield starts blocking after **0.25 seconds** (5 ticks) of right-click held. Letting go lowers it straight away.
 - It blocks hits from the front half: within 90 degrees of where you look, flat across the ground. Height does not matter.
 - It does not block lava, fire, falling, drowning or hunger.
-- A chest, a door or a mob under the crosshair always wins the right-click, so the shield stays down there.
+- Hold right-click to raise it. A chest, a door, or a mob you can actually do something to (feeding, taming, a Lead, milking, shearing, riding, trading, or a command to your own pet) takes the click instead, and the shield stays down there.
+- An enemy you cannot use anything on (a brigand, marauder or berserker) does not take the click, so facing one the shield goes up.
+- Once raised, the shield stays up while you hold the button, whatever comes under the crosshair.
+- With a shield in the main hand and a torch in the off-hand, right-clicking stone places the torch.
 - In a multiplayer game the host's game decides what the shield blocks.
 - A shield that is used up breaks and disappears.
 
 **If it does not work:**
-- Make sure you are not pointing at something with its own right-click use.
+- Make sure you are not pointing at a chest, a door, or an animal or villager you can use something on.
 - Hold the click for at least a quarter of a second before the hit.
 - Check you are in Survival (`/gm s`): in Creative, nothing hurts you.
 
