@@ -44,6 +44,7 @@ Mining/placing reach is about 5 blocks; attack reach (melee on mobs) is shorter,
 | **B** | Open **Inventory Explorer** — browse every block, tool, and material in the game with a search box. Creative: click any entry to add one to your inventory. Survival: hover to see how many you currently hold. Esc closes. |
 | **J** | Open the **Challenge Board** — in-game challenges that nudge you to try specific features. |
 | **Y** | Open the **Rig Studio** — author animated rigs in-game. Pick a skeleton (biped / quadruped / bird / fish / swaying plant), pick a **motion** (Walk, Idle, or Bounce), assign a block to each named part with the block in your hand, then **Spawn**. The rig stands in front of you and plays the motion; it saves with your world. If a part's block has a **micro-model** (a built-and-baked mini sculpture), the part is drawn as that sculpture, scaled to fit the limb, instead of a plain box. |
+| **F** | **Swap hands** — your main-hand item and your off-hand item trade places (see **[Off-hand, Shield & Lantern](off-hand-shield-lantern.md)**). On touch, tap the off-hand box left of the hotbar. |
 | **F5** | Cycle the **camera** — first-person → over-shoulder → orbit third-person → back. |
 | **H** | Toggle the objective/help panel. If no Trial is active, this shows a controls cheat-sheet instead (T/chat, F5, J, N, the empty-hand pet-follow gesture, sneak-for-breeding). |
 | **N** | Summon / dismiss Satoshi, the in-game guide. |

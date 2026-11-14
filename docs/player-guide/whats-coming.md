@@ -238,7 +238,7 @@ To prevent confusion:
   committed.
 - **Trading between villagers (Minecraft emerald economy).** Deliberately skipped — trade
   happens between PLAYERS via the Vendor Block (or via Builder commissions).
-- **Boats, crossbows, shields/off-hand, music discs, marriage/family trees, VR.** Not in /
+- **Boats, crossbows, music discs, marriage/family trees, VR.** Not in /
   not committed.
 - **Llama.** Deferred. (Wolves, Cats, Foxes and Parrots are all in — see [Wolves](wolves.md) and [Combat & Mobs](combat-and-mobs.md).)
 - **Coloured wool / dyeing live sheep.** The dyes themselves **shipped** — but dyeing a live

@@ -1534,9 +1534,8 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   the local player builds it from the real `Item`; a remote avatar from the
   `HeldWire { kind, id, tool }` of the avatar wire (`tool_type()`); an unknown or
   missing tool byte (a newer peer, a non-tool) draws the plain tier slab, never a
-  guess. `held_tool_model::parts` is an exhaustive `match`: the shield
-  (`ToolType::Shield`, off-hand plan slice 5) fails to compile there until it has
-  a shape.
+  guess. `held_tool_model::parts` is an exhaustive `match` with no wildcard, so a new
+  tool type fails to compile there until it has a shape (the shield has one, below).
 - **The shield's look and poses (off-hand plan slice 5).** `ToolType::Shield` is a board of four
   planks (the oak planks tile's light and dark texels, flat colour like every held tool box) with an
   iron rim round it and an iron boss on its +Z face, about 0.5 wide and 0.62 tall, centred on the

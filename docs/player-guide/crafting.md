@@ -73,6 +73,14 @@ Torch (1×2 → ×4)
 Co = Coal   S = Stick
 ```
 
+```
+Lantern (1×3 → ×1)
+[I ]
+[To]
+[I ]
+I = Iron Ingot   To = Torch
+```
+
 ## Tools
 
 Most tools share a pattern: a **head material** sits on a **stick handle**. Swap the head material for a higher tier — the shape stays the same.
@@ -180,7 +188,17 @@ Drafting Stamp (1×2 → ×1, Wood tier)
 I = Iron Ingot (top)   Bp = Blueprint Paper (bottom)
 ```
 
-All twelve tool types exist: **Pickaxe, Axe, Sword, Shovel, Hoe, Bow, Flint & Steel, Shears, Fishing Rod, Slingshot, Eraser, Drafting Stamp**.
+```
+Shield (3×3 → ×1)
+[P ][I ][P ]
+[P ][P ][P ]
+[  ][P ][  ]
+P = Planks   I = Iron Ingot
+```
+
+See [Off-hand, Shield & Lantern](off-hand-shield-lantern.md) for how a shield works.
+
+Besides the shield, all twelve other tool types exist: **Pickaxe, Axe, Sword, Shovel, Hoe, Bow, Flint & Steel, Shears, Fishing Rod, Slingshot, Eraser, Drafting Stamp**.
 
 ## Storage & compressed blocks
 

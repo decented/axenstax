@@ -37,6 +37,7 @@ quick first-five-minutes summary.
 - **[Wolves](wolves.md)** — the first tameable companion mob: tame with bones, sit/stand on command (follow & fight-alongside movement coming)
 - **[Nostrich](nostrich.md)** — the purple-ostrich Nostr mascot. 21-chicken-egg-equivalent eggs, valuable feathers, and a curse mechanic if you hurt one
 - **[Armour](armour.md)** — the four armour slots and what each tier does
+- **[Off-hand, Shield & Lantern](off-hand-shield-lantern.md)** — F swaps your hands, a shield blocks hits from the front, a lantern lights the dark in your hand, on the ground or hanging
 - **[Skins & the Wardrobe](cosmetics.md)** — your avatar's look: keep a wardrobe of many skins, paint your own on a 3D mannequin in the Workshop, recolour, or upload a 64×64 PNG
 - **[Food & Cooking](food-and-cooking.md)** — hunger, eating, the campfire + Furnace workstations
 - **[Farming](farming.md)** — tilled soil, crops, watering, bread

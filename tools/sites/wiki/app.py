@@ -110,6 +110,7 @@ SECTIONS = {
             {"path": "player-guide/wolves.md", "title": "Wolves", "short": "The first tameable companion — tame, follow, sit, fight alongside you"},
             {"path": "player-guide/nostrich.md", "title": "Nostrich", "short": "The purple-ostrich Nostr mascot — eggs, feathers, the Vow"},
             {"path": "player-guide/armour.md", "title": "Armour", "short": "Four slots, five tiers, damage reduction, durability"},
+            {"path": "player-guide/off-hand-shield-lantern.md", "title": "Off-hand, Shield & Lantern", "short": "F swaps hands, a shield blocks hits from the front, a lantern lights the dark"},
             {"path": "player-guide/cosmetics.md", "title": "Skins & the Wardrobe", "short": "Keep a wardrobe of skins, paint your own in the Workshop (blow up your avatar, paint it like a block), export to wear in real Minecraft, or import from a Minecraft username"},
             {"path": "player-guide/food-and-cooking.md", "title": "Food & Cooking", "short": "Hunger, food values, campfire + Furnace, baking, fire-starting"},
             {"path": "player-guide/farming.md", "title": "Farming", "short": "Grow crops, fibre and dye flowers"},
