@@ -181,7 +181,7 @@ pub struct HostOnlineState {
     pub note: Option<&'static str>,
 }
 
-/// See [`HostOnlineState`]. `attested` is "this computer already carries a
+/// See [`HostOnlineState`]. `attested` is "this device already carries a
 /// persona-signed attestation over its runtime key".
 pub fn host_online_state(signed_in: bool, attested: bool) -> HostOnlineState {
     if !signed_in {
@@ -193,7 +193,7 @@ pub fn host_online_state(signed_in: bool, attested: bool) -> HostOnlineState {
     if !attested {
         return HostOnlineState {
             enabled: true,
-            note: Some("First time: one tap on your phone links this computer to you."),
+            note: Some("First time: one tap on your phone links this device to you."),
         };
     }
     HostOnlineState {

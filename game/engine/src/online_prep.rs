@@ -24,7 +24,7 @@ use crate::nat::upnp::PortMapping;
 use crate::rendezvous::payload::Candidate;
 
 /// Shown while the phone tap is outstanding.
-pub const AWAITING_TAP: &str = "Check your phone — approve this computer to play online.";
+pub const AWAITING_TAP: &str = "Check your phone — approve this device to play online.";
 /// Shown while the socket and candidates are being worked out.
 pub const PREPARING: &str = "Getting ready to play online…";
 
@@ -54,15 +54,15 @@ pub const NOT_SIGNED_IN: &str = "Sign in with your Signet persona to play online
 /// Signed in, but the stored bunker session could not be restored, so nothing
 /// can ask the phone for the one tap.
 pub const NO_SIGNER: &str =
-    "This computer can't reach your phone signer. Sign in again, then try once more.";
+    "This device can't reach your phone signer. Sign in again, then try once more.";
 
 /// This install has never been attested at all — one phone tap fixes it.
-pub const NOT_LINKED: &str = "This computer isn't linked to your persona yet — press \
+pub const NOT_LINKED: &str = "This device isn't linked to your persona yet — press \
                               Host online again and approve it on your phone.";
 /// The attestation on this machine names somebody else. Same fix, different
 /// cause: the player has switched persona since it was minted.
 pub const PERSONA_MISMATCH: &str =
-    "This computer is linked to a different persona — press Host online to relink.";
+    "This device is linked to a different persona — press Host online to relink.";
 
 /// Whether the stored attestation actually delegates from the persona that is
 /// signed in **now**.
@@ -569,11 +569,30 @@ mod tests {
         assert_eq!(persona_link(None, &[1; 32]), Err(NOT_LINKED));
     }
 
+    /// The game runs on a phone too: no line a player reads calls the machine "this computer".
+    #[test]
+    fn no_online_line_calls_the_device_a_computer() {
+        let mut lines = vec![AWAITING_TAP.to_string(), NO_SIGNER.to_string(), NOT_LINKED.to_string(), PERSONA_MISMATCH.to_string()];
+        for attested in [false, true] {
+            lines.extend(crate::friends_ui::host_online_state(true, attested).note.map(str::to_string));
+        }
+        for kind in [std::io::ErrorKind::AddrInUse, std::io::ErrorKind::PermissionDenied] {
+            lines.push(crate::lan_host::describe_bind_error(&std::io::Error::from(kind), 4242));
+        }
+        lines.push(crate::handover::live::copy::UNLISTED_ABORT.to_string());
+        lines.push(crate::handover::live::copy::UNLISTED_IMPORT.to_string());
+        lines.push(crate::handover::live::copy::HANDOVER_ELSEWHERE.to_string());
+        for line in &lines {
+            assert!(!line.to_lowercase().contains("computer"), "a line still says computer: {line:?}");
+        }
+        assert!(lines.len() >= 9);
+    }
+
     #[test]
     fn the_mismatch_line_is_verbatim_and_says_what_to_press() {
         assert_eq!(
             PERSONA_MISMATCH,
-            "This computer is linked to a different persona — press Host online to relink."
+            "This device is linked to a different persona — press Host online to relink."
         );
         assert!(NOT_LINKED.contains("Host online"), "both lines name the same button");
     }

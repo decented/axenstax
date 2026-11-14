@@ -452,7 +452,7 @@ pub(crate) fn import_records(imports: &Path, prefix: &str) -> Vec<(PathBuf, Id)>
 /// over anyway" (it risks two live copies).
 ///
 /// CP13: an import whose receipt `ledger` doesn't list shows the
-/// "not made on this computer" line instead, as does every retired world
+/// "not made on this device" line instead, as does every retired world
 /// under `worlds_root` whose record isn't listed.
 pub fn awaiting_statuses(worlds_root: &Path, imports: &Path, ledger: &Ledger) -> Vec<String> {
     let mut lines: Vec<String> = import_receipts(imports)

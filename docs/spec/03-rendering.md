@@ -1964,6 +1964,7 @@ egui-winit's `on_touch` emits), per context, with no global flag.
   arrangements: crafting above the bag (a portrait phone) or crafting beside it (a landscape phone,
   which gets 47-point slots at 800 x 360 and full 48-point ones at 914 x 411). On touch the slots sense taps, not the
   mouse's drag paint. The carried item is drawn in points too, so it is on the screen with no finger down.
+- **Close and HUD placement.** The touch Close chip (`hud_ui::touch_close_chip_rect`, 88 x 40 points, 12 in and 8 down from the top-right) is checked by test to clear every slot and button of the inventory window at 800 x 360, 914 x 411, a portrait phone and 1280 x 800 / 1024 x 768 tablets, so the phone inventory needs no Close of its own; and every HUD panel and the item-search Explorer place in points (`ViewportPts::from_physical`, applied to the viewport's own origin too), never from the physical-pixel viewport.
 - "stays on this computer" and its neighbours now say "device" (the Stash hints, the pause
   menu's Stash line, the create-world dialog, the skin and port notes).
 

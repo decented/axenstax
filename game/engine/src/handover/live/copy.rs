@@ -114,13 +114,13 @@ pub fn awaiting_handover(npub: &str) -> String {
 /// this install's ledger doesn't list (planted, or from another computer).
 /// It is ignored: no network action, and the world stays closed.
 pub fn unlisted_world(name: &str) -> String {
-    format!("\"{name}\" holds a handover record this computer didn't make. It is ignored, and the world stays closed.")
+    format!("\"{name}\" holds a handover record this device didn't make. It is ignored, and the world stays closed.")
 }
 /// CP14b (CP13b review LOW-5): an unlisted ABORT record: the open guard
 /// ignores abort records, so the world isn't closed by it.
-pub const UNLISTED_ABORT: &str = "A handover note on this computer can't be checked. It is ignored; the world is unaffected.";
+pub const UNLISTED_ABORT: &str = "A handover note on this device can't be checked. It is ignored; the world is unaffected.";
 /// CP13: the same for an incoming world's receipt.
-pub const UNLISTED_IMPORT: &str = "An incoming world holds a handover record this computer didn't make. It is ignored, and the world stays closed.";
+pub const UNLISTED_IMPORT: &str = "An incoming world holds a handover record this device didn't make. It is ignored, and the world stays closed.";
 /// CP13 (D2): the world list's line for a quarantined import: it is never
 /// opened.
 /// CP13b (D2): a readback found both the sender's Committed and its
@@ -160,11 +160,11 @@ pub fn waiting_after_ack(npub: &str) -> String {
 pub const HANDOVER_UNFINISHED: &str = "This handover didn't finish. The world stays with the sender.";
 pub const NOT_ACTIVATED: &str = "This world is still arriving from a handover, so it can't be opened or saved yet.";
 pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";
-/// CP17 (CP15 review LOW-3): another copy of the game on this computer is
+/// CP17 (CP15 review LOW-3): another copy of the game on this device is
 /// in the middle of a handover of this world (it holds the world's
 /// handover lock), so this one won't open, host or hand it over.
 pub const HANDOVER_ELSEWHERE: &str =
-    "Another copy of the game on this computer is handing this world over right now. Try again once that has finished.";
+    "Another copy of the game on this device is handing this world over right now. Try again once that has finished.";
 
 /// CP17 review MEDIUM-1: the world's folder gives no file lock (e.g. some
 /// network drives), so a handover can't start; play and saving go on.

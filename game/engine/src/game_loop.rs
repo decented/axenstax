@@ -662,19 +662,19 @@ impl super::GameState {
         let identity = match crate::runtime_identity::RuntimeIdentity::load() {
             Ok(Some(i)) => i,
             Ok(None) => {
-                self.online_toast("This computer has nowhere to keep its online key.", 8);
+                self.online_toast("This device has nowhere to keep its online key.", 8);
                 return;
             }
             Err(e) => {
                 log::error!("[online] runtime identity: {e}");
-                self.online_toast("This computer couldn't prepare its online key.", 8);
+                self.online_toast("This device couldn't prepare its online key.", 8);
                 return;
             }
         };
         let owner = Self::owner_persona_bytes();
         let now = self.online_now();
         // Attested *by the persona currently signed in*. Switching persona must
-        // re-mint, or this computer would still be speaking as the last one.
+        // re-mint, or this device would still be speaking as the last one.
         let attested = identity
             .persona(nostr::Timestamp::from(now))
             .map(|pk| pk.to_bytes())
@@ -758,10 +758,10 @@ impl super::GameState {
     fn runtime_identity_for_screen() -> Result<crate::runtime_identity::RuntimeIdentity, String> {
         match crate::runtime_identity::RuntimeIdentity::load() {
             Ok(Some(identity)) => Ok(identity),
-            Ok(None) => Err("This computer has nowhere to keep its online key.".to_string()),
+            Ok(None) => Err("This device has nowhere to keep its online key.".to_string()),
             Err(e) => {
                 log::error!("[online] runtime identity: {e}");
-                Err("This computer couldn't prepare its online key.".to_string())
+                Err("This device couldn't prepare its online key.".to_string())
             }
         }
     }

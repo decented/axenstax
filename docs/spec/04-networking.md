@@ -6165,10 +6165,10 @@ to the source runtime its receipt names. Any record the ledger doesn't list
 (a world folder unpacked by hand into `worlds/` can carry one; the in-game
 import never brings `handover/`) is logged, never contacts a relay, and the
 world stays refused by the open guard; the world list shows one line for it
-("\"<world>\" holds a handover record this computer didn't make. It is
+("\"<world>\" holds a handover record this device didn't make. It is
 ignored, and the world stays closed.", or the incoming-world form; an
 unlisted ABORT record, which the open guard ignores, says "A handover note
-on this computer can't be checked. It is ignored; the world is unaffected.",
+on this device can't be checked. It is ignored; the world is unaffected.",
 CP14b, CP13b review LOW-5). This
 covers LOW-1's plant, which a decode check alone could not: this install's
 own real signed Commit with `core.context` recomputed for an attacker's
@@ -6421,7 +6421,7 @@ relay tried first and the Committed only on the next one activates).
 CP15 (CP13b review LOW-6): the start-up scan decodes abort records one at a
 time; one that can't be listed or decoded is logged and skipped
 (`RetiredCommit::unreadable_aborts`; the world list shows "A handover note
-on this computer can't be checked. It is ignored; the world is
+on this device can't be checked. It is ignored; the world is
 unaffected."), so a damaged old abort record never stops a later
 retirement's publication (a damaged retirement record still fails closed).
 Known limit (CP13b review LOW-6, open): abort and "published" records are
@@ -6585,7 +6585,7 @@ a world whose lock is held (logged once; the promotion and the sweep hold
 the lock themselves while they work, so no handover starts under them); its
 open guard (`authority::open_guard`, after the retired and still-arriving
 refusals, read-only) refuses to open, host, fork or write the world with
-"Another copy of the game on this computer is handing this world over right
+"Another copy of the game on this device is handing this world over right
 now. Try again once that has finished." (`copy::HANDOVER_ELSEWHERE`), and so
 does a handover of it (`source::check`). The OS releases the lock when the
 handle closes or the process dies, so a crash leaves no stale lock; `.live`

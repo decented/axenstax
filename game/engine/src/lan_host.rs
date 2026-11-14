@@ -62,10 +62,10 @@ pub fn describe_bind_error(err: &io::Error, port: u16) -> String {
     match err.kind() {
         K::AddrInUse => format!(
             "port {port} is already in use. Another copy of Axe'n'Stax (or another program) \
-             on this computer is probably hosting. Close it and try again."
+             on this device is probably hosting. Close it and try again."
         ),
         K::PermissionDenied => format!(
-            "this computer would not let Axe'n'Stax open port {port}. \
+            "this device would not let Axe'n'Stax open port {port}. \
              Check your firewall or security settings."
         ),
         K::AddrNotAvailable | K::NetworkUnreachable | K::NetworkDown | K::HostUnreachable => {
