@@ -1,51 +1,55 @@
-# Axe'n'Stax test missions: build 0.2.38
+# Axe'n'Stax test missions: build 0.2.39
 
 This is the test guide for the current build. A tester, or a chat assistant co-hosting their session, reads it for what to type, exact numbers, what success looks like, and why something might not work.
 
-Everything in this file was checked against the game's code for build 0.2.38. If the game and this guide disagree, that is worth reporting.
+Everything in this file was checked against the game's code for build 0.2.39. If the game and this guide disagree, that is worth reporting.
 
-- **Build:** 0.2.38 (desktop app, Linux)
-- **This session:** first the "Ask first" questions, then the "Fixed since last time" re-checks (Mission 0), then the new missions 5 to 8 (off-hand, shield, lantern, tool shapes), then any of the other missions "On your own"
+- **Build:** 0.2.39 (desktop app, Linux)
+- **This session:** first the "Ask first" question, then the re-checks (Mission 0), then the new missions 5 to 8 (off-hand, shield, lantern, tool shapes), then any of the other missions "On your own"
 - **Coming next:** missions at a village, and missions with a friend
 
 ---
 
-## Ask first: questions from last time
+## Ask first: from last time
 
-**Co-host:** ask these at the start of the session, before Mission 0, and put the answers in your report under Re-checks.
+**Co-host:** ask this at the start of the session, before Mission 0, and put the answer in your report under Re-checks.
 
-Last time, the whole inventory disappeared during a fight with brigands. Brigands cannot take items, so we want to find out what happened:
+Thank you for the answers about the lost inventory. We still don't know what emptied it, so:
 
-1. When all your things disappeared, did a **"You Died!"** screen come up?
-2. Around then, did you type `/gm c`, or switch to Creative some other way?
-3. Can you go back to where it happened? Is there a **grave** block there? If there is, right-click it: are your things inside?
+1. **If your things ever disappear again, stop and tell us straight away**, before doing anything else. Could you fly (Creative) at that moment? Was any message or red screen on screen? What was near you?
 
 ---
 
-## Fixed since last time (re-check these first)
+## New in 0.2.39 (re-check these first)
 
-These were found in earlier playtests and are fixed by 0.2.38 (some first came out in 0.2.35, 0.2.36 or 0.2.37). Check each one and say whether it now works. Mission 0 below walks through them.
+These answer the last playtest. Mission 0 below walks through them.
 
-1. **A torch in an item frame looks right.** It lies flat on the frame showing the whole torch, from the front, the side and above, with no black box round it.
-2. **A torch dropped on the ground, or held in your hand, is a flat torch, not a dark cube.** The same goes for flowers, saplings, rails and tall grass.
-3. **Blighted crops are grey.** A blighted crop is ash grey and half the size of a healthy one, so it is easy to spot next to yellow wheat.
-4. **Respawning without a bed puts you on dry land**, near where the world started. Before, it could drop you from the sky into the sea. Worlds made before this build are fixed when they load, unless you set a spawn with a bed or `/sp`.
-5. **Satoshi's house is built on dry ground near where you start, and shows up at once.** Before, it could float on the sea and stay invisible until you broke a block nearby. It is never built on top of anything you placed. A house that was already built stays where it is.
-6. **Respawning at a bed puts you next to the bed**, inside the room, not on the roof.
-7. **Thunder is softer.** It rumbles in just after the flash instead of hitting at full volume, and a bolt far away sounds quieter than one close by. To turn thunder down on its own, press **Esc**, then **Settings**, and move the **Thunder** slider in the sound settings.
-8. **You can see what you are holding.** In first person your hand and the item in it now show in the bottom right of the screen, like Minecraft. Before, they sat below the edge of the screen.
-9. **Chat starts empty in each world.** Opening a world, or the same world again, no longer shows chat or commands from before.
+1. **A held item stays in the hand in third person.** Press **F5** to see yourself. A torch, or anything else, in either hand now moves with the hand when you stand, walk, jump or swing. Before, it floated beside you whenever your arm moved.
+2. **Jumping legs follow the way you move.** Jump while running forwards: your legs swing back behind you. Jump while walking backwards (**S**): they swing forwards. Jump on the spot or sideways: they stay straight. (Your hands swing back a little in the air, as before.)
+3. **Creative no longer brings you back to life.** If you die and type `/gm c` while the **"You Died!"** screen is up, the game now says **"Press Respawn first."** and you stay dead. The Esc menu does not offer "Switch to Creative" while you are dead. Before, switching to Creative stood you up where you fell, with your things left in the grave. Nothing can hurt you while you are in Creative.
+4. **Shield and off-hand:** after pausing (**Esc**) or respawning, the next right-click decides afresh whether to use the item or raise the shield. Before, it could repeat the old choice once.
 
-10. **Tools no longer look like grey slabs in your hand.** In first person, and on other players, every tool has its own shape. A pickaxe has a head across the top of a stick, an axe has a blade on one side, a hoe has a hooked head, and so on. Mission 8 looks at them all.
+**Still to re-check from earlier builds** (not tried last time):
+
+5. **Blighted crops are grey.** A blighted crop is ash grey and half the size of a healthy one, so it is easy to spot next to yellow wheat.
+6. **Respawning without a bed puts you on dry land**, near where the world started. Worlds made before 0.2.35 are fixed when they load, unless you set a spawn with a bed or `/sp`.
+7. **Satoshi's house is built on dry ground near where you start, and shows up at once.** It is never built on top of anything you placed. A house that was already built stays where it is.
+8. **Respawning at a bed puts you next to the bed**, inside the room, not on the roof.
+9. **Thunder is softer.** It rumbles in just after the flash instead of hitting at full volume, and a far bolt sounds quieter than a close one. To turn thunder down on its own, press **Esc**, then **Settings**, and move the **Thunder** slider.
+
+**Confirmed fixed last time:** a torch in an item frame, and a dropped torch, both look right.
 
 **New in 0.2.38:**
 
 - **An off-hand.** Press **F** to swap the item in your hand with the item in your off-hand. A box to the left of your hotbar shows it. Mission 5.
 - **A shield.** Made at the workbench, held in either hand, raised by holding right-click. It blocks hits from the front. Mission 6.
 - **A lantern.** Made at the workbench; stand it on the ground, hang it under a ceiling, or carry it. A lantern or torch in either hand now lights the dark round you. Mission 7.
+- **Tools no longer look like grey slabs in your hand.** Every tool has its own shape: a pickaxe has a head across the top of a stick, an axe has a blade on one side, a hoe has a hooked head, and so on. Mission 8.
 
-**New in 0.2.37 (check these if you missed them):**
+**New in 0.2.37:**
 
+- **You can see what you are holding.** In first person your hand and the item in it show in the bottom right of the screen, like Minecraft.
+- **Chat starts empty in each world.** Opening a world, or the same world again, no longer shows chat or commands from before.
 - **Bigger chat text.** Chat and commands are 1.5 times bigger. To make them bigger still, press **Esc**, then **Settings**, then move the **Chat text size** slider (100% to 300%).
 - **The Esc menu button that used to say "Graphics" now says "Settings".**
 - **Tab finishes commands, like Minecraft.** Type `/gi` and press **Tab** to get `/give`. Type `/give tor` and press **Tab** to get `/give torch`. Press **Tab** again for the next suggestion, **Shift+Tab** to go back. The suggestions show above the chat line, and you can also click one.
@@ -60,20 +64,11 @@ These were found in earlier playtests and are fixed by 0.2.38 (some first came o
 - On another player, their off-hand swing does not show. Their left hand holds still when they use the off-hand.
 - A lantern does not fall if the block under it is broken. It stays in the air, like a torch.
 - A carried light can glow faintly through a thin wall.
-
+- `/kill` does nothing in Creative (nothing can hurt you there), even though it says "You died.".
 - The world is split into columns 16 by 16 blocks wide. A sealed room built across the edge of one of those columns can stay lit like daytime inside at night, even with no torch.
 - A Satoshi house that was already built over the sea stays there.
 
-**Good to know:** brigands cannot take or carry your items. If your whole inventory disappears, you died: your things are in a grave block where it happened.
-
----
-
-## Changed in 0.2.34 (the last playtest build)
-
-- Torches show their flame and handle, and torchlight at night is about as bright as at noon.
-- Buttons, pressure plates and levers show the right picture.
-- Rails and cables no longer glow at night, and water next to a torch is lit by it.
-- The Workshop is always daytime.
+**Good to know:** brigands cannot take or carry your items. If your whole inventory disappears after a death, your things are in a grave block where it happened.
 
 ---
 
@@ -83,7 +78,7 @@ These were found in earlier playtests and are fixed by 0.2.38 (some first came o
 2. **Press T** (or /) to open chat and type a command. Press **Tab** to finish a command or an item name.
 3. **Type `/gm c`** to switch to Creative so you can fly. Find **flat, open grass with no trees**. Missions 1 to 3 all happen there.
 4. **Type `/gm s`** to switch back to Survival. The game must reply **"Switched to survival"** (or "already in survival").
-5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.38**. Use that number in the feedback.
+5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.39**. Use that number in the feedback.
 
 **Good to know:** hunger drops 1 point (half an icon on the hunger bar) every 30 seconds, whatever you are doing. A full bar lasts about 10 minutes, so take some food (berries, bread or cooked meat), or use `/give bread 16` in a test world.
 
@@ -91,24 +86,25 @@ These were found in earlier playtests and are fixed by 0.2.38 (some first came o
 
 ---
 
-## Mission 0: Re-checks for 0.2.38
+## Mission 0: Re-checks for 0.2.39
 
-**What it tests:** the fixes in "Fixed since last time".
+**What it tests:** the fixes in "New in 0.2.39", then the older re-checks.
 
-1. **Item frame:** type `/give item_frame` and `/give torch 4`. Place the frame on a wall, then right-click the frame with the torch in your hand to put it in. Look at it from the front, from the side and from above.
-2. **Dropped and held torch:** press **Q** with a torch selected to drop one, and look at it on the ground. Look at the torch in your hand in the bottom right of the screen, then press **F5** to see yourself holding it (press F5 again to go back).
-3. **Blight:** if you still have a giant wheat field from last time, look for grey plants. Otherwise do Mission 2 and check the colour.
-4. **Respawn:** in your test world, with no bed, type `/kill` or let something defeat you, then respawn. Say where you came back.
-5. **Chat:** type `/gi` and press **Tab**. Then try `/give tor` and **Tab**, and **Tab** again. Then change **Esc, Settings, Chat text size** and see the chat get bigger.
+1. **Held torch in third person:** type `/give torch 4`, hold a torch, press **F5**. Stand still, then walk, then jump, then left-click to swing. Press **F** to move the torch to the other hand and do it again. Press **F5** again to see yourself from the front.
+2. **Jumping legs:** still in **F5**, run forwards and jump, then walk backwards (**S**) and jump, then jump on the spot. Watch the legs.
+3. **Creative while dead:** in your test world, in Survival, type `/kill`. While the **"You Died!"** screen is up, press **T** and type `/gm c`. Then press **Respawn**.
+4. **Blight:** if you still have a giant wheat field from last time, look for grey plants. Otherwise do Mission 2 and check the colour.
+5. **Respawn:** with no bed, the respawn in step 3 puts you somewhere: say where. If you have a bed, sleep in it once, `/kill`, respawn, and say where you came back.
 6. **Thunder and weather:** type `/weather storm` and wait for lightning (a bolt comes about every 15 seconds in a storm, sometimes sooner or later). Say whether the thunder still makes you jump. Then type `/weather clear` and check the rain stops.
-7. **Chat:** type a few lines, leave to the lobby, open the same world again, and check the chat is empty.
-8. **Tool shapes:** type `/give iron_sword` and `/give iron_pickaxe`, hold each, and look at your hand. Neither should be a grey slab. (Mission 8 looks at all twelve.)
+7. **Chat:** type `/gi` and press **Tab**. Then try `/give tor` and **Tab**, and **Tab** again. Then change **Esc, Settings, Chat text size** and see the chat get bigger. Leave to the lobby, open the same world again, and check the chat is empty.
+8. **Your hand and tool shapes:** in first person, look at the torch in your hand in the bottom right. Type `/give iron_sword` and `/give iron_pickaxe`, hold each, and look at your hand. Neither should be a grey slab. (Mission 8 looks at all twelve.)
 
-**Success:** the framed torch is a flat torch from every side with no black box; the dropped and held torch are flat torches; blighted wheat is grey; you respawn standing on dry land; Tab finishes the words and the chat text size changes; the thunder rumbles in after the flash and is not a jump scare; `/weather clear` stops the storm; you see the torch in your hand; the chat is empty after reopening the world; the sword and pickaxe in your hand are different shapes, not slabs.
+**Success:** in F5 the torch stays in the hand, in either hand, standing, walking, jumping and swinging; jumping forwards the legs swing back, backwards they swing forwards, on the spot they stay straight; `/gm c` on the death screen says "Press Respawn first." and you stay dead until you press Respawn; blighted wheat is grey; you respawn standing on dry land (or next to your bed); the thunder rumbles in after the flash and is not a jump scare; `/weather clear` stops the storm; Tab finishes the words, the chat text size changes, and the chat is empty after reopening the world; you see the torch in your hand; the sword and pickaxe are different shapes, not slabs.
 
 **If it does not work:**
-- Anything still looks like the old build: check the build number at the bottom of Settings says **v0.2.38**.
+- Anything still looks like the old build: check the build number at the bottom of Settings says **v0.2.39**.
 - Tab does nothing: Tab only completes lines that start with `/`.
+- `/gm c` changed you to Creative while dead: say so, that is the bug this build fixes.
 
 ---
 
