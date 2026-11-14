@@ -36,10 +36,11 @@ P = Planks   I = Iron Ingot
 **Use it:**
 
 1. Hold the shield in either hand.
-2. **Hold right-click.** The shield goes up. The one time it does not is when the click has a job to do: a **chest** or a **door**, or a mob you can **do something to** (feed it, tame it, put a Lead on it, milk it, shear it, ride it, trade with it, or give your own pet a command, which takes an empty main hand). Then the click does that job instead and the shield stays down. An **enemy** such as a brigand, marauder or berserker is not one of those, so facing one, the shield goes up. That is the point of a shield.
+2. **Hold right-click.** The shield goes up. The one time it does not is when the click has a job to do (your **main hand** gets first go at it, then the off-hand; a bucket still fills at water even if a fish or a cow is in the way): a **chest** or a **door**, or a mob you can **do something to** (feed it, tame it, put a Lead on it, milk it, shear it, ride it, trade with it, or give your own pet a command, which takes an empty main hand). Then the click does that job instead and the shield stays down. An **enemy** such as a brigand, marauder or berserker is not one of those, so facing one, the shield goes up. That is the point of a shield.
 3. It starts working after a quarter of a second. The shield lifts in front of you.
 4. Once it is up, it **stays up** for as long as you hold the button, whatever you point at.
-5. Let go to lower it.
+5. Each press is decided **once**, when you press. If that press fed a cow, the shield stays down for as long as you keep holding, even though the cow no longer wants the wheat. Let go and press again to raise it.
+6. Let go to lower it.
 
 **While it is up:**
 

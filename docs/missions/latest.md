@@ -305,6 +305,7 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 - An enemy you cannot use anything on (a brigand, marauder or berserker) does not take the click, so facing one the shield goes up.
 - Once raised, the shield stays up while you hold the button, whatever comes under the crosshair.
 - With a shield in the main hand and a torch in the off-hand, right-clicking stone places the torch.
+- Each press is decided once. Feed a cow with wheat in the other hand while you hold right-click: the cow is fed and the shield stays down for the whole press, even after the cow no longer wants wheat. Let go and press again and the shield goes up.
 - In a multiplayer game the host's game decides what the shield blocks.
 - A shield that is used up breaks and disappears.
 
