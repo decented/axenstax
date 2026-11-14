@@ -2405,6 +2405,10 @@ impl HostedServer {
         #[cfg(not(target_arch = "wasm32"))]
         self.keep_holds.remove(&i);
         self.awaiting_join_request.remove(&i);
+        // The wear this seat's blocks owe is queued before ANY snapshot of its window
+        // (the death settlement below, the leave save): it may leave in the inbound
+        // pass after the tick it blocked in, before the end-of-tick queue ran.
+        if self.handshake_done[i] { self.queue_joiner_shield_wear_for(i); }
         if self.handshake_done[i] && (!self.lends_host_world() || self.server.lent) { self.settle_leaving_life(i); }
         if self.handshake_done[i] { self.note_strict_departure(i); }
         if self.handshake_done[i] && let Err(e) = self.server.save_joiner(i) { log::error!("Joiner leave save failed: {e}"); }
@@ -2542,38 +2546,46 @@ impl HostedServer {
     /// the blocking tick has the wear in the window its grave and its death sync
     /// are made from, so a shield owed broken is not carried into the grave intact.
     fn queue_joiner_shield_wear(&mut self) {
-        let now = self.server.tick_counter;
         for i in 0..self.server.players.len() {
-            if self.server.players[i].shield_owed.is_empty() {
-                continue;
-            }
-            let owed = std::mem::take(&mut self.server.players[i].shield_owed);
-            if !self.server.players[i].server_simulated {
-                continue;
-            }
-            for o in owed {
-                let sp = &mut self.server.players[i];
-                let slot = sp.hotbar_slot;
-                let window_event = crate::window_events::queue(
-                    sp,
-                    crate::window_events::WindowEvent::WearShield { slot, hand: o.hand, durability: o.durability, amount: o.amount },
-                    now,
-                );
-                let pkt = protocol::serialize_packet(
-                    protocol::PacketType::PlayerEvent,
-                    &protocol::PlayerEventPacket {
-                        player_index: i as u32,
-                        event: protocol::PlayerEventType::ShieldWorn {
-                            slot: slot as u8,
-                            hand: o.hand,
-                            durability: o.durability,
-                            amount: o.amount,
-                        },
-                        window_event,
+            self.queue_joiner_shield_wear_for(i);
+        }
+    }
+
+    /// [`Self::queue_joiner_shield_wear`] for one seat: also run by
+    /// `settle_leaving_life` (every death snapshot) and by `release_slot` (a leave
+    /// save), since a seat may leave in the inbound pass that follows the tick its
+    /// shield was worn in, before the end-of-tick queue has run.
+    pub(super) fn queue_joiner_shield_wear_for(&mut self, i: usize) {
+        let now = self.server.tick_counter;
+        if self.server.players[i].shield_owed.is_empty() {
+            return;
+        }
+        let owed = std::mem::take(&mut self.server.players[i].shield_owed);
+        if !self.server.players[i].server_simulated {
+            return;
+        }
+        for o in owed {
+            let sp = &mut self.server.players[i];
+            let slot = sp.hotbar_slot;
+            let window_event = crate::window_events::queue(
+                sp,
+                crate::window_events::WindowEvent::WearShield { slot, hand: o.hand, durability: o.durability, amount: o.amount },
+                now,
+            );
+            let pkt = protocol::serialize_packet(
+                protocol::PacketType::PlayerEvent,
+                &protocol::PlayerEventPacket {
+                    player_index: i as u32,
+                    event: protocol::PlayerEventType::ShieldWorn {
+                        slot: slot as u8,
+                        hand: o.hand,
+                        durability: o.durability,
+                        amount: o.amount,
                     },
-                );
-                self.send_to_joined_slot(i, &pkt);
-            }
+                    window_event,
+                },
+            );
+            self.send_to_joined_slot(i, &pkt);
         }
     }
 

@@ -90,6 +90,11 @@ impl HostedServer {
             self.grant_to_joiner(slot, [stack]);
         }
         self.settle_terminal_grants(leaving);
+        // Every seat's outstanding shield wear, before the deaths are settled from
+        // the windows: a shield an early blast broke must not enter a grave intact.
+        for i in 0..self.server.players.len() {
+            self.queue_joiner_shield_wear_for(i);
+        }
         self.handle_joiner_deaths();
     }
 }
