@@ -204,6 +204,9 @@ mod keeps;
 mod launch_links;
 #[cfg(target_os = "android")]
 mod android_intent;
+// The OS text prompt a touch text field or the touch Chat button asks for: async,
+// one at a time (web `window.prompt()`, Android the activity's text dialog).
+mod text_prompt;
 // Online play by contact — the per-install runtime key + its persona
 // attestation. Native only (bunker signing, profile/ files).
 #[cfg(not(target_arch = "wasm32"))]
@@ -649,7 +652,7 @@ mod test_integration;
 mod keep_join_probe;
 
 // `touch_input` is cross-platform: the menu's text fields call `is_touch_device()`
-// / `os_keyboard_prompt()` on every target (native gets cheap no-op stubs), so the
+// on every target (and ask `text_prompt` for the OS keyboard), so the
 // module must always compile. The on-screen overlay drawing + touch-event handling
 // run only where `touch_input::TOUCH_PLATFORM` is true (web + Android). A few
 // helpers are reached only by tests (`note_mouse`,

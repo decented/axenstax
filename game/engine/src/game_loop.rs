@@ -9001,23 +9001,35 @@ impl super::GameState {
         {
             let num_gp = self.gamepad.connected_count();
             let mut any_pause = false;
-            // Touch Pause/Chat buttons (WASM overlay). Consumed here at frame
-            // rate, *before* the tick loop's `end_frame` clears the edges. Pause
-            // shares the gamepad/Esc toggle below; Chat has no `PlayerIntent`
-            // field, so it pops the OS soft keyboard and routes the typed line
-            // through the normal command dispatch via `ChatState.pending_submit`.
-            // (Android has no OS prompt yet — `os_keyboard_prompt` returns None
-            // there, so Chat is drained and does nothing until an IME bridge.)
+            // Touch Pause/Chat buttons (web + Android overlay). Consumed here at
+            // frame rate, *before* the tick loop's `end_frame` clears the edges.
+            // Pause shares the gamepad/Esc toggle below; Chat has no
+            // `PlayerIntent` field, so a tap asks for the OS text prompt
+            // (`text_prompt.rs`: web `window.prompt()`, Android the activity's
+            // text dialog) and the typed line is collected here on a later
+            // frame (the tap's own frame on the web), then routed through the
+            // normal command dispatch via `ChatState.pending_submit`. Only a
+            // fresh tap asks, so Cancel just closes the prompt.
             if crate::touch_input::TOUCH_PLATFORM {
                 if self.touch.take_pause_pressed() {
                     any_pause = true;
                 }
-                if self.touch.take_chat_pressed()
-                    && matches!(self.mode, GameMode::Playing)
-                    && let Some(line) = crate::touch_input::os_keyboard_prompt("Chat / command", "")
+                if self.touch.take_chat_pressed() && matches!(self.mode, GameMode::Playing) {
+                    crate::text_prompt::request_text_prompt(
+                        crate::text_prompt::CHAT_KEY,
+                        "Chat / command",
+                        "",
+                        crate::text_prompt::PromptKind::Chat,
+                        crate::comms::MAX_CHAT_TEXT_LEN,
+                    );
+                }
+                if let Some(Some(line)) =
+                    crate::text_prompt::take_text_prompt_result(crate::text_prompt::CHAT_KEY)
                 {
                     let line = line.trim().to_string();
-                    if !line.is_empty() {
+                    // A line that lands after the world was left is dropped:
+                    // `pending_submit` would otherwise run it in the next world.
+                    if !line.is_empty() && matches!(self.mode, GameMode::Playing) {
                         self.chat.pending_submit = Some(line);
                     }
                 }
