@@ -11,8 +11,10 @@
 //! **Sources.** Any held light, in either hand: a block by its `light_emission`
 //! (torch, lantern, paper lantern, glowstone-class and every other emitter) and
 //! the two handheld materials, Sparkler (12) and Flare (15). Each hand that holds a
-//! light is one light, at that hand: [`HAND_SIDE`] out to its own side and
-//! [`HAND_HEIGHT`] up from the holder's feet, turned by its yaw. (The nearest
+//! light is one light, at that hand: the avatar's own hand anchor
+//! (`entity_model::avatar_hand_anchor`, the classic arm), placed on the holder by
+//! the avatar's own transform (`entity_model::avatar_world_point`, one copy of the
+//! yaw convention), so the light sits where the held item is drawn. (The nearest
 //! eight over all holders' hands win the camera's eight slots.)
 //!
 //! **Method.** At most [`MAX_LIGHTS`] point lights ride in the camera uniform
@@ -34,11 +36,6 @@ pub const MAX_LIGHTS: usize = 8;
 pub const SPARKLER_LEVEL: u8 = 12;
 /// Level of a held Flare.
 pub const FLARE_LEVEL: u8 = 15;
-/// How far above a holder's feet a hand's light sits (the avatar's hand anchor is
-/// 0.70 up and a held item sits a little above it).
-pub const HAND_HEIGHT: f32 = 0.8;
-/// How far out to its own side of the body axis a hand's light sits.
-pub const HAND_SIDE: f32 = 0.4;
 /// How far a first-person hand's light is from the eye, for the viewmodel's own
 /// (CPU) lighting: the fist is about this far in front of and below the eye.
 pub const VIEWMODEL_DISTANCE: f32 = 0.7;
@@ -68,14 +65,15 @@ pub fn wire_level(hand: HeldWire, registry: &BlockRegistry) -> u8 {
     item_level(ItemRef::from_wire(hand.kind, hand.id), registry)
 }
 
-/// Where a holder's hand is in the world: `HAND_SIDE` out to the hand's own side
-/// (right is +X in the avatar's own frame) and `HAND_HEIGHT` up from `foot`, turned
-/// by `yaw` the way the avatar's parts are (`entity_model`: `x' = x cos - z sin`,
-/// `z' = x sin + z cos`).
+/// Where a holder's hand is in the world: the avatar's hand anchor for `side`
+/// (a peer's arm model is not on the wire, so the classic arm's), placed by the
+/// avatar's own transform (`entity_model::avatar_world_point`: the state's yaw
+/// plus the builder's quarter turn, then the feet). `foot` is where the avatar is
+/// drawn: a crouching holder's is lowered by `entity_model::CROUCH_DIP`
+/// ([`sources`] does that).
 pub fn hand_position(foot: Vec3, yaw: f32, side: HandSide) -> Vec3 {
-    let (sin_y, cos_y) = yaw.sin_cos();
-    let x = side.sign() * HAND_SIDE;
-    foot + Vec3::new(x * cos_y, HAND_HEIGHT, x * sin_y)
+    let anchor = crate::entity_model::avatar_hand_anchor(side, crate::skin_uv::ArmModel::Classic);
+    crate::entity_model::avatar_world_point(foot, yaw, anchor)
 }
 
 /// The lights one holder gives: one per hand that holds a light, at that hand.
@@ -99,7 +97,8 @@ pub fn sources(states: &[PlayerState], registry: &BlockRegistry) -> Vec<CarriedL
     for ps in states {
         let main = wire_level(HeldWire { kind: ps.held_kind, id: ps.held_id, tool: ps.held_tool }, registry);
         let off = wire_level(HeldWire { kind: ps.off_kind, id: ps.off_id, tool: ps.off_tool }, registry);
-        out.extend(holder_lights(Vec3::new(ps.x, ps.y, ps.z), ps.yaw, main, off));
+        let dip = if ps.flags & crate::protocol::player_flags::CROUCHING != 0 { crate::entity_model::CROUCH_DIP } else { 0.0 };
+        out.extend(holder_lights(Vec3::new(ps.x, ps.y - dip, ps.z), ps.yaw, main, off));
     }
     out
 }
@@ -115,6 +114,17 @@ pub fn viewmodel_level(main: u8, off: u8) -> f32 {
     }
     let light = CarriedLight { pos: Vec3::ZERO, level: f32::from(level) };
     crate::world_light::carried_block(&[light], Vec3::new(VIEWMODEL_DISTANCE, 0.0, 0.0), 0.0)
+}
+
+/// The block level (0..=1) a first-person view's arms and held item are lit to:
+/// the voxel block level `voxel` at the eye, raised by the viewport's carried
+/// `lights` (the very list packed into its camera uniform, so another player's
+/// torch lights your hands as it lights the terrain beside them) evaluated at
+/// `eye`, and by the viewer's own hands ([`viewmodel_level`]). The same max rule
+/// as the world's (`world_light::carried_block`). The viewer's own lights are in
+/// `lights` too; the max makes that harmless.
+pub fn viewmodel_block_level(lights: &[CarriedLight], eye: Vec3, voxel: f32, main: u8, off: u8) -> f32 {
+    crate::world_light::carried_block(lights, eye, voxel).max(viewmodel_level(main, off))
 }
 
 /// The lights a camera at `camera` is given: the nearest [`MAX_LIGHTS`] of
@@ -232,28 +242,116 @@ mod tests {
         assert!(holder_lights(foot, f32::INFINITY, 14, 0).is_empty());
     }
 
+    /// The avatar's own hand anchor, in the world: where the builder puts the hand
+    /// of an avatar at `foot` whose state yaw is `yaw`, by the builder's transform.
+    fn builder_hand_anchor(foot: Vec3, yaw: f32, side: HandSide) -> Vec3 {
+        // The builder's transform, written out here from its own inputs (not from
+        // `avatar_world_point`): a quarter turn on the state yaw, then
+        // `x' = x cos - z sin`, `z' = x sin + z cos`.
+        let a = crate::entity_model::avatar_hand_anchor(side, crate::skin_uv::ArmModel::Classic);
+        let (s, c) = (yaw + std::f32::consts::FRAC_PI_2).sin_cos();
+        foot + Vec3::new(a.x * c - a.z * s, a.y, a.x * s + a.z * c)
+    }
+
+    /// Review 1 finding 5: a light sits where the avatar's hand is, at every yaw,
+    /// not a quarter turn away from it.
     #[test]
-    fn a_light_sits_at_its_hand_out_to_its_own_side_and_turns_with_the_holder() {
+    fn a_light_sits_at_the_avatars_hand_at_every_yaw() {
         let foot = Vec3::new(10.0, 64.0, -3.0);
-        let right = hand_position(foot, 0.0, HandSide::Right);
-        let left = hand_position(foot, 0.0, HandSide::Left);
-        assert_eq!(right, foot + Vec3::new(HAND_SIDE, HAND_HEIGHT, 0.0));
-        assert_eq!(left, foot + Vec3::new(-HAND_SIDE, HAND_HEIGHT, 0.0));
-        // A quarter turn swings the sides round the body axis, as the avatar's parts turn.
         let q = std::f32::consts::FRAC_PI_2;
-        let r = hand_position(foot, q, HandSide::Right) - foot;
-        assert!(r.x.abs() < 1e-5 && (r.z - HAND_SIDE).abs() < 1e-5 && (r.y - HAND_HEIGHT).abs() < 1e-4, "{r}");
+        for yaw in [0.0, q, -q, std::f32::consts::PI, 0.7, -2.1] {
+            for side in [HandSide::Right, HandSide::Left] {
+                let light = hand_position(foot, yaw, side);
+                let anchor = builder_hand_anchor(foot, yaw, side);
+                assert!((light - anchor).length() < 1e-5, "yaw {yaw}, {side:?}: light {light} vs anchor {anchor}");
+            }
+        }
+        // Yaw -pi/2 (the Workshop mannequin's): the builder adds pi/2, so the
+        // right hand is on the body's +X side and the light is there too.
+        let r = hand_position(foot, -q, HandSide::Right) - foot;
+        assert!(r.x > 0.3 && r.z.abs() < 1e-4, "right hand on +X: {r}");
+        let l = hand_position(foot, -q, HandSide::Left) - foot;
+        assert!(l.x < -0.3 && l.z.abs() < 1e-4, "left hand on -X: {l}");
+    }
+
+    /// And the held item the builder draws is where its light is: the centre of
+    /// the drawn torch is within a hand's reach of the light at every yaw (a
+    /// quarter-turn error would put them more than half a block apart).
+    #[test]
+    fn the_light_is_with_the_item_the_builder_draws_in_that_hand() {
+        let torch = crate::item::Item::Block(block::TORCH);
+        let reg = reg();
+        let q = std::f32::consts::FRAC_PI_2;
+        let foot = Vec3::new(5.0, 70.0, 5.0);
+        for yaw in [0.0, q, -q, std::f32::consts::PI] {
+            for side in [HandSide::Right, HandSide::Left] {
+                let (main, off) = match side {
+                    HandSide::Right => (Some(torch.clone()), None),
+                    HandSide::Left => (None, Some(torch.clone())),
+                };
+                let ps = state(foot.x, foot.y, foot.z, yaw, main, off);
+                let (_, held) = crate::entity_model::build_player_avatar_vertices(&ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+                assert!(!held.is_empty());
+                let n = held.len() as f32;
+                let centre = held.iter().fold(Vec3::ZERO, |a, v| a + Vec3::from(v.position)) / n;
+                let lights = sources(&[ps], &reg);
+                assert_eq!(lights.len(), 1);
+                let d = (lights[0].pos - centre).length();
+                assert!(d < 0.4, "yaw {yaw}, {side:?}: light {} vs drawn item {centre} ({d})", lights[0].pos);
+            }
+        }
+    }
+
+    #[test]
+    fn a_light_turns_with_the_holder_and_each_lit_hand_is_its_own_light() {
+        let foot = Vec3::new(10.0, 64.0, -3.0);
         // The two hands are always a body width apart and equally far from the axis.
         for yaw in [0.0, 0.7, 2.0, -1.3] {
             let (a, b) = (hand_position(foot, yaw, HandSide::Right), hand_position(foot, yaw, HandSide::Left));
-            assert!(((a - b).length() - 2.0 * HAND_SIDE).abs() < 1e-5);
-            assert!((((a.x + b.x) * 0.5) - foot.x).abs() < 1e-5 && (((a.z + b.z) * 0.5) - foot.z).abs() < 1e-5);
+            assert!((a.y - b.y).abs() < 1e-5, "the same height");
+            assert!((((a.x + b.x) * 0.5) - foot.x).abs() < 1e-4 && (((a.z + b.z) * 0.5) - foot.z).abs() < 1e-4);
+            assert!(((a - b).length() - 0.75).abs() < 1e-4, "a classic body's hands are 0.75 apart");
         }
         // Only a lit hand gives a light, at its own side.
         let lights = holder_lights(foot, 0.0, 0, 14);
         assert_eq!(lights.len(), 1);
-        assert_eq!(lights[0].pos, left);
+        assert_eq!(lights[0].pos, hand_position(foot, 0.0, HandSide::Left));
         assert!(holder_lights(foot, 0.0, 0, 0).is_empty());
+    }
+
+    /// A crouching holder's lights are lowered with the avatar.
+    #[test]
+    fn a_crouching_holders_light_is_lowered_with_the_avatar() {
+        let torch = crate::item::Item::Block(block::TORCH);
+        let mut ps = state(0.0, 64.0, 0.0, 0.0, Some(torch), None);
+        let standing = sources(std::slice::from_ref(&ps), &reg())[0].pos.y;
+        ps.flags |= crate::protocol::player_flags::CROUCHING;
+        let crouching = sources(&[ps], &reg())[0].pos.y;
+        assert!((standing - crouching - crate::entity_model::CROUCH_DIP).abs() < 1e-5);
+    }
+
+    /// Review 1 finding 4: another player's carried light lights your first-person
+    /// arms and held item, by the world's rule (the max of the voxel level and the
+    /// light less a level per block), and your own hands still do.
+    #[test]
+    fn another_players_carried_light_lights_the_viewmodel() {
+        let eye = Vec3::new(0.0, 70.0, 0.0);
+        let peer_torch = [CarriedLight { pos: Vec3::new(2.0, 70.0, 0.0), level: 14.0 }];
+        // Dark room, nothing in your hands: the peer's torch 2 blocks away.
+        let lit = viewmodel_block_level(&peer_torch, eye, 0.0, 0, 0);
+        assert!((lit - 12.0 / 15.0).abs() < 1e-5, "14 less 2 blocks, of 15: {lit}");
+        assert_eq!(viewmodel_block_level(&[], eye, 0.0, 0, 0), 0.0, "no light, no glow");
+        // Max, never a sum: bright voxel light wins over a faint torch, and the
+        // viewer's own lantern wins over a far torch.
+        assert_eq!(viewmodel_block_level(&peer_torch, eye, 1.0, 0, 0), 1.0);
+        let far = [CarriedLight { pos: Vec3::new(13.0, 70.0, 0.0), level: 14.0 }];
+        assert_eq!(viewmodel_block_level(&far, eye, 0.0, 15, 0), viewmodel_level(15, 0), "own hands beat a far torch");
+        // The viewer's own light appears in the list too; it changes nothing.
+        let own = [CarriedLight { pos: Vec3::new(0.4, 69.0, 0.0), level: 14.0 }];
+        assert!(viewmodel_block_level(&own, eye, 0.0, 14, 0) >= viewmodel_level(14, 0) - 1e-6);
+        // At most eight lights count, like the uniform.
+        let many: Vec<CarriedLight> = (0..9).map(|i| CarriedLight { pos: Vec3::new(30.0, 70.0, 0.0), level: if i == 8 { 15.0 } else { 1.0 } }).collect();
+        assert_eq!(viewmodel_block_level(&many, Vec3::new(30.0, 70.0, 0.0), 0.0, 0, 0), 1.0 / 15.0, "the ninth light is not read");
     }
 
     #[test]

@@ -8,10 +8,17 @@
 //! chain in `game_loop` takes it once per click and reads the item of the
 //! chosen hand through `PlayerSlot::held_for_use`.
 //!
-//! What counts as "a use" is [`item_has_use`]: a list of what the chain's arms
-//! actually do with a held item, so it must grow with them. It errs toward the
-//! main hand: an item the list does not know keeps today's behaviour, so the
-//! worst a missing entry costs is an off-hand item that will not fire.
+//! What counts as "a use" is [`item_has_use`]: the question "does this item do
+//! anything for THIS target", answered by the same per-tool predicates the chain's
+//! arms test (`tool_uses`: a hoe tills only the top of dirt or grass, shears cut
+//! only a sheep, and so on), so the two cannot drift. It errs toward the main hand:
+//! an item the list does not know keeps today's behaviour, so the worst a missing
+//! entry costs is an off-hand item that will not fire.
+//!
+//! [`hand_with_use`] is the decision as an `Option<Hand>` (which hand, if either, has
+//! a use for the target); [`use_hand`] and [`either_hand_has_use`] are its two
+//! readings, the second for anything that should stand down when a hand's item has
+//! a use (a shield is not raised against a door or a mob).
 //!
 //! Since v101 a joined Mirror client's use packets carry the hand; a Strict
 //! seat keeps [`Hand::Main`] for its uses (a BRIDGE in `game_loop`), though its
@@ -47,6 +54,14 @@ pub struct UseTarget {
     pub arrows: bool,
     /// The inventory holds a Rubber Ball (a slingshot can fire).
     pub rubber_balls: bool,
+    /// The face of the block clicked, as `PlayerSlot::target_face` (the hoe, a seed
+    /// or a reed take the top face only). `[0, 0, 0]` when nothing is aimed at.
+    pub face: [i32; 3],
+    /// The play mode cannot edit the world here (`!PlayMode::can_edit_world`): the
+    /// edit arms (hoe, eraser, salt, bone meal, fertiliser) decline.
+    pub edit_blocked: bool,
+    /// The species of the mob under the crosshair (shears cut a sheep, not a cow).
+    pub mob_kind: Option<crate::mob::MobType>,
 }
 
 /// Blocks whose right-click arm in `game_loop` takes or reads the HELD item
@@ -110,31 +125,48 @@ pub fn block_has_use(b: BlockId) -> bool {
         )
 }
 
-/// The hand a right-click uses: the main hand unless its item has no use for
-/// `target` and the off-hand item does (Minecraft's rule). An empty main hand
-/// has no use. A block that takes the held item ([`block_takes_held_item`])
-/// always keeps the main hand.
-pub fn use_hand(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Hand {
+/// The hand whose item has a use for `target`, in the click's order, or `None` when
+/// neither does: the main hand when its item has one (or the aimed block takes
+/// whatever is held, [`block_takes_held_item`]), else the off-hand when its item
+/// does. An empty hand has no use. The one decision behind [`use_hand`] and
+/// [`either_hand_has_use`].
+pub fn hand_with_use(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Option<Hand> {
     if target.block.is_some_and(block_takes_held_item) {
-        return Hand::Main;
+        return Some(Hand::Main);
     }
-    let main_used = main.is_some_and(|m| item_has_use(m, target));
-    if main_used {
-        return Hand::Main;
+    if main.is_some_and(|m| item_has_use(m, target)) {
+        return Some(Hand::Main);
     }
     match off {
         // BRIDGE: a Plan's Inspect dialog is keyed on a hotbar slot, so a Plan
         // in the off-hand never takes the click — replace when the dialog can
         // name the off-hand.
-        Some(Item::Plan(_)) => Hand::Main,
+        Some(Item::Plan(_)) => None,
         // A steed's pack goes on from the main hand only (a joiner's
         // `PackRequest` names the hotbar slot, `pack_attempt`): aimed at a
         // mob, a chest in the off-hand never takes the click, in local play as
         // joined (off-hand review M2).
-        Some(Item::Block(block::CHEST)) if target.mob => Hand::Main,
-        Some(o) if item_has_use(o, target) => Hand::Off,
-        _ => Hand::Main,
+        Some(Item::Block(block::CHEST)) if target.mob => None,
+        Some(o) if item_has_use(o, target) => Some(Hand::Off),
+        _ => None,
     }
+}
+
+/// The hand a right-click uses: the main hand unless its item has no use for
+/// `target` and the off-hand item does (Minecraft's rule). An empty main hand
+/// has no use. A block that takes the held item ([`block_takes_held_item`])
+/// always keeps the main hand. [`hand_with_use`], defaulting to the main hand.
+pub fn use_hand(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Hand {
+    hand_with_use(main, off, target).unwrap_or(Hand::Main)
+}
+
+/// Does either hand's item have a use for `target` (or does the block take the
+/// held item)? The question a thing that only acts when the click is otherwise
+/// unclaimed asks (a raised shield: a door or a mob should win). A shield in a hand
+/// answers for itself too ([`item_has_use`]: its use is the raise, so it has one
+/// wherever no block or mob claims the click).
+pub fn either_hand_has_use(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> bool {
+    hand_with_use(main, off, target).is_some()
 }
 
 /// Which hands swing when the player acts: `(main, off)`. Mining and attacking
@@ -145,29 +177,12 @@ pub fn swing_hands(break_block: bool, place_block: bool, place_uses_off_hand: bo
     (break_block || (place_block && !place_uses_off_hand), place_block && place_uses_off_hand)
 }
 
-/// Materials a right-click does something with wherever they are aimed (the
-/// right-click chain reads each of them): a Lead, bonemeal and fertiliser, a
-/// reed, the buckets, salt, the whistle and the firestarter.
-fn is_general_use_material(m: MaterialId) -> bool {
-    matches!(
-        m,
-        MaterialId::Lead
-            | MaterialId::Bonemeal
-            | MaterialId::Fertiliser
-            | MaterialId::PapyrusReed
-            | MaterialId::Bucket
-            | MaterialId::WaterBucket
-            | MaterialId::LavaBucket
-            | MaterialId::Salt
-            | MaterialId::RecallWhistle
-            | MaterialId::MagnesiumFirestarter
-    )
-}
-
 /// Does right-click do anything with `item` for `target`? See the module doc:
-/// this lists the chain's arms and errs toward "yes" for anything it cannot
-/// tell, except the ordinary tools and materials that plainly have no use.
+/// every tool and target-specific material asks the predicate its arm asks
+/// (`tool_uses`), so a hoe aimed at stone has no use and the off-hand item gets
+/// the click. Errs toward "yes" only for what no predicate can tell.
 pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
+    use crate::tool_uses as uses;
     match item {
         // A placeable block needs something to place against.
         Item::Block(_) => target.block.is_some(),
@@ -177,13 +192,15 @@ pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
         Item::Tool(tool) => match tool.tool_type {
             ToolType::Bow => target.arrows,
             ToolType::Slingshot => target.rubber_balls,
-            ToolType::Hoe
-            | ToolType::FlintAndSteel
-            | ToolType::Shears
-            | ToolType::FishingRod
-            | ToolType::Eraser
-            | ToolType::DraftingStamp => true,
-            // Melee and digging tools have no right-click use.
+            ToolType::Hoe => uses::hoe_tills(target.block, target.face, target.edit_blocked),
+            ToolType::FlintAndSteel => uses::flint_lights(target.block),
+            // A hive is the block case (`block_takes_held_item`); otherwise a sheep.
+            ToolType::Shears => target.mob_kind.is_some_and(uses::shears_cut),
+            ToolType::FishingRod => uses::rod_answers(),
+            ToolType::Eraser => uses::eraser_erases(target.block, target.edit_blocked),
+            ToolType::DraftingStamp => uses::stamp_captures(target.block),
+            // Melee and digging tools have no right-click use (the chain has no
+            // shovel path or axe strip).
             ToolType::Pickaxe | ToolType::Axe | ToolType::Sword | ToolType::Shovel => false,
             // Off-hand release (slice 5) — a shield's use is the raise: what a click
             // does when nothing else claims it. A mob, a chest, a door and the other
@@ -194,20 +211,34 @@ pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
             if item.is_food() {
                 return target.wants_to_eat || target.mob;
             }
-            if is_general_use_material(*m)
-                || (target.block.is_some()
-                    && (material_as_placeable_block(*m).is_some()
-                        || crate::use_edits::sown_crop(*m).is_some()
-                        || crate::cart::cart_hull_for_item(*m).is_some()))
-            {
-                return true;
+            let (block, blocked) = (target.block, target.edit_blocked);
+            // Any material a block can be made of is placed against any block.
+            let placeable = block.is_some() && material_as_placeable_block(*m).is_some();
+            match *m {
+                // The chain reads each of these wherever it is aimed: a Lead (a mob
+                // or a post), the buckets (a pond, a cow), the whistle.
+                MaterialId::Lead
+                | MaterialId::Bucket
+                | MaterialId::WaterBucket
+                | MaterialId::LavaBucket
+                | MaterialId::RecallWhistle => true,
+                // Target-specific: the arm's own test.
+                MaterialId::MagnesiumFirestarter => uses::flint_lights(block) || placeable,
+                MaterialId::Bonemeal => uses::bonemeal_grows(block, blocked) || placeable,
+                MaterialId::Fertiliser => uses::fertiliser_grows(block, blocked) || placeable,
+                MaterialId::Salt => uses::salt_paths(block, blocked) || placeable,
+                MaterialId::PapyrusReed => uses::reed_plants(block, target.face) || placeable,
+                // A Stick feeds a campfire; it is not for a mob.
+                MaterialId::Stick => matches!(block, Some(block::CAMPFIRE | block::CAMPFIRE_UNLIT)) || placeable,
+                // Seeds go on tilled soil, a cart on a rail (any block); any other
+                // material is for a mob (feeding or taming it) or nothing.
+                _ => {
+                    placeable
+                        || (crate::use_edits::sown_crop(*m).is_some() && uses::seeds_sown(block, target.face))
+                        || (block.is_some() && crate::cart::cart_hull_for_item(*m).is_some())
+                        || target.mob
+                }
             }
-            // A Stick feeds a campfire; any other material is for a mob
-            // (feeding or taming it) or nothing.
-            if *m == MaterialId::Stick {
-                return matches!(target.block, Some(block::CAMPFIRE | block::CAMPFIRE_UNLIT));
-            }
-            target.mob
         }
     }
 }
@@ -501,6 +532,94 @@ mod tests {
         // Another block in the off-hand is unchanged at a mob.
         let torch = Item::Block(block::TORCH);
         assert_eq!(use_hand(Some(&pick), Some(&torch), &mob_before_stone), Hand::Off);
+    }
+
+    // --- Review 1 finding 3: a use is a use for THIS target ---
+
+    fn aimed(b: BlockId, face: [i32; 3]) -> UseTarget {
+        UseTarget { block: Some(b), face, ..UseTarget::default() }
+    }
+
+    const UP: [i32; 3] = [0, 1, 0];
+    const SIDE: [i32; 3] = [1, 0, 0];
+
+    /// A tool in the main hand and a torch in the off-hand: which hand the click goes to.
+    fn with_a_torch_off(main: Item, target: &UseTarget) -> Hand {
+        use_hand(Some(&main), Some(&Item::Block(block::TORCH)), target)
+    }
+
+    #[test]
+    fn a_hoe_on_stone_hands_the_click_to_the_torch_but_still_tills_dirt_and_grass() {
+        let hoe = || tool(ToolType::Hoe);
+        assert_eq!(with_a_torch_off(hoe(), &aimed(block::STONE, UP)), Hand::Off, "stone: the torch is placed");
+        assert_eq!(with_a_torch_off(hoe(), &aimed(block::GRASS, UP)), Hand::Main, "grass top: the hoe tills");
+        assert_eq!(with_a_torch_off(hoe(), &aimed(block::DIRT, UP)), Hand::Main, "dirt top: the hoe tills");
+        assert_eq!(with_a_torch_off(hoe(), &aimed(block::GRASS, SIDE)), Hand::Off, "a side face is not tilled");
+        let no_edit = UseTarget { edit_blocked: true, ..aimed(block::GRASS, UP) };
+        assert_eq!(with_a_torch_off(hoe(), &no_edit), Hand::Off, "a mode that cannot edit tills nothing");
+    }
+
+    #[test]
+    fn shovel_shears_flint_and_eraser_decline_what_they_cannot_act_on() {
+        let stone = aimed(block::STONE, UP);
+        for t in [ToolType::Shovel, ToolType::Shears, ToolType::FlintAndSteel, ToolType::Eraser] {
+            assert_eq!(with_a_torch_off(tool(t), &stone), Hand::Off, "{t:?} on stone");
+        }
+        // And keep the click where they do act.
+        assert_eq!(with_a_torch_off(tool(ToolType::FlintAndSteel), &aimed(block::CAMPFIRE_UNLIT, UP)), Hand::Main);
+        assert_eq!(with_a_torch_off(tool(ToolType::Eraser), &aimed(block::BLUEPRINT_PAPER, UP)), Hand::Main);
+        let sheep = UseTarget { mob: true, mob_kind: Some(crate::mob::MobType::Sheep), ..stone };
+        let cow = UseTarget { mob: true, mob_kind: Some(crate::mob::MobType::Cow), ..stone };
+        assert_eq!(with_a_torch_off(tool(ToolType::Shears), &sheep), Hand::Main, "shears on a sheep");
+        assert_eq!(with_a_torch_off(tool(ToolType::Shears), &cow), Hand::Off, "shears on a cow: the off-hand gets the click");
+        assert_eq!(with_a_torch_off(tool(ToolType::Shears), &aimed(block::BEE_HIVE, SIDE)), Hand::Main, "a hive takes the held item");
+    }
+
+    #[test]
+    fn a_stamp_and_a_rod_answer_every_click_so_they_keep_it() {
+        let stone = aimed(block::STONE, UP);
+        assert_eq!(with_a_torch_off(tool(ToolType::DraftingStamp), &stone), Hand::Main);
+        assert_eq!(with_a_torch_off(tool(ToolType::FishingRod), &stone), Hand::Main);
+        assert_eq!(with_a_torch_off(tool(ToolType::FishingRod), &UseTarget::default()), Hand::Main);
+    }
+
+    #[test]
+    fn target_specific_materials_decline_the_wrong_target() {
+        let mat = |m| Item::Material(m);
+        let stone = aimed(block::STONE, UP);
+        for m in [MaterialId::Salt, MaterialId::Bonemeal, MaterialId::Fertiliser, MaterialId::PapyrusReed, MaterialId::MagnesiumFirestarter] {
+            assert_eq!(with_a_torch_off(mat(m), &stone), Hand::Off, "{m:?} on stone");
+        }
+        assert_eq!(with_a_torch_off(mat(MaterialId::Salt), &aimed(block::GRASS, UP)), Hand::Main);
+        assert_eq!(with_a_torch_off(mat(MaterialId::Bonemeal), &aimed(block::GRASS, UP)), Hand::Main);
+        assert_eq!(with_a_torch_off(mat(MaterialId::Fertiliser), &aimed(block::WHEAT_STAGE_0, UP)), Hand::Main);
+        assert_eq!(with_a_torch_off(mat(MaterialId::PapyrusReed), &aimed(block::SAND, UP)), Hand::Main);
+        assert_eq!(with_a_torch_off(mat(MaterialId::PapyrusReed), &aimed(block::SAND, SIDE)), Hand::Off, "a side face");
+        assert_eq!(with_a_torch_off(mat(MaterialId::MagnesiumFirestarter), &aimed(block::CAMPFIRE_UNLIT, UP)), Hand::Main);
+        let seed = crate::item::Item::Material(MaterialId::WheatSeeds);
+        assert!(crate::use_edits::sown_crop(MaterialId::WheatSeeds).is_some(), "the test needs real seeds");
+        assert_eq!(with_a_torch_off(seed.clone(), &stone), Hand::Off, "seeds on stone");
+        assert_eq!(with_a_torch_off(seed, &aimed(block::TILLED_SOIL, UP)), Hand::Main, "seeds on tilled soil");
+    }
+
+    /// The decision as an `Option`, and "does either hand have a use" derived from it.
+    #[test]
+    fn hand_with_use_names_the_hand_and_either_hand_has_use_says_whether_any_does() {
+        let (hoe, torch, sword, shield) = (tool(ToolType::Hoe), Item::Block(block::TORCH), tool(ToolType::Sword), tool(ToolType::Shield));
+        let stone = aimed(block::STONE, UP);
+        assert_eq!(hand_with_use(Some(&hoe), Some(&torch), &stone), Some(Hand::Off));
+        assert_eq!(hand_with_use(Some(&hoe), Some(&torch), &aimed(block::GRASS, UP)), Some(Hand::Main));
+        assert_eq!(hand_with_use(Some(&hoe), None, &stone), None, "nothing to do");
+        assert_eq!(hand_with_use(Some(&sword), Some(&sword), &stone), None);
+        assert!(either_hand_has_use(Some(&hoe), Some(&torch), &stone));
+        assert!(!either_hand_has_use(Some(&hoe), None, &stone));
+        // A door under the crosshair: the hand items with no use leave the click
+        // to the door, so a shield beside a sword has no other use there either.
+        let door = aimed(block::OAK_DOOR, UP);
+        assert!(!either_hand_has_use(Some(&sword), Some(&shield), &door), "a door wins over a shield: neither hand takes it");
+        assert!(either_hand_has_use(Some(&sword), Some(&shield), &UseTarget::default()), "in the open the shield has its use");
+        // A block that takes the held item counts as the main hand's.
+        assert_eq!(hand_with_use(None, Some(&torch), &aimed(block::COMPOSTER, UP)), Some(Hand::Main));
     }
 
     #[test]

@@ -1739,6 +1739,35 @@ mod tests {
         assert_eq!(sp.possession.wear_mismatch, 1, "an axe it doesn't hold");
     }
 
+    /// Review 1 finding 2: F during an in-flight swing. The sword is in the
+    /// off-hand when the accepted outcome arrives; the client's wear
+    /// (`joiner_actions::apply_outcome`) and the server's (`WearWeapon`) both
+    /// find it there. At 1 durability both destroy it, and neither holds a sword.
+    #[test]
+    fn a_swing_in_flight_over_an_f_swap_wears_the_sword_in_the_off_hand_on_both_copies() {
+        use crate::joiner_actions::{apply_outcome, Asked, Pending};
+        let mut sword = Tool::new(ToolType::Sword, ToolMaterial::Iron);
+        sword.durability = 1;
+        let hand = crate::hands::Hand::Main;
+        // Client: the swing was asked with the sword in hotbar slot 0 (Main); F
+        // moved it to the off-hand before the outcome arrived.
+        let mut inv = crate::inventory::Inventory::new();
+        let mut off = Some(ItemStack::new_tool(sword));
+        let request = Pending { kind: Asked::Swing, mob: None, hotbar_slot: 0, held: Some(Item::Tool(sword)), hand };
+        let outcome = crate::protocol::InteractOutcomePacket { seq: 1, entity: 1, kind: None, accepted: true, consume_held: 0, note: 0, window_event: 1 };
+        let applied = apply_outcome(&mut inv, &mut crate::craft_ui::CraftingUi::new(), &mut off, &request, &outcome);
+        assert!(applied.wear.as_ref().is_some_and(|w| w.just_broke), "the client wore the off-hand sword: {:?}", applied.wear.map(|w| w.just_broke));
+        assert!(off.is_none(), "destroyed on the client");
+        // Server: the same window, the same event (`WearWeapon`, Main).
+        let mut sp = joiner();
+        sp.offhand = Some(ItemStack::new_tool(sword));
+        queue(&mut sp, WindowEvent::WearWeapon { hand, slot: 0, tool: sword }, 0);
+        apply_through(&mut sp, 1, 0);
+        assert!(sp.offhand.is_none(), "destroyed on the server");
+        assert_eq!(sp.possession.wear_mismatch, 0, "found where it now is");
+        assert_eq!(sp.offhand, off);
+    }
+
     #[test]
     fn grant_unfit_is_clamped_to_its_grant_and_gives_back_only_what_the_window_holds_beyond_the_client() {
         // Lockstep: the server's window is as full as the client's, so its

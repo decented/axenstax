@@ -104,7 +104,7 @@ pub fn plan_right_click(ctx: &ArmCtx) -> MobArm {
     if ctx.kind == MobType::Cow && mat == Some(MaterialId::Bucket) {
         return if ctx.product_ready { MobArm::Milk } else { MobArm::Refused };
     }
-    if ctx.kind == MobType::Sheep
+    if crate::tool_uses::shears_cut(ctx.kind)
         && matches!(ctx.held, Some(Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shears)
     {
         return if ctx.product_ready { MobArm::Shear } else { MobArm::Refused };

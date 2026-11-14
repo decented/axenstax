@@ -2895,7 +2895,7 @@ impl HostedServer {
             // C3c-3a (v83) — a Plan the client minted in its own window,
             // mirrored on the server's copy by marker. Never answered.
             protocol::ItemAction::PlanMinted { source, x, y, z, hotbar_slot, spent, plan, .. } => {
-                return self.mirror_joiner_mint(i, *source, [*x, *y, *z], *hotbar_slot, spent.as_ref(), plan);
+                return self.mirror_joiner_mint(i, *source, [*x, *y, *z], (*hotbar_slot, req.hand), spent.as_ref(), plan);
             }
             // C3c-3b (v84) — wallpaper painted, blank paper laid, either
             // peeled: on the server's world, by the shared rule.
@@ -2949,7 +2949,8 @@ impl HostedServer {
 
     /// C3c-3a (v83) — joiner `i` minted a Plan in its own window
     /// (`ItemAction::PlanMinted`: a capture's commit, or an art capture that
-    /// spent the Blueprint Paper `spent` from hotbar slot `hotbar_slot`).
+    /// spent the Blueprint Paper `spent` with `hand`, from hotbar slot
+    /// `hotbar_slot` — the off-hand's own paper for `Hand::Off`).
     /// Mirrored on the server's copy by the client's steps in the client's
     /// order (`plan_mint::mirror_mint`): the marker placeholder lands by
     /// `add_item`, then `spent` is taken by the owed search. Log-only
@@ -2964,7 +2965,7 @@ impl HostedServer {
         i: usize,
         source: u8,
         cell: [i32; 3],
-        hotbar_slot: u8,
+        (hotbar_slot, hand): (u8, crate::hands::Hand),
         spent: Option<&protocol::WireStack>,
         plan: &protocol::WireItem,
     ) {
@@ -2988,7 +2989,7 @@ impl HostedServer {
             return;
         }
         let placeholder = crate::inventory::plan_from_wire(plan);
-        let mirrored = crate::plan_mint::mirror_mint(&mut sp.inventory, slot, placeholder, spent.as_ref());
+        let mirrored = crate::plan_mint::mirror_mint(&mut sp.inventory, &mut sp.offhand, slot, hand, placeholder, spent.as_ref());
         let clean = mirrored.clean() && source.is_some() && !spent_unread && spent_ok;
         if sp.possession.note_plan_mint(clean) {
             log::info!(

@@ -1336,9 +1336,14 @@ impl Rig {
     /// The client sends item action `action` (as `GameState::send_request`
     /// sends a never-answered one), then one tick.
     fn send_action(&mut self, action: protocol::ItemAction) {
+        self.send_action_with(action, crate::hands::Hand::Main);
+    }
+
+    /// [`Self::send_action`] made with `hand`.
+    fn send_action_with(&mut self, action: protocol::ItemAction, hand: crate::hands::Hand) {
         let c = &mut self.c;
         // Any request number (it is never answered); not the op sequence.
-        let pkt = protocol::ItemActionPacket { seq: 1000 + c.input_seq as u32, action, events_applied: c.events, hand: crate::hands::Hand::Main };
+        let pkt = protocol::ItemActionPacket { seq: 1000 + c.input_seq as u32, action, events_applied: c.events, hand };
         c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         self.tick();
     }
@@ -1518,6 +1523,65 @@ fn a_joiners_art_capture_lands_its_marker_where_the_client_did_and_moves_in_lock
     assert_eq!(t.window_mismatch, 0, "the placeholder moved as the Plan did");
     assert!(holds_plan(&rig.c.inv, 7, &art));
     assert!(holds_plan(&rig.hs.server.players[rig.c.slot].inventory, 7, &art));
+}
+
+/// Review 1 finding 1: an art capture paid with Blueprint Paper from the OFF-hand
+/// (a pickaxe in the main hand, no paper in the bag) leaves the server's copy
+/// with the Plan and no paper, as the client's is; and with paper in the bag too
+/// the off-hand stack is the one spent, on both copies.
+#[test]
+fn a_joiners_art_capture_paid_from_the_off_hand_takes_the_off_hand_paper_on_both_copies() {
+    use crate::hands::Hand;
+    let art = crate::plan::PlanData {
+        develop_state: crate::plan::DevelopState::Latent { exposure_ticks: 0 },
+        kind: crate::plan::PlanKind::Art,
+        ..developed_plan("Cyanotype: off-hand")
+    };
+    let pick = || ItemStack::new_tool(crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron));
+    for bag_paper in [0u8, 3] {
+        let mut rig = Rig::dedicated("art-mint-off");
+        rig.c.inv.set_slot(0, Some(pick()));
+        rig.sp().inventory.set_slot(0, Some(pick()));
+        if bag_paper > 0 {
+            rig.give(1, Item::Block(block::BLUEPRINT_PAPER), bag_paper);
+        }
+        // Both copies hold the off-hand paper (the rig's client keeps its off-hand
+        // in this local).
+        let mut client_off = Some(ItemStack::new_block(block::BLUEPRINT_PAPER, 2));
+        rig.sp().offhand = client_off.clone();
+        // The client's art-capture arm, by `hand`: add the Plan, then take the paper.
+        let paper = client_off.clone().map(|s| ItemStack { count: 1, ..s });
+        assert!(rig.c.inv.add_item(ItemStack { item: Item::Plan(art.clone()), count: 1 }).is_none());
+        assert!(crate::inventory::take_one_cell(&mut client_off).is_some());
+        rig.send_action_with(
+            protocol::ItemAction::PlanMinted {
+                source: crate::plan_mint::MintSource::CaptureArt.to_wire(),
+                x: ABOVE[0],
+                y: ABOVE[1],
+                z: ABOVE[2] - 1,
+                face: crate::mesh::Face::South.index() as u8,
+                hotbar_slot: 0,
+                spent: paper.as_ref().map(crate::inventory::stack_to_wire),
+                plan: crate::inventory::plan_to_wire(&art),
+            },
+            Hand::Off,
+        );
+        let sp = &rig.hs.server.players[rig.c.slot];
+        assert_eq!(sp.offhand, client_off, "bag paper {bag_paper}: the off-hand paper was the one spent");
+        assert_eq!(sp.offhand, Some(ItemStack::new_block(block::BLUEPRINT_PAPER, 1)));
+        let bag: u32 = sp.inventory.slots_iter().flatten().filter(|s| s.item == Item::Block(block::BLUEPRINT_PAPER)).map(|s| u32::from(s.count)).sum();
+        assert_eq!(bag, u32::from(bag_paper), "the bag's paper is untouched");
+        assert!(sp.inventory.slots_iter().flatten().any(|s| matches!(&s.item, Item::Plan(p) if p.marker.is_some())), "the Plan landed");
+        let t = rig.tally();
+        assert_eq!((t.plan_minted, t.plan_mismatch), (1, 0), "bag paper {bag_paper}: clean");
+        let c = &rig.c;
+        let sp = &rig.hs.server.players[rig.c.slot];
+        assert_eq!(
+            window::digest_parts(&c.inv, &c.armour, &client_off, &c.ui.cursor_item, &c.ui.grid, c.ui.station()),
+            window::digest_parts(&sp.inventory, &sp.armour, &sp.offhand, &sp.cursor, &sp.craft_grid, sp.station),
+            "bag paper {bag_paper}: the windows agree"
+        );
+    }
 }
 
 /// A joiner's capture commit, reported (`PlanMinted { CaptureCommit }`):

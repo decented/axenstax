@@ -116,22 +116,30 @@ impl Mirrored {
     }
 }
 
-/// Mirror a joiner's reported mint on `inv`, the server's copy of its
-/// inventory, by the client's steps in the client's order: first the Plan
+/// Mirror a joiner's reported mint on `inv` and `offhand`, the server's copy of
+/// its window, by the client's steps in the client's order: first the Plan
 /// lands by `Inventory::add_item` (`plan`, the marker placeholder decoded
 /// from the report: the first empty slot, as the client's own Plan did),
 /// then one of `spent` is taken by the owed search
-/// (`joiner_actions::take_owed`, from hotbar slot `slot` first — the slot the
-/// client's `take_one_from_hotbar` took it from). The order matters: a
+/// (`joiner_actions::take_owed_hand`: the off-hand first for `Hand::Off`, else
+/// hotbar slot `slot` first, then the rest — the place the client's
+/// `take_one_for(hand)` took it from). The order matters: a
 /// capture that spends the last paper of a slot frees that slot only after
 /// the Plan has landed elsewhere, on both sides. A placeholder with no room
 /// is dropped, never spilled.
-pub fn mirror_mint(inv: &mut Inventory, slot: usize, plan: Option<Item>, spent: Option<&Item>) -> Mirrored {
+pub fn mirror_mint(
+    inv: &mut Inventory,
+    offhand: &mut Option<ItemStack>,
+    slot: usize,
+    hand: crate::hands::Hand,
+    plan: Option<Item>,
+    spent: Option<&Item>,
+) -> Mirrored {
     let placed = match plan {
         Some(item @ Item::Plan(_)) => inv.add_item(ItemStack { item, count: 1 }).is_none(),
         _ => false,
     };
-    let paid = spent.is_none_or(|item| crate::joiner_actions::take_owed(inv, slot, item, 1) == 1);
+    let paid = spent.is_none_or(|item| crate::joiner_actions::take_owed_hand(inv, offhand, slot, hand, item, 1) == 1);
     Mirrored { placed, paid }
 }
 
@@ -179,7 +187,7 @@ mod tests {
         // The server, from the report.
         let wire = crate::inventory::item_to_wire_full(&Item::Plan(plan));
         let placeholder = crate::inventory::plan_from_wire(&wire);
-        let m = mirror_mint(&mut copy, 2, placeholder, Some(&paper(1).item));
+        let m = mirror_mint(&mut copy, &mut None, 2, crate::hands::Hand::Main, placeholder, Some(&paper(1).item));
         assert!(m.clean());
         for k in 0..36 {
             assert_eq!(copy.slot(k).is_some(), client.slot(k).is_some(), "slot {k}");
@@ -214,19 +222,48 @@ mod tests {
     fn a_mint_with_a_shortfall_is_counted_not_refused() {
         let plan = Item::Plan(PlanData::marker_placeholder(marker(&latent()), false));
         let mut inv = Inventory::new();
-        assert!(mirror_mint(&mut inv, 0, Some(plan.clone()), None).clean(), "a commit spends nothing");
-        let m = mirror_mint(&mut inv, 0, Some(plan.clone()), Some(&paper(1).item));
+        assert!(mirror_mint(&mut inv, &mut None, 0, crate::hands::Hand::Main, Some(plan.clone()), None).clean(), "a commit spends nothing");
+        let m = mirror_mint(&mut inv, &mut None, 0, crate::hands::Hand::Main, Some(plan.clone()), Some(&paper(1).item));
         assert_eq!(m, Mirrored { placed: true, paid: false }, "no paper in the copy");
         let mut full = Inventory::new();
         for k in 0..36 {
             full.set_slot(k, Some(ItemStack::new_block(crate::block::STONE, 64)));
         }
         assert!(!plan_fits(&full));
-        let m = mirror_mint(&mut full, 0, Some(plan), None);
+        let m = mirror_mint(&mut full, &mut None, 0, crate::hands::Hand::Main, Some(plan), None);
         assert!(!m.placed && m.paid, "no room: dropped");
         assert!(full.slots_iter().flatten().all(|s| s.item == Item::Block(crate::block::STONE)));
-        let m = mirror_mint(&mut inv, 0, Some(Item::Block(crate::block::STONE)), None);
+        let m = mirror_mint(&mut inv, &mut None, 0, crate::hands::Hand::Main, Some(Item::Block(crate::block::STONE)), None);
         assert!(!m.placed, "a report naming no Plan lands nothing");
         assert!(plan_fits(&Inventory::new()));
+    }
+
+    /// Review 1 finding 1: a capture whose paper came from the off-hand pays from
+    /// the off-hand on the server's copy, not from the bag's stack (or nowhere).
+    #[test]
+    fn a_mint_paid_from_the_off_hand_takes_the_off_hand_paper() {
+        use crate::hands::Hand;
+        let plan = Item::Plan(PlanData::marker_placeholder(marker(&latent()), false));
+        // No paper in the bag: only the off-hand holds it.
+        let mut inv = Inventory::new();
+        let mut off = Some(paper(1));
+        let m = mirror_mint(&mut inv, &mut off, 0, Hand::Off, Some(plan.clone()), Some(&paper(1).item));
+        assert!(m.clean(), "{m:?}");
+        assert!(off.is_none(), "the off-hand paper was the one spent");
+        // Paper in both places: the off-hand's is spent, the bag's stays.
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(paper(3)));
+        let mut off = Some(paper(2));
+        let m = mirror_mint(&mut inv, &mut off, 0, Hand::Off, Some(plan.clone()), Some(&paper(1).item));
+        assert!(m.clean());
+        assert_eq!(off, Some(paper(1)), "one off the off-hand stack");
+        assert_eq!(inv.slot(0), Some(&paper(3)), "the bag's stack untouched");
+        // The main hand still pays from the bag first.
+        let mut off = Some(paper(2));
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(paper(3)));
+        assert!(mirror_mint(&mut inv, &mut off, 0, Hand::Main, Some(plan), Some(&paper(1).item)).clean());
+        assert_eq!(inv.slot(0), Some(&paper(2)));
+        assert_eq!(off, Some(paper(2)));
     }
 }

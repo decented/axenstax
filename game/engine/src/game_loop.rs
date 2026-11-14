@@ -4615,20 +4615,21 @@ impl super::GameState {
     /// (a joined client asks its mirrored mobs), and what a click could use.
     fn use_target(&self, pidx: usize) -> crate::hands::UseTarget {
         let p = &self.players[pidx];
+        // The species of the mob in the crosshair. A joined client's mobs live in
+        // the render-only mirror, not in `self.ecs`: ask it the way the joined mob
+        // arm finds its mob, so the hand rule sees the same mob in local play and
+        // joined (off-hand review M2).
+        let mob_kind = if self.joined() {
+            self.joined_mob_under_crosshair(pidx).map(|m| m.kind)
+        } else {
+            crate::combat::find_attack_target(&self.ecs, p.player.eye_pos(), p.camera.forward()).and_then(|(_, kind)| kind)
+        };
         crate::hands::UseTarget {
             block: p.target_block.map(|b| self.world.get_block(b[0], b[1], b[2])),
-            // A joined client's mobs live in the render-only mirror, not in
-            // `self.ecs`: ask it the way the joined mob arm finds its mob, so the
-            // hand rule sees the same mob in local play and joined (off-hand
-            // review M2).
-            mob: if self.joined() {
-                self.joined_mob_under_crosshair(pidx).is_some()
-            } else {
-                matches!(
-                    crate::combat::find_attack_target(&self.ecs, p.player.eye_pos(), p.camera.forward()),
-                    Some((_, Some(_)))
-                )
-            },
+            mob: mob_kind.is_some(),
+            mob_kind,
+            face: p.target_face,
+            edit_blocked: !self.play_mode.can_edit_world(),
             wants_to_eat: p.combat.hunger < p.combat.max_hunger || p.combat.health < p.combat.max_health,
             arrows: p.inventory.count_material(crate::item::MaterialId::Arrow) > 0
                 || crate::shot::offhand_has_ammo(crate::protocol::ShotWeapon::Bow, p.offhand.as_ref()),
@@ -15541,9 +15542,11 @@ impl super::GameState {
                             self.players[pidx].place_cooldown = 8;
                         }
                         continue;
-                    } else if self.play_mode.can_edit_world() && target_blk == block::GRASS && self.players[pidx].held_for_use(hand)
+                    } else if self.players[pidx].held_for_use(hand)
                         .map(|s| matches!(s.item, crate::item::Item::Material(crate::item::MaterialId::Bonemeal)))
                         .unwrap_or(false)
+                        && target_blk == block::GRASS
+                        && crate::tool_uses::bonemeal_grows(Some(target_blk), !self.play_mode.can_edit_world())
                     {
                         // Wave 22: bonemeal on grass → grow tall grass in the
                         // air slot directly above. One bonemeal consumed per
@@ -15591,7 +15594,7 @@ impl super::GameState {
                             held.as_ref().map(|s| &s.item),
                             Some(crate::item::Item::Material(crate::item::MaterialId::MagnesiumFirestarter))
                         );
-                        if is_fas && target_blk == block::CAMPFIRE_UNLIT {
+                        if is_fas && crate::tool_uses::flint_lights(Some(target_blk)) {
                             // C3c-2 — a joiner's strike is the server's: it runs
                             // the lighting rule on its real campfire, wears the
                             // flint on the outcome, and the lit block comes back
@@ -16038,13 +16041,12 @@ impl super::GameState {
                             Some((pos[0], pos[1], pos[2]));
                         if pidx == 0 { self.release_cursor(); }
                         self.players[pidx].place_cooldown = 8;
-                    } else if self.play_mode.can_edit_world()
-                        && crate::use_edits::erases(target_blk)
-                        && self.players[pidx].held_for_use(hand)
+                    } else if self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 &s.item,
                                 crate::item::Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Eraser
                             ))
+                        && crate::tool_uses::eraser_erases(Some(target_blk), !self.play_mode.can_edit_world())
                         && !self.commons_blocks_local_edit(pidx, pos)
                     {
                         // Rubber feature — right-click BLUEPRINT_PAPER with Eraser:
@@ -16149,15 +16151,15 @@ impl super::GameState {
                                 self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
                             }
                         }
-                    } else if self.play_mode.can_edit_world()
-                        && crate::use_edits::tills(target_blk)
-                        && self.players[pidx].target_face == [0, 1, 0]
-                        && self.players[pidx].held_for_use(hand)
+                    } else if self.players[pidx].held_for_use(hand)
                             .map(|s| matches!(
                                 &s.item,
                                 crate::item::Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Hoe
                             ))
                             .unwrap_or(false)
+                        // The hand rule's own test (`tool_uses`): the top of dirt or
+                        // grass, where edits are allowed.
+                        && crate::tool_uses::hoe_tills(Some(target_blk), self.players[pidx].target_face, !self.play_mode.can_edit_world())
                         && !self.commons_blocks_local_edit(pidx, pos)
                     {
                         // Farming Tier 1 (Wave 26): hoe + right-click on the
@@ -16173,8 +16175,7 @@ impl super::GameState {
                         self.handle_tool_use(info);
                         self.audio.play_place();
                         self.players[pidx].place_cooldown = 8;
-                    } else if target_blk == block::TILLED_SOIL
-                        && self.players[pidx].target_face == [0, 1, 0]
+                    } else if crate::tool_uses::seeds_sown(Some(target_blk), self.players[pidx].target_face)
                         && !self.players[pidx].biting()
                     {
                         // Farming Tier 1 (Wave 26 Phase 6): right-click tilled
@@ -16217,14 +16218,13 @@ impl super::GameState {
                                 );
                             }
                         }
-                    } else if self.play_mode.can_edit_world()
-                        && crate::growth::is_crop(target_blk)
-                        && self.players[pidx].held_for_use(hand)
+                    } else if self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::Fertiliser)
                                     | crate::item::Item::Material(crate::item::MaterialId::Bonemeal),
                             ))
+                        && crate::tool_uses::fertiliser_grows(Some(target_blk), !self.play_mode.can_edit_world())
                         && !self.commons_blocks_local_edit(pidx, pos)
                     {
                         // Crop accelerators right-clicked on a growing crop advance
@@ -16272,10 +16272,7 @@ impl super::GameState {
                                     self.tick_counter ^ ((pos[0] as u64) << 16) ^ pos[2] as u64,
                                 );
                             }
-                    } else if (target_blk == block::DIRT
-                        || target_blk == block::GRASS
-                        || target_blk == block::SAND)
-                        && self.players[pidx].target_face == [0, 1, 0]
+                    } else if crate::tool_uses::reed_plants(Some(target_blk), self.players[pidx].target_face)
                         && !self.players[pidx].biting()
                         && self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
@@ -16406,13 +16403,12 @@ impl super::GameState {
                                 self.fire_challenge(crate::scenario::ChallengeEvent::UseBucket);
                                 self.players[pidx].place_cooldown = 8;
                             }
-                    } else if self.play_mode.can_edit_world()
-                        && crate::snowfall::target_block_accepts_salt_path(target_blk)
-                        && self.players[pidx].held_for_use(hand)
+                    } else if self.players[pidx].held_for_use(hand)
                             .is_some_and(|s| matches!(
                                 s.item,
                                 crate::item::Item::Material(crate::item::MaterialId::Salt),
                             ))
+                        && crate::tool_uses::salt_paths(Some(target_blk), !self.play_mode.can_edit_world())
                         && !self.commons_blocks_local_edit(pidx, pos)
                     {
                         // Salt feature — right-click Salt on GRASS/DIRT/SNOW
@@ -16553,7 +16549,7 @@ impl super::GameState {
                                         let face = crate::mesh::Face::from_normal(face).unwrap_or(crate::mesh::Face::North);
                                         let cell = (pos[0], pos[1], pos[2]);
                                         let source = crate::plan_mint::MintSource::CaptureArt;
-                                        self.send_plan_minted(source, cell, face, hot_art, paper.as_ref(), plan);
+                                        self.send_plan_minted(source, cell, face, (hot_art, hand), paper.as_ref(), plan);
                                     }
                                     self.audio.play_place();
                                     self.players[pidx].place_cooldown = 8;
@@ -17600,8 +17596,9 @@ impl super::GameState {
             // lights held in any visible player's hands, in this viewport's own
             // uniform. Presentation only; the world's light arrays are untouched.
             // Every local slot (yaw turned to the avatar's convention, as the own
-            // avatar's is) and every peer but this viewport's own player.
-            {
+            // avatar's is) and every peer but this viewport's own player. The same
+            // list lights this viewport's first-person hands (review 1, finding 4).
+            let viewport_lights = {
                 let mut states: Vec<crate::protocol::PlayerState> =
                     Vec::with_capacity(self.players.len() + self.remote_players.len());
                 for j in 0..self.players.len() {
@@ -17616,11 +17613,10 @@ impl super::GameState {
                 };
                 states.extend(self.remote_players.iter().filter(|rp| rp.player_index != local_idx).cloned());
                 let cam = glam::Vec3::new(camera_uniform.camera_pos[0], camera_uniform.camera_pos[1], camera_uniform.camera_pos[2]);
-                camera_uniform.carried = crate::carried_light::pack(&crate::carried_light::nearest(
-                    cam,
-                    crate::carried_light::sources(&states, &self.registry),
-                ));
-            }
+                let lights = crate::carried_light::nearest(cam, crate::carried_light::sources(&states, &self.registry));
+                camera_uniform.carried = crate::carried_light::pack(&lights);
+                lights
+            };
             self.renderer.update_camera(pidx, &camera_uniform);
 
             // Block highlight (already set in per-player frame loop above)
@@ -18066,12 +18062,18 @@ impl super::GameState {
                 // in the block channel would light the item like a torch).
                 let eye = slot.player.eye_pos();
                 let ch = self.world.light_channels_at(eye.x, eye.y - 0.9, eye.z);
-                // A light in your own hands lights them: the viewmodel pass has no
-                // world-space lights, so the block channel is raised here through the
-                // same twin (`carried_light::viewmodel_level`), for both hands.
+                // A light in your own hands lights them, and so does one another
+                // player carries: the viewmodel pass has no world-space lights, so the
+                // block channel is raised here on the CPU through the same twin the
+                // world uses, from this viewport's own selected lights (the list
+                // packed into its camera uniform) at the eye and from your own hands
+                // (`carried_light::viewmodel_block_level`).
                 let own_main = crate::carried_light::item_level(held.item, &self.registry);
                 let own_off = off_held.map_or(0, |h| crate::carried_light::item_level(h.item, &self.registry));
-                let ch = (ch.0.max(crate::carried_light::viewmodel_level(own_main, own_off)), ch.1);
+                let ch = (
+                    crate::carried_light::viewmodel_block_level(&viewport_lights, eye, ch.0, own_main, own_off),
+                    ch.1,
+                );
                 crate::entity_model::set_avatar_light(&mut arm_verts, ch, sky_brightness);
                 crate::entity_model::apply_light_channels(
                     &mut held_verts,
@@ -23089,7 +23091,7 @@ impl super::GameState {
             let hot = self.players[pidx].hotbar_slot;
             let plan = crate::inventory::plan_to_wire(&result.committed_plan);
             let source = crate::plan_mint::MintSource::CaptureCommit;
-            self.send_plan_minted(source, cell, crate::mesh::Face::Top, hot, None, plan);
+            self.send_plan_minted(source, cell, crate::mesh::Face::Top, (hot, crate::hands::Hand::Main), None, plan);
         }
         // Attachment-only change — re-mesh locally to drop
         // the consumed decal. NOT broadcast as a BlockChange:
@@ -23132,7 +23134,7 @@ impl super::GameState {
     /// C3c-3a (v83) — tell the server this joined client minted `plan` (its
     /// `inventory::plan_to_wire`) in its own window (it already holds it)
     /// from hotbar slot `slot`, spending
-    /// `spent` (read BEFORE the take; `None` for a commit): an
+    /// `spent` with `hand` (read BEFORE the take; `None` for a commit): an
     /// `ItemAction::PlanMinted`, never answered, routed and ordered exactly as
     /// a Q-drop's `ItemAction::Drop` ([`Self::send_drop_request`]): its own
     /// unanswered seq, through [`Self::send_request`], so it reaches the
@@ -23144,7 +23146,7 @@ impl super::GameState {
         source: crate::plan_mint::MintSource,
         cell: (i32, i32, i32),
         face: crate::mesh::Face,
-        slot: usize,
+        (slot, hand): (usize, crate::hands::Hand),
         spent: Option<&crate::item::ItemStack>,
         plan: crate::protocol::WireItem,
     ) {
@@ -23162,8 +23164,9 @@ impl super::GameState {
                 spent,
                 plan,
             },
-            // Stamped by `RemoteClient::send_item_action`.
-            events_applied: 0, hand: crate::hands::Hand::Main }));
+            // Stamped by `RemoteClient::send_item_action`. The hand the paper was
+            // spent with: the server pays the mint from the same one.
+            events_applied: 0, hand }));
     }
 
     /// C2a — ask the server to let player `pidx` (a joiner) sleep in the bed

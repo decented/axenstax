@@ -321,6 +321,7 @@ mod hostile_acts;
 mod grave;
 mod death;
 mod hands;
+mod tool_uses; // Off-hand review fixes: the per-target predicates the right-click arms and the hand rule share.
 mod shield; // Off-hand slice 5 — the shield: the front-arc block rule, wear and the raise.
 mod shield_pose; // Off-hand slice 5 — where the shield's mesh goes in each view and pose.
 mod starter_kit;

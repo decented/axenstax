@@ -922,11 +922,10 @@ pub fn apply_outcome(
         return applied;
     };
     match request.kind {
-        Asked::Swing => {
-            if let Some(at) = where_now(inv, request.hotbar_slot, held) {
-                applied.wear = inv.use_tool_at(at);
-            }
-        }
+        // The weapon wears wherever it is now, in either hand (an F swap while the
+        // swing was in flight moves it to the off-hand): the server's
+        // `WearWeapon` finds it by the same rule ([`wear_where_now`]).
+        Asked::Swing => applied.wear = wear_where_now(inv, offhand, request.hand, request.hotbar_slot, held),
         Asked::Interact(_) => {
             applied.consumed =
                 take_owed_held(inv, ui, offhand, request.hotbar_slot, request.hand, held, outcome.consume_held)
@@ -1015,7 +1014,29 @@ pub fn apply_use_wear(
         Asked::Shoot { .. } => request.kind.shot_weapon()?,
         _ => return None,
     };
-    match where_now_hand(inv, offhand, request.hand, request.hotbar_slot, &tool)? {
+    wear_where_now(inv, offhand, request.hand, request.hotbar_slot, &tool)
+}
+
+/// Wear one use off the tool `held` that a use made with `hand` (from hotbar slot
+/// `slot`) is owed against, wherever it is NOW: [`where_now_hand`] finds it (the
+/// hand's own place if it still holds it, else the 36 slots, else the off-hand)
+/// and the cell rule wears it (`Inventory::use_tool_at`, `use_tool_cell`).
+/// `None` when no place holds it.
+///
+/// THE one resolve-and-wear for any hand-held wear, run by both copies of a
+/// joiner's window: the client's accepted swing ([`apply_outcome`]) and block use,
+/// shot and reel ([`apply_use_wear`]) and the server's copy of each
+/// (`WindowEvent::WearWeapon`, which resolves with [`where_now_hand`] and wears by
+/// the same cell rule). A later wear owed against a hand's item (a shield's after
+/// an F swap) calls it too, so a swap in flight never wears the wrong piece or none.
+pub fn wear_where_now(
+    inv: &mut Inventory,
+    offhand: &mut Option<ItemStack>,
+    hand: crate::hands::Hand,
+    slot: usize,
+    held: &Item,
+) -> Option<crate::inventory::ToolUseInfo> {
+    match where_now_hand(inv, offhand, hand, slot, held)? {
         HeldAt::Slot(at) => inv.use_tool_at(at),
         HeldAt::Offhand => crate::inventory::use_tool_cell(offhand),
     }

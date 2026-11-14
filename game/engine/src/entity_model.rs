@@ -1422,6 +1422,39 @@ pub fn yaw_facing(dx: f32, dz: f32) -> f32 {
     dz.atan2(dx)
 }
 
+/// How far a crouching avatar is lowered (the builder's dip, and the lights its
+/// hands carry).
+pub const CROUCH_DIP: f32 = 0.25;
+
+/// The yaw the avatar's parts are turned by for a state's `yaw`: a quarter turn
+/// on top of it (the mob-facing convention). The ONE place that quarter turn
+/// lives: the builder and every light or effect that must sit at a hand use it.
+pub fn avatar_model_yaw(ps_yaw: f32) -> f32 {
+    ps_yaw + std::f32::consts::FRAC_PI_2
+}
+
+/// `p`, a point in the avatar's model space, turned about Y by the avatar's model
+/// yaw given as `(sin, cos)`. No translation.
+fn rotate_model_yaw(p: Vec3, (sin_y, cos_y): (f32, f32)) -> Vec3 {
+    Vec3::new(p.x * cos_y - p.z * sin_y, p.y, p.x * sin_y + p.z * cos_y)
+}
+
+/// Where a point `local` of the avatar's model space is in the world, for an
+/// avatar standing at `foot` with state yaw `ps_yaw`: the builder's transform
+/// (turn by [`avatar_model_yaw`], then move to the feet), for anything that has to
+/// sit on the avatar. No crouch dip: pass the dipped `foot` for that.
+pub fn avatar_world_point(foot: Vec3, ps_yaw: f32, local: Vec3) -> Vec3 {
+    foot + rotate_model_yaw(local, avatar_model_yaw(ps_yaw).sin_cos())
+}
+
+/// A hand's anchor in the avatar's model space: the bottom of its arm cuboid (the
+/// right arm, classic: `origin.y - size.y / 2` = 0.70; a slim arm's hand is
+/// narrower and half a pixel lower, which is why it is derived from the part).
+pub fn avatar_hand_anchor(side: crate::viewmodel::HandSide, arm_model: crate::skin_uv::ArmModel) -> Vec3 {
+    let arm = &player_model_for(arm_model)[side.arm_index()];
+    Vec3::new(arm.origin.x, arm.origin.y - arm.size.y * 0.5, arm.origin.z)
+}
+
 /// Vertices for the LOCAL player's OWN avatar, gated by camera mode. In
 /// first-person the player sees the viewmodel hand instead, so this returns
 /// `(empty, empty)`; in any third-person mode it returns the same body + held
@@ -1474,10 +1507,10 @@ pub fn build_player_avatar_vertices_with(
     let mut skin_verts = Vec::new();
     let mut held_verts = Vec::new();
     let anim_time = time_ticks as f32 / 20.0; // seconds
-    let yaw = ps.yaw + std::f32::consts::FRAC_PI_2; // match mob facing convention
+    let yaw = avatar_model_yaw(ps.yaw); // match mob facing convention
 
     // Crouch dip: lower the whole avatar by a small constant.
-    let crouch_dip = if ps.flags & player_flags::CROUCHING != 0 { 0.25 } else { 0.0 };
+    let crouch_dip = if ps.flags & player_flags::CROUCHING != 0 { CROUCH_DIP } else { 0.0 };
     let foot_pos = Vec3::new(ps.x, ps.y - crouch_dip, ps.z);
 
     // The right-arm swing angle (if mid-swing) — reused for both the arm part
@@ -1584,7 +1617,7 @@ pub fn build_player_avatar_vertices_with(
             continue;
         }
         let arm = &parts[side.arm_index()];
-        let hand_anchor = Vec3::new(arm.origin.x, arm.origin.y - arm.size.y * 0.5, arm.origin.z);
+        let hand_anchor = avatar_hand_anchor(side, opts.arm_model);
         let arm_pivot = arm.pivot;
         let mut item_verts = crate::item_model::held_item_mesh(held, registry, side);
         // Off-hand release (slice 5) — a shield is placed by its own pose (worn on
@@ -1595,10 +1628,8 @@ pub fn build_player_avatar_vertices_with(
             let m = crate::shield_pose::avatar_transform(arm.origin, arm.size, arm.pivot, side, raised);
             crate::shield_pose::transform_vertices(&mut item_verts, &m);
             for v in &mut item_verts {
-                let p = Vec3::from(v.position);
-                let rx = p.x * cos_y - p.z * sin_y;
-                let rz = p.x * sin_y + p.z * cos_y;
-                v.position = [rx + foot_pos.x, p.y + foot_pos.y, rz + foot_pos.z];
+                let p = rotate_model_yaw(Vec3::from(v.position), (sin_y, cos_y));
+                v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
             }
             held_verts.extend(item_verts);
             continue;
@@ -1616,9 +1647,8 @@ pub fn build_player_avatar_vertices_with(
                 p.z = arm_pivot.z + dy * sin_x + dz * cos_x;
             }
             // Yaw about Y, then translate to foot position.
-            let rx = p.x * cos_y - p.z * sin_y;
-            let rz = p.x * sin_y + p.z * cos_y;
-            v.position = [rx + foot_pos.x, p.y + foot_pos.y, rz + foot_pos.z];
+            let p = rotate_model_yaw(p, (sin_y, cos_y));
+            v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
         }
         held_verts.extend(item_verts);
     }

@@ -778,8 +778,11 @@ the count in `x`, elements 1 to 8 hold up to **eight** lights as `(world x, y, z
 the nearest to the camera first (`carried_light::nearest`). Every uniform built by hand has
 `CARRIED_LIGHTS_OFF` (count 0), and so does the viewmodel pass, whose `world_pos` is view
 space: a first-person hand is lit on the CPU instead, its block channel raised to
-`carried_light::viewmodel_level` (the brighter hand's level less 0.7 block) before
-`set_avatar_light` and `apply_light_channels`. The one light rule gains one input before it
+`carried_light::viewmodel_block_level` before `set_avatar_light` and `apply_light_channels`:
+the max of the voxel block level at the eye, the viewport's own selected carried lights (the very
+list packed into its camera uniform, so another player's torch lights your arms and held item as it
+lights the terrain beside them, evaluated at the eye by `world_light::carried_block`, the world's
+rule) and your own hands (`viewmodel_level`, the brighter hand's level less 0.7 block). The one light rule gains one input before it
 runs, in every fragment function that lights a world surface (`fs_main` through `shade_block`,
 `fs_plant`, `fs_decal`, `fs_transparent`, `fs_avatar` and the block half of `fs_water`):
 
@@ -794,8 +797,10 @@ lit brighter keeps its colour (a max, never a sum), and the emissive sentinel (>
 It is the same one rule: warm colour, the fixed per-face shade, no time input. `world_light::carried_block`
 is the CPU twin and the drift guard checks the WGSL constants (`CARRIED_MAX` 8, `CARRIED_LEVELS` 15)
 and that every call site goes through it. **Sources** (`carried_light.rs`): each hand that holds a
-light is one light at that hand (0.4 out to its side, 0.8 up from the holder's feet, turned with its
-yaw), for every local slot and every peer's `PlayerState` (`held_*`, `off_*`: nothing new on the
+light is one light at that hand: the avatar's own hand anchor (`entity_model::avatar_hand_anchor`, the
+classic arm: 0.375 out to its side, 0.70 up from the feet) placed by the avatar's own transform
+(`entity_model::avatar_world_point`: the state's yaw plus the builder's quarter turn, then the feet; one
+copy of that convention, which the held-item vertices use too), lowered with a crouching body, for every local slot and every peer's `PlayerState` (`held_*`, `off_*`: nothing new on the
 wire); a block gives its `light_emission`, a Sparkler 12 and a Flare 15. **Cost and limits.** Per
 fragment a count-guarded loop of at most eight distance tests (zero in the usual case); no remesh,
 no BFS, no simulation effect; the uniform stays far under WebGPU's 64 KiB. There is no occlusion

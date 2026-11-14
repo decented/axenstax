@@ -1131,6 +1131,23 @@ mod tests {
         assert_eq!(slot.offhand, Some(ItemStack::new_block(crate::block::TORCH, 5)), "the torches stay");
     }
 
+    /// Review 1 finding 3, as the click plays out: a hoe in the main hand and a
+    /// torch in the off-hand, aimed at stone, places the torch from the off-hand;
+    /// aimed at the top of grass the hoe keeps the click (it tills).
+    #[test]
+    fn a_hoe_on_stone_places_the_off_hand_torch_and_on_grass_keeps_the_click() {
+        let mut slot = fresh_slot();
+        slot.inventory.set_slot(slot.hotbar_slot, Some(ItemStack::new_tool(Tool::new(ToolType::Hoe, ToolMaterial::Iron))));
+        slot.offhand = Some(ItemStack::new_block(crate::block::TORCH, 5));
+        let grass_top = UseTarget { block: Some(crate::block::GRASS), face: [0, 1, 0], ..UseTarget::default() };
+        assert_eq!(hand_for(&slot, &grass_top), Hand::Main, "the hoe tills grass");
+        let hand = hand_for(&slot, &aimed_at_stone());
+        assert_eq!(hand, Hand::Off, "a hoe has no use on stone");
+        assert_eq!(slot.take_placeable_for(hand), Some(crate::block::TORCH), "the torch is placed");
+        assert_eq!(slot.offhand, Some(ItemStack::new_block(crate::block::TORCH, 4)));
+        assert!(slot.inventory.hotbar_slot(slot.hotbar_slot).is_some(), "the hoe stays");
+    }
+
     #[test]
     fn a_tool_in_the_off_hand_wears_there_and_breaks_there() {
         let mut slot = fresh_slot();

@@ -300,7 +300,7 @@ pub fn shear(
         held,
         Some(Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shears
     );
-    if kind != MobType::Sheep || !holding_shears {
+    if !crate::tool_uses::shears_cut(kind) || !holding_shears {
         return None;
     }
     if !product_ready(ecs, target, tick) {
