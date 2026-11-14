@@ -1061,7 +1061,18 @@ mod tests {
     /// px at 2.625 and at 3.0 pixels-per-point (about 914x411 and 800x360 points).
     const PHONES: [(f32, f32, f32); 2] = [(2400.0, 1080.0, 2.625), (2400.0, 1080.0, 3.0)];
     /// Plus a desktop-class window, so the phone fixes can't break it.
-    const SIZES: [(f32, f32, f32); 3] = [(2400.0, 1080.0, 2.625), (2400.0, 1080.0, 3.0), (1280.0, 720.0, 1.0)];
+    /// Also the window less the 103 px camera-hole inset (2297 wide: the Inventory
+    /// button sits within a couple of points of the Sneak/Place column there, and at
+    /// the narrower ratio it takes the top-row fallback).
+    const SIZES: [(f32, f32, f32); 7] = [
+        (2400.0, 1080.0, 2.625),
+        (2400.0, 1080.0, 3.0),
+        (2297.0, 1080.0, 2.625),
+        (2297.0, 1080.0, 3.0),
+        (2200.0, 1080.0, 3.0), // narrower still: forces the top-row fallback
+        (1024.0, 768.0, 1.0),  // 4:3 tablet
+        (1280.0, 720.0, 1.0),
+    ];
 
     /// Every rect the player sees at the bottom of the screen, in egui POINTS, at
     /// a physical size and scale: the nine drawn hotbar slots, the off-hand box,
