@@ -1482,6 +1482,16 @@ impl GameServer {
     pub fn set_play_mode(&mut self, mode: crate::play_mode::PlayMode) {
         self.play_mode = mode;
         self.is_creative = mode.is_creative();
+        // The creative exemption follows at once, on the bodies the tick keeps
+        // whole: a host's switch (`HostedServer::align_local_rules`) never
+        // revives a dead joiner (`keep_creative_whole`), only its Respawn does.
+        for sp in &mut self.players {
+            if mode.is_creative() && sp.server_simulated && sp.is_in_world() {
+                sp.combat.keep_creative_whole();
+            } else {
+                sp.combat.leave_creative();
+            }
+        }
     }
 
     /// Get the number of connected players.
@@ -2672,8 +2682,9 @@ impl GameServer {
             // none of its own and is sent its hunger (`own_hunger`). A
             // starvation death on Hard is the server's, announced like its
             // other hazard deaths (`DiedOf`). Creative bodies get the
-            // client's exemption (`keep_creative_whole`: never hurt, never
-            // dead). A host's local slot stays health-trusted and runs only
+            // client's exemption (`keep_creative_whole`: a living body is never
+            // hurt and never killed; a death already recorded waits for its
+            // Respawn). A host's local slot stays health-trusted and runs only
             // the hit timers: its client runs its metabolism and writes its
             // health every input, and its hunger is never sent, so a drain
             // here would starve the copy and, on Hard, kill it for good
@@ -2689,6 +2700,8 @@ impl GameServer {
             }
             if creative && sp.server_simulated && sp.is_in_world() {
                 sp.combat.keep_creative_whole();
+            } else {
+                sp.combat.leave_creative();
             }
             sp.interact_cooldown = sp.interact_cooldown.saturating_sub(1);
             sp.eat_cooldown = sp.eat_cooldown.saturating_sub(1);

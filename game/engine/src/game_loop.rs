@@ -7890,9 +7890,16 @@ impl super::GameState {
             }
             if self.is_creative {
                 // Creative players are invulnerable + don't drop inventory
-                // (the rule a server applies to joiners too, C2a).
+                // (the rule a server applies to joiners too, C2a): a LIVING body
+                // is kept whole. A death recorded before Creative is not
+                // cancelled: the body goes on below to its death screen and its
+                // Respawn, in any mode.
                 self.players[i].combat.keep_creative_whole();
-                continue;
+                if !self.players[i].combat.dead {
+                    continue;
+                }
+            } else {
+                self.players[i].combat.leave_creative();
             }
 
             // #47 — Inventory handling on death (Survival). Runs once per death
@@ -10885,6 +10892,7 @@ impl super::GameState {
             let lock_creative = crate::world_exit::creative_switch_locked(
                 self.scenario.as_ref().is_some_and(|s| s.def().lock_creative),
                 self.remote_client.is_some(),
+                self.players.iter().any(|p| p.combat.dead),
             );
             // A Trial (coverage Challenge or Race) is an ephemeral, retryable run —
             // the pause menu collapses to Resume / Try Again / Leave (no Save).
@@ -11027,12 +11035,14 @@ impl super::GameState {
                 crate::menu::PAUSE_SWITCH_CREATIVE if crate::world_exit::creative_switch_locked(
                     self.scenario.as_ref().is_some_and(|s| s.def().lock_creative),
                     self.remote_client.is_some(),
+                    self.players.iter().any(|p| p.combat.dead),
                 ) =>
                 {
                     // Belt-and-braces: the button is hidden when a locking
-                    // scenario is active or the world is someone else's, so this
-                    // can't normally fire — but never honour it then.
-                    log::warn!("ignored Switch-to-Creative (locked scenario or joined world)");
+                    // scenario is active, the world is someone else's or a
+                    // player here is dead, so this can't normally fire — but
+                    // never honour it then.
+                    log::warn!("ignored Switch-to-Creative (locked scenario, joined world or a death waiting for Respawn)");
                 }
                 crate::menu::PAUSE_SWITCH_CREATIVE => {
                     self.set_play_mode(crate::play_mode::PlayMode::Creative);

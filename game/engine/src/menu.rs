@@ -4075,7 +4075,9 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
 
                     // Switch to Creative button (only in survival worlds, and
                     // NOT while a scenario that locks creative is active — a
-                    // competition can't be cheated into creative mid-run).
+                    // competition can't be cheated into creative mid-run — nor
+                    // while a player here is dead: `lock_creative`,
+                    // `world_exit::creative_switch_locked`).
                     if !is_creative && !lock_creative {
                         ui.add_space(8.0);
                         let creative_btn = egui::Button::new(

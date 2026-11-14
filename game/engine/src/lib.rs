@@ -2011,6 +2011,16 @@ impl GameState {
     pub fn set_play_mode(&mut self, mode: crate::play_mode::PlayMode) {
         self.play_mode = mode;
         self.is_creative = mode.is_creative();
+        // The creative exemption follows at once (the death loop keeps it every
+        // tick), so no hit lands between a switch and the next tick. It never
+        // revives a dead body (`keep_creative_whole`).
+        for p in &mut self.players {
+            if mode.is_creative() {
+                p.combat.keep_creative_whole();
+            } else {
+                p.combat.leave_creative();
+            }
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
