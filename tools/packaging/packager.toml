@@ -18,7 +18,7 @@
 # config file with no sibling manifest.
 name = "axenstax"
 productName = "AxeNStax"
-version = "0.2.38"                       # keep in step with game/engine/Cargo.toml
+version = "0.2.39"                       # keep in step with game/engine/Cargo.toml
 identifier = "com.axenstax.engine"      # reverse-DNS; alphanumeric/-/. only
 # Copy rule: sovereignty-first, never "earn"/"Bitcoin" on a public surface
 # (UK FCA promotion perimeter + permanent word guards — see CLAUDE.md red lines).
