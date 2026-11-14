@@ -2202,15 +2202,32 @@ fn draw_debug_overlay(
 /// button was the only touch way to close this window; the chip replaces it.
 /// Returns true on the frame it is tapped.
 pub fn draw_touch_close_chip(ctx: &egui::Context) -> bool {
+/// How big the Close chip is, in points.
+const TOUCH_CLOSE_CHIP_SIZE: egui::Vec2 = egui::vec2(88.0, 40.0);
+/// How far in from the top-right corner it sits, in points.
+const TOUCH_CLOSE_CHIP_INSET: egui::Vec2 = egui::vec2(12.0, 8.0);
+
+/// Where the Close chip sits on a screen of `screen` points. The one place that says, for the
+/// drawing and for the tests that keep it off the inventory window.
+pub fn touch_close_chip_rect(screen: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(screen.right() - TOUCH_CLOSE_CHIP_INSET.x - TOUCH_CLOSE_CHIP_SIZE.x, screen.top() + TOUCH_CLOSE_CHIP_INSET.y),
+        TOUCH_CLOSE_CHIP_SIZE,
+    )
+}
+
     let mut tapped = false;
     egui::Area::new(egui::Id::new("touch_close_chip"))
-        .anchor(egui::Align2::RIGHT_TOP, [-12.0, 8.0])
+        .fixed_pos(rect.min)
         .order(egui::Order::Foreground)
+/// Its rectangle is [`touch_close_chip_rect`], kept clear of the inventory
+/// window on the phone and tablet sizes by `craft_ui_phone_tests`.
         .interactable(true)
         .show(ctx, |ui| {
             let label = egui::RichText::new("Close").size(18.0).color(egui::Color32::WHITE);
+    let rect = touch_close_chip_rect(ctx.content_rect());
             let button = egui::Button::new(label)
-                .min_size(egui::vec2(88.0, 40.0))
+                .min_size(rect.size())
                 .fill(egui::Color32::from_rgba_unmultiplied(40, 40, 46, 230));
             if ui.add(button).clicked() {
                 tapped = true;

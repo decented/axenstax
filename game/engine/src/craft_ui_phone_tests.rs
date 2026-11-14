@@ -11,6 +11,8 @@ use crate::screen::ViewportRect;
 const DEVICES: [(egui::Vec2, f32); 2] = [(egui::vec2(800.0, 360.0), 3.0), (egui::vec2(914.0, 411.0), 2.625)];
 /// The smallest a slot may be drawn on a phone, in points.
 const THUMB: f32 = 28.0;
+/// What the three buttons of the window say.
+const BUTTON_LABELS: [&str; 3] = ["\u{2195} Sort", "\u{1F5D1} Trash", "\u{1F4D6} Recipe Book"];
 
 fn screen_of(size: egui::Vec2) -> egui::Rect {
     egui::Rect::from_min_size(egui::Pos2::ZERO, size)
@@ -111,6 +113,32 @@ impl Rig {
         let mut out = Vec::new();
         self.output.shapes.iter().for_each(|clipped| walk(&clipped.shape, clipped.clip_rect, &mut out));
         out
+    }
+
+    /// The rectangle of every button (Sort, Trash, Recipe Book) drawn this frame: the
+    /// 40-point-high rectangle behind each label.
+    fn buttons(&self) -> Vec<egui::Rect> {
+        fn walk(shape: &egui::epaint::Shape, texts: &[(String, egui::Rect)], out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::epaint::Shape::Rect(r)
+                    if (r.rect.height() - 40.0).abs() < 0.5
+                        && texts.iter().any(|(t, tr)| BUTTON_LABELS.contains(&t.as_str()) && r.rect.contains_rect(*tr)) =>
+                {
+                    out.push(r.rect)
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, texts, out)),
+                _ => {}
+            }
+        }
+        let texts = texts_of(&self.output);
+        let mut out = Vec::new();
+        self.output.shapes.iter().for_each(|clipped| walk(&clipped.shape, &texts, &mut out));
+        out
+    }
+
+    /// Where the window panel sits, as egui last laid it out.
+    fn panel(&self) -> Option<egui::Rect> {
+        self.ctx.memory(|m| m.area_rect(egui::Id::new(("craft_panel", 0usize))))
     }
 
     fn on_screen(&self, label: &str) -> bool {
@@ -218,5 +246,31 @@ fn a_desktop_window_keeps_the_inventory_layout_it_always_had() {
         let mut xs = row.clone();
         xs.sort_by(f32::total_cmp);
         assert!(xs.windows(2).all(|w| (w[1] - w[0] - 52.0).abs() < 0.01), "the slots of a row are not 52 apart: {xs:?}");
+    }
+}
+
+/// The floating Close chip (`hud_ui::touch_close_chip_rect`) is drawn while this window is open on a
+/// touch device. It must not sit over a slot or a button of the window, on a phone or a tablet.
+#[test]
+fn the_floating_close_chip_clears_every_slot_and_button_of_the_window() {
+    let screens = [
+        (egui::vec2(800.0, 360.0), 3.0),
+        (egui::vec2(914.0, 411.0), 2.625),
+        (egui::vec2(412.0, 915.0), 2.625),
+        (egui::vec2(1280.0, 800.0), 1.0),
+        (egui::vec2(1024.0, 768.0), 1.0),
+    ];
+    for (size, ppp) in screens {
+        let rig = Rig::new(size, ppp, true);
+        let chip = crate::hud_ui::touch_close_chip_rect(screen_of(size));
+        let rects: Vec<egui::Rect> = rig.slots().into_iter().map(|(r, _)| r).chain(rig.buttons()).collect();
+        let gap = |r: &egui::Rect| (r.left() - chip.right()).max(chip.left() - r.right()).max(0.0).hypot((r.top() - chip.bottom()).max(chip.top() - r.bottom()).max(0.0));
+        let nearest = rects.iter().min_by(|a, b| gap(a).total_cmp(&gap(b))).expect("the window drew nothing");
+        eprintln!("{size:?} ppp {ppp}: chip {chip:?}, nearest slot or button {nearest:?}, {} points away", gap(nearest));
+        let under: Vec<&egui::Rect> = rects.iter().filter(|r| r.intersects(chip)).collect();
+        assert!(under.is_empty(), "at {size:?} the chip {chip:?} covers {under:?}");
+        if let Some(panel) = rig.panel() {
+            eprintln!("{size:?}: the window panel is {panel:?}");
+        }
     }
 }
