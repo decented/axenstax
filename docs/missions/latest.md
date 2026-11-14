@@ -301,7 +301,7 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 - The shield starts blocking after **0.25 seconds** (5 ticks) of right-click held. Letting go lowers it straight away.
 - It blocks hits from the front half: within 90 degrees of where you look, flat across the ground. Height does not matter.
 - It does not block lava, fire, falling, drowning or hunger.
-- Hold right-click to raise it. A chest, a door, or a mob you can actually do something to (feeding, taming, a Lead, milking, shearing, riding, trading, or a command to your own pet) takes the click instead, and the shield stays down there.
+- Hold right-click to raise it. A chest, a door, or a mob you can actually do something to (feeding, taming, a Lead, milking, shearing, riding, trading, or a command to your own pet, which takes an empty main hand) takes the click instead, and the shield stays down there.
 - An enemy you cannot use anything on (a brigand, marauder or berserker) does not take the click, so facing one the shield goes up.
 - Once raised, the shield stays up while you hold the button, whatever comes under the crosshair.
 - With a shield in the main hand and a torch in the off-hand, right-clicking stone places the torch.
