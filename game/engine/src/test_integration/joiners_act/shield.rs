@@ -450,3 +450,248 @@ fn a_joiner_dying_in_the_blocking_tick_leaves_no_intact_shield_in_the_grave() {
     let on_floor = rig.ecs().query::<&crate::entity::ItemEntity>().iter().any(|(_, i)| is_shield(&i.stack));
     assert!(!in_grave && !on_floor, "the shield that was owed broken is not in the grave or on the floor");
 }
+
+// --- Review 3 ---
+
+/// Review 3 #1. A joiner puts its only shield into an item frame: the server inserts
+/// it and queues a `Take`, leaving the raw copy unchanged until the acknowledgement.
+/// The shield is spent: it protects nothing, and the next front hit lands, on either
+/// seat kind.
+fn a_shield_a_pending_take_has_spent_protects_nothing(mode: crate::action_identity::InventoryMode, tag: &str) {
+    let (mut rig, brigand) = rig_with_weak_shield(tag, crate::crafting::SHIELD_DURABILITY, mode);
+    let slot = rig.joiners[0].slot;
+    raise(&mut rig);
+    rig.tick(RAISE_TICKS + 1);
+    assert!(rig.hs.server.players[slot].shield_guard().is_some(), "guarding before the frame takes it");
+    let now = rig.hs.server.tick_counter;
+    let gone = Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Wood));
+    crate::window_events::queue(
+        &mut rig.hs.server.players[slot],
+        crate::window_events::WindowEvent::Take { slot: 0, hand: crate::hands::Hand::Main, item: gone, n: 1, how: "item frame" },
+        now,
+    );
+    assert_eq!(shadow_shield_durability(&rig), Some(crate::crafting::SHIELD_DURABILITY), "the raw copy still holds it");
+    assert_eq!(rig.hs.server.players[slot].effective_shield(), None, "but a pending take has spent it");
+    assert!(rig.hs.server.players[slot].shield_guard().is_none());
+    let hp = health(&rig);
+    bite(&mut rig, brigand, true);
+    assert!(health(&rig) < hp, "the front hit lands: the shield is in the frame");
+    assert!(shield_worn(&rig).is_empty(), "and nothing wears");
+}
+
+#[test]
+fn a_mirror_seats_shield_taken_by_a_pending_event_protects_nothing() {
+    a_shield_a_pending_take_has_spent_protects_nothing(crate::action_identity::InventoryMode::Mirror, "take-mirror");
+}
+
+#[test]
+fn a_strict_seats_shield_taken_by_a_pending_event_protects_nothing() {
+    a_shield_a_pending_take_has_spent_protects_nothing(crate::action_identity::InventoryMode::Strict, "take-strict");
+}
+
+/// Review 3 #2. The blocking shield (200) moves to another slot and a spare (50) takes
+/// its place before the wear lands. The shield that blocked pays, wherever it went.
+#[test]
+fn a_wear_finds_the_shield_that_blocked_wherever_a_window_move_put_it() {
+    let (mut rig, brigand) = rig_with_weak_shield("moved", 200, crate::action_identity::InventoryMode::Mirror);
+    let slot = rig.joiners[0].slot;
+    raise(&mut rig);
+    rig.tick(RAISE_TICKS + 1);
+    bite(&mut rig, brigand, true);
+    let wear = shield_worn(&rig)[0].1;
+    // The window move, before the client's acknowledgement: the 200 shield to slot 5,
+    // a spare 50 shield in its place.
+    let sp = &mut rig.hs.server.players[slot];
+    let shield = |d| Some(crate::item::ItemStack::new_tool(Tool { durability: d, ..Tool::new(ToolType::Shield, ToolMaterial::Wood) }));
+    sp.inventory.set_slot(5, shield(200));
+    sp.inventory.set_slot(0, shield(50));
+    rig.report();
+    let sp = &rig.hs.server.players[slot];
+    let at = |i| match sp.inventory.slot(i).map(|s| &s.item) {
+        Some(Item::Tool(t)) => Some(t.durability),
+        _ => None,
+    };
+    assert_eq!(at(5), Some(200 - wear), "the shield that blocked pays");
+    assert_eq!(at(0), Some(50), "the spare that took its place does not");
+}
+
+/// Review 3 #2, both copies: the one rule finds the same shield for a client's window
+/// and the server's, so the two agree. Equal shields are interchangeable: whichever of
+/// two identical shields pays, the two copies pay the same one, and no lineage is kept.
+#[test]
+fn both_copies_of_a_window_wear_the_same_shield() {
+    use crate::hands::Hand;
+    let shield = |d| Some(crate::item::ItemStack::new_tool(Tool { durability: d, ..Tool::new(ToolType::Shield, ToolMaterial::Wood) }));
+    let build = || {
+        let mut inv = crate::inventory::Inventory::new();
+        inv.set_slot(0, shield(50));
+        inv.set_slot(5, shield(200));
+        (inv, None)
+    };
+    let (mut a, mut a_off) = build();
+    let (mut b, mut b_off) = build();
+    for (inv, off) in [(&mut a, &mut a_off), (&mut b, &mut b_off)] {
+        let out = crate::shield::wear_blocking(inv, 0, off, Hand::Main, 200, 7);
+        assert_eq!(out, crate::shield::WearOutcome::Worn { broke: false });
+    }
+    let dur = |inv: &crate::inventory::Inventory, i| match inv.slot(i).map(|s| &s.item) {
+        Some(Item::Tool(t)) => Some(t.durability),
+        _ => None,
+    };
+    assert_eq!((dur(&a, 0), dur(&a, 5)), (Some(50), Some(193)));
+    assert_eq!((dur(&a, 0), dur(&a, 5)), (dur(&b, 0), dur(&b, 5)), "both copies agree");
+    // Identical shields: the named hand's place pays first, on both copies alike.
+    let (mut c, mut c_off) = (crate::inventory::Inventory::new(), shield(80));
+    c.set_slot(0, shield(80));
+    let mut d = c.clone();
+    let mut d_off = c_off.clone();
+    crate::shield::wear_blocking(&mut c, 0, &mut c_off, Hand::Main, 80, 3);
+    crate::shield::wear_blocking(&mut d, 0, &mut d_off, Hand::Main, 80, 3);
+    assert_eq!((dur(&c, 0), c_off.as_ref().map(|s| &s.item)), (dur(&d, 0), d_off.as_ref().map(|s| &s.item)));
+    assert_eq!(dur(&c, 0), Some(77), "the named hand's shield");
+}
+
+/// Review 3 #3. A lent host counts its raise in the clock phase, ahead of its inputs.
+/// A release processed in the tick takes effect for every damage phase after it: a
+/// species hit and a hostile melee hit land, though the tick's count still says
+/// "raised". (A raise may count one tick late, and an early blast may still see the
+/// previous tick's raise: Spec 05.)
+#[test]
+fn a_lent_hosts_processed_release_lowers_the_shield_for_the_hits_after_it() {
+    let mut rig = Rig::new_lent("lent-release", 1);
+    let slot = rig.joiners[0].slot;
+    crate::spawn_protection::disarm(&mut rig.hs.server.players[slot]);
+    rig.hs.server.players[slot].inventory.set_slot(0, Some(crate::item::ItemStack::new_tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))));
+    rig.hs.server.players[slot].hotbar_slot = 0;
+    raise(&mut rig);
+    rig.tick(RAISE_TICKS + 3);
+    assert!(rig.hs.server.players[slot].shield_ticks > RAISE_TICKS, "raised and effective");
+    let (brigand, _) = rig.spawn(MobType::Brigand, Vec3::new(0.0, 0.0, 6.0));
+    let bee = a_bee()(&mut rig, slot);
+    // The release arrives as an input: the lent tick's clock phase has already counted
+    // the old latch; the inbound pass then lowers it, before the species and melee phases.
+    let input = protocol::InputPacket { tick: 99, yaw: std::f32::consts::PI, health: 20.0, shield_raised: false, ..Default::default() };
+    rig.joiners[0].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    rig.hs.server.players[slot].combat.invincible_timer = 0;
+    rig.hs.server.players[slot].combat.shield_window = 0;
+    rig.place(brigand, Vec3::new(0.0, 0.0, 0.6));
+    rig.place(bee, Vec3::new(0.0, 0.0, 1.5));
+    let hp = health(&rig);
+    rig.hs.server.difficulty = NORMAL;
+    rig.tick(1);
+    rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+    assert!(!rig.hs.server.players[slot].shield_latch, "the release was processed");
+    assert!(rig.ecs().get::<&crate::bee_ai::BeeData>(bee).is_err(), "the bee stung");
+    assert!(health(&rig) < hp, "the hits land: the release is in force for every phase after it");
+    assert!(shield_worn(&rig).is_empty(), "and neither was blocked");
+}
+
+/// A lent rig whose joiner holds a shield of `durability` in its main hand, raised
+/// and effective, in Survival.
+fn lent_rig_with_shield(tag: &str, durability: u16) -> Rig {
+    let mut rig = Rig::new_lent(tag, 1);
+    let slot = rig.joiners[0].slot;
+    crate::spawn_protection::disarm(&mut rig.hs.server.players[slot]);
+    let sp = &mut rig.hs.server.players[slot];
+    sp.inventory.set_slot(
+        0,
+        Some(crate::item::ItemStack::new_tool(Tool { durability, ..Tool::new(ToolType::Shield, ToolMaterial::Wood) })),
+    );
+    sp.hotbar_slot = 0;
+    rig.hs.server.play_mode = crate::play_mode::PlayMode::Survival;
+    raise(&mut rig);
+    rig.tick(RAISE_TICKS + 1);
+    rig
+}
+
+/// What a lent tick does before its server tick, as far as this joiner is concerned:
+/// the clock phase (the raise counted), then the host's early blasts: one from the
+/// front that wears the shield (it breaks a weak one), and when `rear_kills` one from
+/// behind that kills. Then the connection closes: the Disconnect is read by the
+/// server tick's inbound pass, before the end-of-tick wear queue has run.
+fn early_blasts_then_the_seat_leaves(rig: &mut Rig, rear_kills: bool) {
+    let slot = rig.joiners[0].slot;
+    let registry = crate::block::BlockRegistry::new();
+    let at = rig.at;
+    let cell = |dz: f32| ((at.x - 0.5).round() as i32, at.y as i32, (at.z + dz - 0.5).round() as i32);
+    let mode = crate::play_mode::PlayMode::Survival;
+    {
+        let host = rig.host.as_mut().expect("lent");
+        let seed = crate::sim_clock::ClockSeed {
+            world_time: host.clock.world_time,
+            world_time_step: 1,
+            tick_counter: host.clock.tick_counter,
+            weather: host.clock.weather,
+            weather_lock_applied: None,
+            night_calendar: host.clock.night_calendar,
+            calendar_id: host.clock.calendar_id,
+        };
+        rig.hs.server.run_clock_phase(&seed, true, None, &mut host.world.sim_tally).expect("one clock phase");
+        rig.hs.server.players[slot].combat.invincible_timer = 0;
+        rig.hs.server.players[slot].combat.shield_window = 0;
+        let landed = crate::explosion::apply_joiner_blast_damage(&mut rig.hs.server.players, &host.world, &registry, cell(2.0), mode);
+        assert!(!landed.contains(&slot), "the front blast is blocked");
+        assert!(rig.hs.server.players[slot].effective_shield().is_none(), "and breaks the weak shield, effectively");
+        if rear_kills {
+            let sp = &mut rig.hs.server.players[slot];
+            sp.combat.invincible_timer = 0;
+            sp.combat.shield_window = 0;
+            sp.combat.health = 0.5;
+            let landed = crate::explosion::apply_joiner_blast_damage(&mut rig.hs.server.players, &host.world, &registry, cell(-2.0), mode);
+            assert!(landed.contains(&slot), "the rear blast lands");
+            assert!(rig.hs.server.players[slot].combat.dead, "and kills");
+        }
+    }
+    rig.joiners[0].leave();
+    let host = rig.host.as_mut().expect("lent");
+    let clock = host.clock;
+    crate::sim_lend::LentSim::lend(&mut rig.hs, host.parts(), clock).tick();
+}
+
+/// Review 3 #4. An early front blast breaks a weak shield (effectively), a rear blast
+/// kills the joiner, and the seat's disconnect is read in the server tick's inbound
+/// pass, before the end-of-tick wear queue. The death is settled from a window that
+/// already has the wear: no intact shield in the grave.
+#[test]
+fn a_seat_that_leaves_after_dying_in_the_blocking_tick_leaves_no_intact_shield_in_the_grave() {
+    let mut rig = lent_rig_with_shield("leave-dead", 1);
+    early_blasts_then_the_seat_leaves(&mut rig, true);
+    let is_shield = |s: &crate::item::ItemStack| matches!(&s.item, Item::Tool(t) if t.tool_type == ToolType::Shield);
+    let in_grave = rig.world_mut().iter_graves().any(|(_, g)| g.slots.iter().flatten().any(is_shield));
+    let on_floor = rig.ecs().query::<&crate::entity::ItemEntity>().iter().any(|(_, i)| is_shield(&i.stack));
+    assert!(!in_grave && !on_floor, "the shield the early blast broke is not in the grave or on the floor");
+}
+
+/// Review 3 #4, a survivor: it leaves in the same boundary, and the record saved for
+/// its npub has the shield worn out (queued before the leave save), not intact.
+#[test]
+fn a_signed_survivor_that_leaves_in_the_blocking_tick_saves_the_worn_shield() {
+    let _root = crate::save::WorldsRootGuard::new("shield-leave-alive");
+    let mut rig = lent_rig_with_shield("leave-alive", 1);
+    let slot = rig.joiners[0].slot;
+    rig.sign_in(0);
+    // Bound to this world, as a signed joiner's progression is (a guest's is never saved).
+    let scope = [23; 16];
+    rig.host.as_mut().expect("lent").world.quest_scope = Some(scope);
+    rig.hs.server.players[slot].personal = Some(
+        crate::joiner_save::BoundPersonal::fresh(crate::progression::GameplayBinding::WorldLocal {
+            scope,
+            player: crate::progression::WorldPlayer::Npub(NPUB_KEY),
+        })
+        .expect("a binding"),
+    );
+    // The rig can save this seat at all (a precondition, so a failure here says why);
+    // then clear the record so only the leave save can have written it.
+    let path = rig.hs.server.joiner_path(NPUB_KEY);
+    rig.hs.server.save_joiner(slot).expect("a signed seat in the world saves");
+    assert!(path.exists(), "the precondition save wrote {}", path.display());
+    std::fs::remove_file(&path).expect("clear the record");
+    early_blasts_then_the_seat_leaves(&mut rig, false);
+    assert!(!rig.hs.server.players[slot].combat.dead, "it survives");
+    let bytes = std::fs::read(&path).expect("the leave save wrote the joiner's record");
+    let window = crate::joiner_save::JoinerSave::decode(&bytes).expect("decodes").window().expect("a window");
+    let shield_left = window.inv.slots_iter().flatten().any(|s| matches!(&s.item, Item::Tool(t) if t.tool_type == ToolType::Shield))
+        || window.offhand.as_ref().is_some_and(|s| matches!(&s.item, Item::Tool(t) if t.tool_type == ToolType::Shield));
+    assert!(!shield_left, "the saved window holds no intact shield: the one the blast broke is gone");
+    let _ = std::fs::remove_file(&path);
+}
