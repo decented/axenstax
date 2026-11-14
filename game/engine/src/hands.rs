@@ -165,6 +165,8 @@ pub fn use_hand(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> 
 /// unclaimed asks (a raised shield: a door or a mob should win). A shield in a hand
 /// answers for itself too ([`item_has_use`]: its use is the raise, so it has one
 /// wherever no block or mob claims the click).
+// Ready for the shield's raise rule (a door or a mob should win) and tested here; no caller yet.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn either_hand_has_use(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> bool {
     hand_with_use(main, off, target).is_some()
 }
