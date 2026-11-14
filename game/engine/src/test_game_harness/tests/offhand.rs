@@ -132,9 +132,21 @@ fn hold(hg: &mut HeadlessGame, button: winit::event::MouseButton, down: bool) {
     }
 }
 
-/// Review 2 finding 5: the target's own use wins over raising a shield. A main-hand
-/// shield with an empty off-hand, the use button held on a door: the door toggles and
-/// the shield stays down. On stone it rises. Over a mob it stays down.
+/// `n` rounds of one frame then one logical tick: the frame path decides (raise, mine, use),
+/// the tick counts and advances (the raise count, the break progress, the swing).
+fn run(hg: &mut HeadlessGame, n: u32) {
+    for _ in 0..n {
+        hg.frames(1);
+        hg.ticks(1);
+    }
+}
+
+/// Review 2 finding 5 and review 3 decision A: the target's own use wins over raising a
+/// shield, and a mob wins only when a hand really does something to it. A main-hand
+/// shield, the use button held on a door: the door toggles and the shield stays down.
+/// On stone it rises. At a cow with nothing in the other hand that works on it, it
+/// rises (the click is the shield's); with wheat in the other hand the cow is fed and
+/// the shield stays down; at a brigand it rises.
 #[test]
 #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
 fn game_harness_a_shield_raises_only_where_the_target_has_no_other_use() {
@@ -166,19 +178,47 @@ fn game_harness_a_shield_raises_only_where_the_target_has_no_other_use() {
     hold(&mut hg, winit::event::MouseButton::Right, false);
     hg.frames(2);
 
-    // A mob under the crosshair: the shield stays down.
+    // A cow under the crosshair that nothing held works on: the shield rises at it.
     let at = glam::Vec3::new(feet[0] as f32 + 0.5, feet[1] as f32, feet[2] as f32 - 1.5);
-    crate::entity::spawn_mob(&mut hg.state.ecs, crate::mob::MobType::Cow, at);
+    let cow = crate::entity::spawn_mob(&mut hg.state.ecs, crate::mob::MobType::Cow, at);
     aim_at(&mut hg, at + glam::Vec3::new(0.0, 0.7, 0.0));
     hold(&mut hg, winit::event::MouseButton::Right, true);
     hg.frames(3);
-    assert!(!hg.state.local_guard.contains(&0), "over a mob the shield stays down");
+    assert!(hg.state.local_guard.contains(&0), "at a cow nothing works on, the shield rises");
+    hold(&mut hg, winit::event::MouseButton::Right, false);
+    hg.frames(2);
+
+    // The same cow with wheat in the other hand: the cow is fed, the shield stays down.
+    hg.state.players[0].offhand = Some(ItemStack::new_material(MaterialId::Wheat, 3));
+    aim_at(&mut hg, at + glam::Vec3::new(0.0, 0.7, 0.0));
+    hold(&mut hg, winit::event::MouseButton::Right, true);
+    // The press frame: the wheat's use wins, the cow is fed and the shield stays down.
+    // (Once the cow is in love the wheat has no use there, and a button still held
+    // raises the shield, as it should: so look at the press, not at the frames after.)
+    hg.frames(1);
+    assert!(!hg.state.local_guard.contains(&0), "the wheat's use wins: the shield stays down");
+    assert!(hg.state.ecs.get::<&crate::breeding::InLove>(cow).is_ok(), "and the cow is fed");
+    hold(&mut hg, winit::event::MouseButton::Right, false);
+    hg.frames(2);
+    hg.state.players[0].offhand = None;
+    hg.state.ecs.despawn(cow).ok();
+
+    // A brigand: the enemy in front of you. The shield rises.
+    let at = glam::Vec3::new(feet[0] as f32 + 0.5, feet[1] as f32, feet[2] as f32 - 1.5);
+    crate::entity::spawn_mob(&mut hg.state.ecs, crate::mob::MobType::Brigand, at);
+    aim_at(&mut hg, at + glam::Vec3::new(0.0, 0.9, 0.0));
+    hold(&mut hg, winit::event::MouseButton::Right, true);
+    hg.frames(2);
+    assert!(hg.state.local_guard.contains(&0), "at a brigand the shield rises");
     hold(&mut hg, winit::event::MouseButton::Right, false);
 }
 
-/// Review 2 finding 6: a raised shield neither mines nor attacks. A pickaxe in the
-/// main hand, a shield in the off-hand, both buttons held on stone: no break
-/// progress. A mob in front takes no hit. Lowering the shield lets mining start.
+/// Review 2 finding 6 and review 3 decision B: a raised shield neither mines nor attacks,
+/// and once raised it stays raised while the button is held, whatever comes under the
+/// crosshair. A pickaxe in the main hand, a shield in the off-hand, both buttons held:
+/// the shield is raised in open air, then the aim turns to a cow and to stone. It stays
+/// up, the cow takes no hit and the stone gets no break progress. Releasing the shield
+/// lets both work again.
 #[test]
 #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
 fn game_harness_a_raised_shield_neither_mines_nor_attacks() {
@@ -188,29 +228,46 @@ fn game_harness_a_raised_shield_neither_mines_nor_attacks() {
     hg.state.players[0].inventory.set_slot(0, Some(ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
     hg.state.players[0].offhand = Some(shield_item());
     let cell = aim_at_stone(&mut hg);
+    let eye = hg.state.players[0].player.eye_pos();
 
+    // Raise it in open air (the aim well above everything), both buttons down.
+    aim_at(&mut hg, eye + glam::Vec3::new(0.0, 5.0, -1.0));
     hold(&mut hg, winit::event::MouseButton::Right, true);
     hold(&mut hg, winit::event::MouseButton::Left, true);
-    hg.frames(12);
-    assert!(hg.state.local_guard.contains(&0), "the shield is up");
-    assert!(hg.state.players[0].breaking_pos.is_none() && hg.state.players[0].break_progress == 0, "no break in progress");
-    assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), block::STONE, "the stone stands");
+    run(&mut hg, 4);
+    assert!(hg.state.local_guard.contains(&0), "the shield is up in open air");
 
-    // A mob in front takes no hit while the shield is up.
+    // Turn to a cow in front, still holding: it stays up and the cow takes no hit.
     let at = glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32, cell[2] as f32 + 1.2);
     let cow = crate::entity::spawn_mob(&mut hg.state.ecs, crate::mob::MobType::Cow, at);
     let max = hg.state.ecs.get::<&crate::combat::Health>(cow).unwrap().current;
     aim_at(&mut hg, at + glam::Vec3::new(0.0, 0.7, 0.0));
-    hg.frames(12);
+    run(&mut hg, 12);
+    assert!(hg.state.local_guard.contains(&0), "turned over a cow: held on");
     assert_eq!(hg.state.ecs.get::<&crate::combat::Health>(cow).unwrap().current, max, "no hit while guarding");
-    hg.state.ecs.despawn(cow).ok();
 
-    // Lowered, mining starts again.
-    hold(&mut hg, winit::event::MouseButton::Right, false);
+    // Turn to the stone: still up, and no break progress.
+    hg.state.ecs.despawn(cow).ok();
     aim_at(&mut hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5));
-    hg.frames(6);
+    run(&mut hg, 12);
+    assert!(hg.state.local_guard.contains(&0), "turned to stone: held on");
+    assert!(hg.state.players[0].breaking_pos.is_none() && hg.state.players[0].break_progress == 0, "no break in progress");
+    assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), block::STONE, "the stone stands");
+
+    // Lowered (the shield button released, the left still held), both work again.
+    hold(&mut hg, winit::event::MouseButton::Right, false);
+    run(&mut hg, 8);
+    assert!(!hg.state.local_guard.contains(&0), "released: lowered");
     assert!(
         hg.state.players[0].breaking_pos.is_some() || hg.state.world.get_block(cell[0], cell[1], cell[2]) != block::STONE,
-        "lowered: the break begins"
+        "lowered: the break begins (breaking_pos {:?}, progress {}, guard {:?})",
+        hg.state.players[0].breaking_pos,
+        hg.state.players[0].break_progress,
+        hg.state.local_guard,
     );
+    let cow = crate::entity::spawn_mob(&mut hg.state.ecs, crate::mob::MobType::Cow, at);
+    let max = hg.state.ecs.get::<&crate::combat::Health>(cow).unwrap().current;
+    aim_at(&mut hg, at + glam::Vec3::new(0.0, 0.7, 0.0));
+    run(&mut hg, 12);
+    assert!(hg.state.ecs.get::<&crate::combat::Health>(cow).is_ok_and(|h| h.current < max) || !hg.state.ecs.contains(cow), "lowered: the cow takes a hit");
 }
