@@ -10,7 +10,7 @@ use crate::player_intent::PlayerIntent;
 use crate::world::World;
 
 // Spec 05 Section 1.1 — speeds in blocks/second, converted to blocks/tick at 20 TPS
-const WALK_SPEED: f32 = 4.317;
+pub(crate) const WALK_SPEED: f32 = 4.317;
 const SPRINT_SPEED: f32 = 5.612;
 const SNEAK_SPEED: f32 = 1.295;
 const FLY_SPEED: f32 = 10.89;

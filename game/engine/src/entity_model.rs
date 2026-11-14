@@ -1505,8 +1505,8 @@ fn rot_x_about(p: Vec3, pivot: Vec3, a: f32) -> Vec3 {
 /// The most an airborne leg trails or leads (radians).
 const AIRBORNE_LEG_TRAIL: f32 = 0.5;
 /// The forward speed (blocks per second) at which the trail is at its most:
-/// walking pace (`physics::WALK_SPEED`, private there).
-const AIRBORNE_TRAIL_FULL_SPEED: f32 = 4.317;
+/// walking pace.
+const AIRBORNE_TRAIL_FULL_SPEED: f32 = crate::physics::WALK_SPEED;
 
 /// Both legs' shared X angle for an airborne avatar facing `ps_yaw` and moving at
 /// `travel` (horizontal world velocity, blocks per second).
@@ -1554,6 +1554,11 @@ thread_local! {
 /// player's. The builder runs more than once per tick, so the sample is updated
 /// only when `time_ticks` advances and is reused until then. A first sighting, a
 /// long gap or a teleport reads as no travel.
+///
+/// BRIDGE: a render-side, thread-local velocity guess keyed by `player_index`.
+/// It should become an explicit `travel` argument from the caller (the own body's
+/// physics velocity, a remote peer's interpolator) — replace when the avatar draw
+/// path in `game_loop.rs` is next touched. Presentation only: it moves no state.
 pub fn observed_travel(ps: &crate::protocol::PlayerState, time_ticks: u32) -> [f32; 2] {
     if ps.anim_state == 0 || !(ps.x.is_finite() && ps.z.is_finite()) {
         return [0.0, 0.0];
@@ -1673,14 +1678,15 @@ pub fn build_player_avatar_vertices_travelling(
             // Walk: alternating sinusoidal swing per part phase.
             (anim_time * 2.5 + part.phase * std::f32::consts::TAU).sin() * 0.4
         } else if ps.anim_state == 2 && part.animated {
-            // Jump: static airborne pose — legs tuck back, arms lift forward/up,
-            // so an airborne avatar reads as jumping rather than idle. Values are
+            // Jump: airborne pose — the legs trail the travel direction and both arms
+            // take -0.4 (the hands swing back), so an airborne avatar reads as jumping
+            // rather than idle. Values are
             // playtest-tunable; the right arm's swing (arm_override) still wins
             // over this when SWINGING.
             match i {
                 // The legs trail the direction of travel (see `airborne_leg_angle`).
                 LEFT_LEG_INDEX | RIGHT_LEG_INDEX => leg_angle,
-                LEFT_ARM_INDEX | RIGHT_ARM_INDEX => -0.4, // arms lifted
+                LEFT_ARM_INDEX | RIGHT_ARM_INDEX => -0.4, // hands swing back
                 _ => 0.0,
             }
         } else {
