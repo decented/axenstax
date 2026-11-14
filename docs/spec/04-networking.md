@@ -1195,7 +1195,7 @@ mobs chased joiners but never damaged anyone.
   `PRODUCT_NOT_READY = 32` — a cow not ready to milk or a shorn sheep, §4.2d). These are what the entity
   renderer reads (position, velocity for the walk cycle, facing, hurt flash,
   baby scale, Satoshi's model); per-species tints are static per kind, so no
-  genetics are sent. An update is now 34 bytes (was 21).
+  genetics are sent. An update is now 35 bytes (was 21; 34 until the appended `flags2` byte, v101: `entity_flags2::BREED_BLOCKED = 1`, an adult in love or on its cooldown, and `OWN_PET = 2`, per recipient, the mob is this client's own pet by owner npub; both are what a joiner's hand rule reads, Spec 05 §3.4a).
 
 **Joiner mirror (`remote_mobs.rs`, `network_receive`).** Mob and cart spawns
 go into `RemoteMobs`, a **separate render-only `hecs::World`** — never the
