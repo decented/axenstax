@@ -14,8 +14,8 @@ use jni::{JNIEnv, JavaVM};
 use crate::launch_links::IntentRead;
 
 /// The Activity this process runs: android-activity's glue hands `ndk-context` the VM and the
-/// NativeActivity instance before `android_main` starts.
-fn vm_and_activity() -> Option<(JavaVM, *mut std::ffi::c_void)> {
+/// NativeActivity instance before `android_main` starts. Also used by `android_jni.rs`.
+pub(crate) fn vm_and_activity() -> Option<(JavaVM, *mut std::ffi::c_void)> {
     let ctx = std::panic::catch_unwind(ndk_context::android_context).ok()?;
     if ctx.vm().is_null() || ctx.context().is_null() {
         return None;

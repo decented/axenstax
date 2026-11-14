@@ -3235,10 +3235,34 @@ Current world folder name stored in `Mutex<Option<String>>` static. Cursor captu
   cleared. `GameState.touch` exists on every target for the same reason.
 - `android_main` calls `set_touch_device(true)`, so the on-screen controls show
   immediately (the web sets it from `navigator.maxTouchPoints`).
-- **Text entry.** `OS_KEYBOARD_PROMPT` is web-only (`window.prompt()`). On
-  Android there is no IME bridge yet, so menu text fields stay egui `TextEdit`s
-  (usable with a hardware keyboard) and the touch Chat button does nothing.
-  BRIDGE until a soft-keyboard bridge lands.
+- **Text entry: the text prompt (`text_prompt.rs`, 2026-11-14).** winit + egui
+  cannot raise a soft keyboard (Android's `NativeActivity` has no text-editor
+  view, so `showSoftInput` is ignored; the web build runs no hidden text agent),
+  so on a touch device where `OS_KEYBOARD_PROMPT` is true (web and Android) a menu
+  text field is a tap-to-type button and the touch Chat button asks for an OS
+  text prompt. The prompt is **async on every platform**: the caller requests once
+  (`request_text_prompt(key, label, initial, kind, max)`) and polls
+  `take_text_prompt_result(key)` every frame it is drawn (`None` not ready,
+  `Some(None)` cancelled, `Some(Some(text))` typed). Broker rules, each unit-tested
+  on a fake backend: one prompt at a time (a request while one is open is
+  ignored); an answer reaches only its own key, at most once (a menu field's key
+  is `field:<caption>`, chat's is `chat`); an answer nobody collected is dropped
+  by the next request, never filling another field; and no dead keyboard (a
+  backend that cannot show a prompt, or reports it gone, answers "cancelled").
+  Kinds: Name (capitalised words: "World name", "Rename skin"), Chat (no
+  suggestions or autocorrect, so `/give torch` survives), Plain (seed, room code,
+  npub). **Web:** `window.prompt()` at request time; the caller polls right after
+  asking, so the answer lands on the tap's own frame, unchanged from before.
+  **Android:** `AxenstaxActivity.showTextPrompt` (JNI instance call, no
+  `FindClass`, no Java `native` methods) posts a dark AlertDialog with a one-line,
+  length-filtered EditText (Done key, keyboard shown at once) to the UI thread; its
+  dismiss listener is the one place that posts the answer (OK and Done/Enter the
+  text; Cancel, Back and a tap outside "cancelled"), into a synchronized field the
+  game polls only while a prompt is open. The game thread never waits on the UI
+  thread. The dialog takes window focus: the game only releases held keys on
+  `Focused(false)` (no pause), and touches already down stay with the game's
+  window until lifted, so no control sticks. A chat line that lands after the
+  world was left is dropped. Desktop keeps egui `TextEdit`s.
 - **Back = Escape.** Android's Back arrives as `PhysicalKey::Unidentified` +
   `NamedKey::BrowserBack`; `lib.rs` maps it to `KeyCode::Escape`, so it runs the
   same layered close (menu dialog → explorer → recipe book → inventory →

@@ -2907,10 +2907,23 @@ pub(crate) fn menu_text_field_tall(
             egui::Button::new(egui::RichText::new(text).size(font_size).color(color))
                 .fill(egui::Color32::from_rgb(28, 30, 40)),
         );
-        if resp.clicked()
-            && let Some(s) = crate::touch_input::os_keyboard_prompt(prompt_label, buf) {
-                *buf = s;
-            }
+        // The OS text prompt is async (`text_prompt.rs`): ask on the tap, then
+        // collect every frame this field is drawn. Keyed by the caption, so an
+        // answer only ever fills the field that asked. On the web the answer is
+        // there on the tap's own frame; on Android when the dialog closes.
+        let key = format!("field:{prompt_label}");
+        if resp.clicked() {
+            crate::text_prompt::request_text_prompt(
+                &key,
+                prompt_label,
+                buf,
+                crate::text_prompt::PromptKind::for_field(prompt_label),
+                crate::text_prompt::FIELD_MAX_CHARS,
+            );
+        }
+        if let Some(Some(s)) = crate::text_prompt::take_text_prompt_result(&key) {
+            *buf = s;
+        }
         resp
     } else {
         ui.add(

@@ -55,16 +55,16 @@ use crate::player_intent::PlayerIntent;
 /// every tap because the edges are never cleared.
 ///
 /// A `bool` rather than a `cfg` because every touch code path COMPILES on every
-/// platform (`touch_input` is target-agnostic; only `os_keyboard_prompt` is
-/// cfg'd, and it has a native stub). `cfg!` const-folds, so desktop pays nothing
-/// for the dead branch.
+/// platform (`touch_input` is target-agnostic; the OS text prompt lives in
+/// `text_prompt.rs`, with a desktop backend that answers "cancelled"). `cfg!`
+/// const-folds, so desktop pays nothing for the dead branch.
 pub const TOUCH_PLATFORM: bool = cfg!(any(target_arch = "wasm32", target_os = "android"));
 
-/// True where [`os_keyboard_prompt`] can actually summon a soft keyboard (the
-/// web, via `window.prompt()`). On Android it is the native stub — no IME
-/// bridge exists yet — so text fields must stay egui `TextEdit`s there (usable
-/// with a hardware keyboard) rather than become prompt buttons that do nothing.
-pub const OS_KEYBOARD_PROMPT: bool = cfg!(target_arch = "wasm32");
+/// True where `text_prompt::request_text_prompt` can actually summon a soft
+/// keyboard: the web (`window.prompt()`) and Android (the activity's text
+/// dialog). On a touch device there, a menu text field is a tap-to-type button;
+/// on desktop it stays an egui `TextEdit`.
+pub const OS_KEYBOARD_PROMPT: bool = cfg!(any(target_arch = "wasm32", target_os = "android"));
 
 /// Global "this is a touch device" flag, set once at WASM startup from
 /// `navigator.maxTouchPoints` (and unconditionally by `android_main`). Read from places that can't reach a `TouchInput`
@@ -81,25 +81,6 @@ pub fn set_touch_device(v: bool) {
 /// True on a phone / tablet / touchscreen Chromebook (`maxTouchPoints > 0`).
 pub fn is_touch_device() -> bool {
     TOUCH_DEVICE.load(Ordering::Relaxed)
-}
-
-/// Pop the OS soft keyboard for a single line of text and return what was
-/// typed (`None` on cancel / native). `window.prompt()` is the one reliable way
-/// to summon the on-screen keyboard on a tablet/Chromebook with no hardware
-/// keyboard — winit+egui (we don't use eframe's hidden text-agent) won't bring
-/// it up on its own. Used for the world-name field and the chat/command line.
-#[cfg(target_arch = "wasm32")]
-pub fn os_keyboard_prompt(message: &str, default: &str) -> Option<String> {
-    web_sys::window()?
-        .prompt_with_message_and_default(message, default)
-        .ok()
-        .flatten()
-}
-
-/// Native stub — there's always a hardware keyboard off-web.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn os_keyboard_prompt(_message: &str, _default: &str) -> Option<String> {
-    None
 }
 
 /// Joystick travel that saturates movement, as a fraction of screen height (in
