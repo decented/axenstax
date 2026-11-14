@@ -133,9 +133,13 @@ fn hold(hg: &mut HeadlessGame, button: winit::event::MouseButton, down: bool) {
 }
 
 /// `n` rounds of one frame then one logical tick: the frame path decides (raise, mine, use),
-/// the tick counts and advances (the raise count, the break progress, the swing).
+/// the tick counts and advances (the raise count, the break progress, the swing). The
+/// frame waits a tick's worth of wall clock first: the break progress and the attack are
+/// counted on frames that ran a time-based tick (`ticks_run > 0`), so without the wait a
+/// frame can run none and "no break" would hold for the wrong reason.
 fn run(hg: &mut HeadlessGame, n: u32) {
     for _ in 0..n {
+        std::thread::sleep(std::time::Duration::from_millis(55));
         hg.frames(1);
         hg.ticks(1);
     }
