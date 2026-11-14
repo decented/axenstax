@@ -9011,6 +9011,12 @@ impl super::GameState {
             // normal command dispatch via `ChatState.pending_submit`. Only a
             // fresh tap asks, so Cancel just closes the prompt.
             if crate::touch_input::TOUCH_PLATFORM {
+                // In a world, the world (with or without the skin panel) is the
+                // screen a prompt belongs to; the lobby names its own screens in
+                // `draw_main_menu`. Leaving one drops an answer still to come.
+                if matches!(self.mode, GameMode::Playing | GameMode::Paused { .. }) {
+                    crate::text_prompt::enter_screen(crate::text_prompt::screen_id(("world", self.skin_panel.open)));
+                }
                 if self.touch.take_pause_pressed() {
                     any_pause = true;
                 }

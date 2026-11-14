@@ -298,6 +298,20 @@ pub fn lobby_escape(menu: &mut MenuState) -> LobbyEscape {
     LobbyEscape::Quit
 }
 
+/// Which lobby screen is on show, as the text prompt's owner
+/// (`text_prompt::enter_screen`): the Settings panel, else an open dialog's kind,
+/// else the page. A dialog's contents (what is typed in it) are not part of it.
+pub(crate) fn prompt_screen(state: &MenuState) -> u64 {
+    use crate::text_prompt::screen_id;
+    if state.show_settings {
+        screen_id("lobby settings")
+    } else if matches!(state.dialog, MenuDialog::None) {
+        screen_id(("lobby page", state.page as u8))
+    } else {
+        screen_id(("lobby dialog", std::mem::discriminant(&state.dialog)))
+    }
+}
+
 /// The Create dialog with its defaults: survival, commands on, Stash off,
 /// normal terrain on grass, the day cycle and mobs on.
 pub(crate) fn new_create_dialog() -> MenuDialog {
@@ -1969,6 +1983,11 @@ fn draw_self_update_controls(
 pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction {
     let mut action = MenuAction::None;
 
+    // The screen on show owns any text prompt its fields ask for; a change of
+    // screen (a dialog opening or closing, another page) drops an answer meant
+    // for the old one. First thing, before any early return or field.
+    crate::text_prompt::enter_screen(prompt_screen(state));
+
     // Online play by contact §5.1 — is "Host online" pressable on a world card,
     // and what should it say? Read once per frame (not per card) because both
     // halves touch the profile directory. Not cached on `MenuState`: signing in
@@ -2908,22 +2927,11 @@ pub(crate) fn menu_text_field_tall(
                 .fill(egui::Color32::from_rgb(28, 30, 40)),
         );
         // The OS text prompt is async (`text_prompt.rs`): ask on the tap, then
-        // collect every frame this field is drawn. Keyed by the caption, so an
-        // answer only ever fills the field that asked. On the web the answer is
-        // there on the tap's own frame; on Android when the dialog closes.
-        let key = format!("field:{prompt_label}");
-        if resp.clicked() {
-            crate::text_prompt::request_text_prompt(
-                &key,
-                prompt_label,
-                buf,
-                crate::text_prompt::PromptKind::for_field(prompt_label),
-                crate::text_prompt::FIELD_MAX_CHARS,
-            );
-        }
-        if let Some(Some(s)) = crate::text_prompt::take_text_prompt_result(&key) {
-            *buf = s;
-        }
+        // collect every frame this field is drawn. The answer only fills this
+        // field on the screen that asked (`prompt_screen`), with the field's own
+        // kind and length cap from its caption. On the web it is there on the
+        // tap's own frame; on Android when the dialog closes.
+        crate::text_prompt::text_field_prompt(prompt_label, buf, resp.clicked());
         resp
     } else {
         ui.add(

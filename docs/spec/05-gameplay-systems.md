@@ -3243,13 +3243,23 @@ Current world folder name stored in `Mutex<Option<String>>` static. Cursor captu
   text prompt. The prompt is **async on every platform**: the caller requests once
   (`request_text_prompt(key, label, initial, kind, max)`) and polls
   `take_text_prompt_result(key)` every frame it is drawn (`None` not ready,
-  `Some(None)` cancelled, `Some(Some(text))` typed). Broker rules, each unit-tested
-  on a fake backend: one prompt at a time (a request while one is open is
-  ignored); an answer reaches only its own key, at most once (a menu field's key
-  is `field:<caption>`, chat's is `chat`); an answer nobody collected is dropped
-  by the next request, never filling another field; and no dead keyboard (a
-  backend that cannot show a prompt, or reports it gone, answers "cancelled").
-  Kinds: Name (capitalised words: "World name", "Rename skin"), Chat (no
+  `Some(None)` cancelled, `Some(Some(text))` typed); a menu field does both through
+  `text_field_prompt(caption, buf, tapped)`. Broker rules, each unit-tested on a
+  fake backend: one prompt at a time (a request while one is open is ignored); an
+  answer reaches only its own key, at most once (a menu field's key is
+  `field:<caption>`, chat's is `chat`); an answer nobody collected is dropped by the
+  next request, never filling another field; no dead keyboard (a backend that cannot
+  show a prompt, or reports it gone, answers "cancelled"); and **a prompt belongs to
+  the screen that asked** (2026-11-14 fix: "Room code" is on both Play together and
+  Join Game, "World name" on both Create and Edit). Every frame the lobby
+  (`draw_main_menu`, first thing: `menu::prompt_screen`, the Settings panel, else the
+  open dialog's kind, else the page) or the world (the touch Chat block, in Playing or
+  Paused: the world, with or without the skin panel) names the screen on show
+  (`text_prompt::enter_screen`); a different screen is a new owner, and an answer for
+  the old one, held or still to come, is dropped, even if a screen of the same kind
+  opens again. A menu field also takes an answer only while it still holds the text
+  its prompt opened with, so a link that replaces Join Game with a new Join Game keeps
+  its address. Kinds: Name (capitalised words: "World name", "Rename skin"), Chat (no
   suggestions or autocorrect, so `/give torch` survives), Plain (seed, room code,
   npub). **Web:** `window.prompt()` at request time; the caller polls right after
   asking, so the answer lands on the tap's own frame, unchanged from before.
