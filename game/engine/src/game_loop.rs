@@ -22587,8 +22587,8 @@ impl super::GameState {
                     }
                     // Off-hand release (slice 5) — the blocks the server's rule
                     // made with our raised shield wear it, in the same order.
-                    crate::remote_client::OwnLifeEvent::ShieldWorn { slot, hand, amount, event } => {
-                        armour_worn.push((crate::window_events::Wear::Shield { slot, hand, amount }, event));
+                    crate::remote_client::OwnLifeEvent::ShieldWorn { slot, hand, durability, amount, event } => {
+                        armour_worn.push((crate::window_events::Wear::Shield { slot, hand, durability, amount }, event));
                     }
                     crate::remote_client::OwnLifeEvent::Respawned { at, respawns } => {
                         if let Some(client) = self.remote_client.as_mut() && !client.apply_actor_respawn(respawns) { continue; }
@@ -24036,10 +24036,10 @@ impl super::GameState {
                     }
                 }
                 // Off-hand release (slice 5) — the same wear the server's copy makes
-                // (`shield::wear`), and the clack the block makes.
-                crate::window_events::InboxItem::ShieldWorn { slot, hand, amount, .. } => {
+                // (`shield::wear_blocking`), and the clack the block makes.
+                crate::window_events::InboxItem::ShieldWorn { slot, hand, durability, amount, .. } => {
                     let p = &mut self.players[0];
-                    crate::shield::wear(&mut p.inventory, slot as usize, &mut p.offhand, hand, amount);
+                    crate::shield::wear_blocking(&mut p.inventory, slot as usize, &mut p.offhand, hand, durability, amount);
                     self.audio.play_place();
                 }
             }

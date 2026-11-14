@@ -2531,36 +2531,58 @@ impl HostedServer {
         self.server.players.get(i).is_some_and(|sp| sp.server_simulated && sp.combat.dead)
     }
 
-    /// MP-D2b — this tick's server-landed hits wear each joiner's armour
-    /// (`PlayerEventType::ArmourWorn`, to that joiner alone), and the kills
-    /// credited to joiners go out as `KillEvent`s, each to its killer alone.
-    fn announce_joiner_hits_and_kills(&mut self) {
+    /// Off-hand release (slice 5) — the blocks a raised shield made this tick wear
+    /// it: per block, a numbered `WearShield` window event for the server's copy
+    /// (applied once the client says it wore its own, the armour's rule) and a
+    /// `ShieldWorn` to that joiner alone, which wears its shield and clacks. Each
+    /// names the shield that blocked by hand and durability, so it wears that shield
+    /// on both copies wherever an F swap has put it.
+    ///
+    /// Runs BEFORE the deaths settle (`handle_joiner_deaths`): a joiner who dies in
+    /// the blocking tick has the wear in the window its grave and its death sync
+    /// are made from, so a shield owed broken is not carried into the grave intact.
+    fn queue_joiner_shield_wear(&mut self) {
         let now = self.server.tick_counter;
         for i in 0..self.server.players.len() {
-            let sp = &mut self.server.players[i];
-            // Off-hand release (slice 5) — the blocks a raised shield made this tick
-            // wear it: a numbered window event for the server's copy (applied once
-            // the client says it wore its own, the armour's rule) and a
-            // `ShieldWorn` to that joiner alone, which wears its shield and clacks.
-            let owed = std::mem::take(&mut sp.shield_wear);
-            if owed > 0 && sp.server_simulated {
-                let hand = sp.shield_hand().unwrap_or(crate::hands::Hand::Main);
+            if self.server.players[i].shield_owed.is_empty() {
+                continue;
+            }
+            let owed = std::mem::take(&mut self.server.players[i].shield_owed);
+            if !self.server.players[i].server_simulated {
+                continue;
+            }
+            for o in owed {
+                let sp = &mut self.server.players[i];
                 let slot = sp.hotbar_slot;
                 let window_event = crate::window_events::queue(
                     sp,
-                    crate::window_events::WindowEvent::WearShield { slot, hand, amount: owed },
+                    crate::window_events::WindowEvent::WearShield { slot, hand: o.hand, durability: o.durability, amount: o.amount },
                     now,
                 );
                 let pkt = protocol::serialize_packet(
                     protocol::PacketType::PlayerEvent,
                     &protocol::PlayerEventPacket {
                         player_index: i as u32,
-                        event: protocol::PlayerEventType::ShieldWorn { slot: slot as u8, hand, amount: owed },
+                        event: protocol::PlayerEventType::ShieldWorn {
+                            slot: slot as u8,
+                            hand: o.hand,
+                            durability: o.durability,
+                            amount: o.amount,
+                        },
                         window_event,
                     },
                 );
                 self.send_to_joined_slot(i, &pkt);
             }
+        }
+    }
+
+    /// MP-D2b — this tick's server-landed hits wear each joiner's armour
+    /// (`PlayerEventType::ArmourWorn`, to that joiner alone), and the kills
+    /// credited to joiners go out as `KillEvent`s, each to its killer alone.
+    fn announce_joiner_hits_and_kills(&mut self) {
+        let now = self.server.tick_counter;
+        for i in 0..self.server.players.len() {
             let sp = &mut self.server.players[i];
             let hits = std::mem::take(&mut sp.armour_wear_hits);
             if hits == 0 || !sp.server_simulated {
@@ -4557,6 +4579,9 @@ impl HostedServer {
         for (idx, stack) in grants {
             self.grant_to_joiner(idx, [stack]);
         }
+        // The shield wear this tick's blocks owe is queued first, so a death in
+        // the same tick settles against the window that has it.
+        self.queue_joiner_shield_wear();
         self.handle_joiner_deaths();
         #[cfg(not(target_arch = "wasm32"))]
         self.flush_personal_updates();

@@ -2374,10 +2374,12 @@ pub enum PlayerEventType {
     GraveAt { x: i32, y: i32, z: i32 },
     /// v101 (off-hand plan, slice 5) — blocks the server's rule made with this
     /// joiner's raised shield since the last report cost `amount` durability
-    /// (`1 + floor(damage)` per wearing block) on the shield in `hand` (the main
-    /// hand names hotbar slot `slot`; `shield::wear`): a window event, applied in the client's order like
-    /// `ArmourWorn`, and the cue for the clack. Sent to that player alone.
-    ShieldWorn { slot: u8, hand: crate::hands::Hand, amount: u16 },
+    /// (`1 + floor(damage)` per wearing block) on the shield that blocked: named by
+    /// its `hand` (the main hand names hotbar slot `slot`) and the `durability` it
+    /// had, so a swap in flight moves nothing (`shield::wear_blocking`). A window
+    /// event, applied in the client's order like `ArmourWorn`, and the cue for the
+    /// clack. Sent to that player alone.
+    ShieldWorn { slot: u8, hand: crate::hands::Hand, durability: u16, amount: u16 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -5177,7 +5179,7 @@ mod tests {
             PlayerEventType::DiedOf { cause: WireDamageCause::Mob(EntityKind::Shark) },
             PlayerEventType::ArmourWorn { hits: 3 },
             PlayerEventType::Bred { offspring: EntityKind::Mule },
-            PlayerEventType::ShieldWorn { slot: 3, hand: crate::hands::Hand::Off, amount: 11 },
+            PlayerEventType::ShieldWorn { slot: 3, hand: crate::hands::Hand::Off, durability: 300, amount: 11 },
         ] {
             let pkt = PlayerEventPacket { player_index: 4, event, window_event: 0x0102_0304 };
             let bytes = serialize_packet(PacketType::PlayerEvent, &pkt);
@@ -5569,7 +5571,7 @@ mod oc_wire_tests {
     fn shield_worn_is_appended_after_the_last_player_event() {
         let tag = |e: &PlayerEventType| u32::from_le_bytes(bincode::serialize(e).unwrap()[..4].try_into().unwrap());
         let grave = tag(&PlayerEventType::GraveAt { x: 0, y: 0, z: 0 });
-        let worn = tag(&PlayerEventType::ShieldWorn { slot: 0, hand: crate::hands::Hand::Main, amount: 1 });
+        let worn = tag(&PlayerEventType::ShieldWorn { slot: 0, hand: crate::hands::Hand::Main, durability: 1, amount: 1 });
         assert_eq!(worn, grave + 1);
         assert_eq!(tag(&PlayerEventType::ArmourWorn { hits: 1 }), 5, "the armour report keeps its place");
     }

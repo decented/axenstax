@@ -335,7 +335,7 @@ pub enum OwnLifeEvent {
     ArmourWorn(u8, u32),
     /// Off-hand release (slice 5) — the server's blocks wore our raised shield by
     /// `amount` (the main hand names hotbar slot `slot`), with its window event.
-    ShieldWorn { slot: u8, hand: crate::hands::Hand, amount: u16, event: u32 },
+    ShieldWorn { slot: u8, hand: crate::hands::Hand, durability: u16, amount: u16, event: u32 },
     /// Review D2b B2 — a baby of this species was born to an animal we fed
     /// (the `BreedAnimals` challenge).
     Bred(crate::mob::MobType),
@@ -1314,13 +1314,14 @@ impl RemoteClient {
                                         changed = true;
                                     }
                                 }
-                                protocol::PlayerEventType::ShieldWorn { slot, hand, amount } => {
+                                protocol::PlayerEventType::ShieldWorn { slot, hand, durability, amount } => {
                                     if self.player_index() == Some(event.player_index)
                                         && has_room(self.pending_life_events.len(), MAX_LIFE_EVENTS_PER_POLL, event.window_event)
                                     {
                                         self.pending_life_events.push(OwnLifeEvent::ShieldWorn {
                                             slot: *slot,
                                             hand: *hand,
+                                            durability: *durability,
                                             amount: *amount,
                                             event: event.window_event,
                                         });

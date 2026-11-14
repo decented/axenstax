@@ -47,7 +47,7 @@ fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> 
         },
         WindowEvent::WearArmour { hits } => WindowEvent::WearArmour { hits: *hits },
         WindowEvent::WearWeapon { hand, slot, tool } => WindowEvent::WearWeapon { hand: *hand, slot: *slot, tool: *tool },
-        WindowEvent::WearShield { slot, hand, amount } => WindowEvent::WearShield { slot: *slot, hand: *hand, amount: *amount },
+        WindowEvent::WearShield { slot, hand, durability, amount } => WindowEvent::WearShield { slot: *slot, hand: *hand, durability: *durability, amount: *amount },
         WindowEvent::ContainerView(_) | WindowEvent::PackView => return Ok(None),
         #[cfg(not(target_arch = "wasm32"))]
         WindowEvent::PersonalSync(_) => return Ok(None),
@@ -199,9 +199,22 @@ fn stage_strict_effects_on(sp: &ServerPlayer, registry: &crate::block::BlockRegi
     for original in all {
         let event = marker_event(original, registry)?.ok_or(StrictStageError::Replacement)?;
         let prior = candidate.slots();
-        let wear_at = if let WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot, tool } = &event {
-            crate::joiner_actions::where_now(candidate.view().inv, *slot, &Item::Tool(*tool))
-        } else { None };
+        let wear_at = match &event {
+            WindowEvent::WearWeapon { hand: crate::hands::Hand::Main, slot, tool } => {
+                crate::joiner_actions::where_now(candidate.view().inv, *slot, &Item::Tool(*tool))
+            }
+            // Off-hand release — the shield a wear is owed against, wherever it is
+            // now (the same resolution both copies wear it by); its place is the
+            // initial source the wear must be backed by.
+            WindowEvent::WearShield { slot, hand, durability, .. } => {
+                let view = candidate.view();
+                crate::shield::locate(view.inv, view.offhand, *hand, *slot, *durability).map(|at| match at {
+                    crate::joiner_actions::HeldAt::Slot(i) => i,
+                    crate::joiner_actions::HeldAt::Offhand => crate::staged_window::OFFHAND,
+                })
+            }
+            _ => None,
+        };
         raw_facts.push(apply_marker_event(&mut candidate, &event)?);
         let after = candidate.slots();
         match event {
@@ -214,7 +227,7 @@ fn stage_strict_effects_on(sp: &ServerPlayer, registry: &crate::block::BlockRegi
                     }
                 }
             }
-            WindowEvent::WearWeapon { .. } => {
+            WindowEvent::WearWeapon { .. } | WindowEvent::WearShield { .. } => {
                 let at = wear_at.ok_or(StrictStageError::AmbiguousWear)?;
                 sources[at] = before[at].clone();
             }
@@ -471,8 +484,8 @@ mod tests {
         let mut sp = player();
         sp.inventory.set_slot(0, Some(ItemStack { item: Item::Tool(shield), count: 1 }));
         sp.offhand = Some(ItemStack { item: Item::Tool(shield), count: 1 });
-        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Main, amount: 5 }, 0);
-        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Off, amount: 7 }, 0);
+        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Main, durability: full, amount: 5 }, 0);
+        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Off, durability: full, amount: 7 }, 0);
         let registry = crate::block::BlockRegistry::new();
         let mut effective = strict_effective_marker(&sp, &registry).expect("a pending shield wear is no unpaid obligation");
         let view = effective.view();

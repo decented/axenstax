@@ -147,11 +147,15 @@ pub enum WindowEvent {
         hits: u8,
     },
     /// Off-hand release (slice 5) — blocks the server's rule made with the
-    /// joiner's raised shield wear it by `amount` (`shield::wear`: the main hand
-    /// names hotbar slot `slot`). Both copies of the window apply the one rule.
+    /// joiner's raised shield wear it by `amount`. The shield is named by the hand
+    /// it blocked with (the main hand names hotbar slot `slot`) and the
+    /// `durability` it had when the block fell, so an F swap before the wear lands
+    /// moves nothing: both copies find that shield wherever it is now
+    /// (`shield::wear_blocking`, on the hand-aware resolution a swing's wear uses).
     WearShield {
         slot: usize,
         hand: crate::hands::Hand,
+        durability: u16,
         amount: u16,
     },
     /// An accepted swing wears `tool` where it now is
@@ -275,6 +279,12 @@ impl WindowEvents {
     /// whole event reservation hit, `actions::reservation_detail`).
     pub fn waiting(&self) -> usize {
         self.waiting.len()
+    }
+
+    /// Is a shield wear waiting (`WearShield`)? The effective shield reads the
+    /// window with it taken off ([`ServerPlayer::effective_shield`]).
+    pub fn has_waiting_shield_wear(&self) -> bool {
+        self.waiting.iter().any(|w| matches!(w.event, WindowEvent::WearShield { .. }))
     }
 
     /// C3d tests — the waiting events, oldest first.
@@ -439,7 +449,7 @@ enum Effect {
     Took { taken: u8 },
     /// Armour wore.
     Wore,
-    /// A weapon's wear.
+    /// A weapon's or a shield's wear.
     Weapon(crate::joiner_inventory::WearCheck),
 }
 
@@ -475,9 +485,13 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
             }
             Effect::Wore
         }
-        WindowEvent::WearShield { slot, hand, amount } => {
-            crate::shield::wear(parts.inv, *slot, parts.offhand, *hand, *amount);
-            Effect::Wore
+        WindowEvent::WearShield { slot, hand, durability, amount } => {
+            // `Wore` only when something wore: a shield no hand holds any more
+            // is a mismatch (Strict staging refuses it, a Mirror copy tallies it).
+            Effect::Weapon(match crate::shield::wear_blocking(parts.inv, *slot, parts.offhand, *hand, *durability, *amount) {
+                crate::shield::WearOutcome::Worn { broke } => crate::joiner_inventory::WearCheck::Worn { broke },
+                crate::shield::WearOutcome::Missing => crate::joiner_inventory::WearCheck::Mismatched,
+            })
         }
         WindowEvent::WearWeapon { hand, slot, tool } => {
             let check = match crate::joiner_actions::where_now_hand(parts.inv, parts.offhand, *hand, *slot, &Item::Tool(*tool)) {
@@ -1041,8 +1055,9 @@ pub enum InboxItem {
     /// `ArmourWorn { hits }`, window event `event`.
     ArmourWorn { hits: u8, event: u32 },
     /// Off-hand release (slice 5) — `ShieldWorn`, window event `event`: wear the
-    /// shield in `hand` (the main hand names hotbar slot `slot`) by `amount`.
-    ShieldWorn { slot: u8, hand: crate::hands::Hand, amount: u16, event: u32 },
+    /// shield (named by `hand`, the main hand's hotbar slot `slot`, and the
+    /// `durability` it had) by `amount`.
+    ShieldWorn { slot: u8, hand: crate::hands::Hand, durability: u16, amount: u16, event: u32 },
 }
 
 /// A server-landed wear the client applies as a numbered window event: armour hits
@@ -1051,7 +1066,7 @@ pub enum InboxItem {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Wear {
     Armour(u8),
-    Shield { slot: u8, hand: crate::hands::Hand, amount: u16 },
+    Shield { slot: u8, hand: crate::hands::Hand, durability: u16, amount: u16 },
 }
 
 impl InboxItem {
@@ -1344,7 +1359,7 @@ impl WindowInbox {
                 .drain(..)
                 .map(|(wear, event)| match wear {
                     Wear::Armour(hits) => InboxItem::ArmourWorn { hits, event },
-                    Wear::Shield { slot, hand, amount } => InboxItem::ShieldWorn { slot, hand, amount, event },
+                    Wear::Shield { slot, hand, durability, amount } => InboxItem::ShieldWorn { slot, hand, durability, amount, event },
                 })
                 .collect();
         let mut out = Vec::with_capacity(outcomes.len() + grants.len() + armour.len());
@@ -1766,6 +1781,92 @@ mod tests {
         assert!(sp.offhand.is_none(), "destroyed on the server");
         assert_eq!(sp.possession.wear_mismatch, 0, "found where it now is");
         assert_eq!(sp.offhand, off);
+    }
+
+    /// Review 2 finding 2: F between a block and the `ShieldWorn` that follows it.
+    /// The wear names the shield that blocked (its hand and durability), so it wears
+    /// that shield, now in the off-hand, on the server's copy and on the client's, and
+    /// the sword that took its place in the main hand is untouched.
+    #[test]
+    fn a_shield_wear_over_an_f_swap_wears_the_blocking_shield_on_both_copies() {
+        use crate::hands::Hand;
+        let shield = Tool::new(ToolType::Shield, ToolMaterial::Wood);
+        let sword = Tool::new(ToolType::Sword, ToolMaterial::Iron);
+        let full = shield.durability;
+        // The block fell with the shield in the main hand; F has moved it since.
+        let mut sp = joiner();
+        sp.inventory.set_slot(0, Some(ItemStack::new_tool(sword)));
+        sp.offhand = Some(ItemStack::new_tool(shield));
+        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Main, durability: full, amount: 5 }, 0);
+        apply_through(&mut sp, 1, 0);
+        let dur = |stack: Option<&ItemStack>| match stack.map(|s| &s.item) {
+            Some(Item::Tool(t)) => Some(t.durability),
+            _ => None,
+        };
+        assert_eq!(dur(sp.offhand.as_ref()), Some(full - 5), "the server's copy: the shield, in the off-hand, paid");
+        assert_eq!(dur(sp.inventory.slot(0)), Some(sword.durability), "the sword is untouched");
+        assert_eq!(sp.possession.wear_mismatch, 0, "it was found");
+        // The client's copy: the same swapped window, the same rule.
+        let mut inv = crate::inventory::Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_tool(sword)));
+        let mut off = Some(ItemStack::new_tool(shield));
+        crate::shield::wear_blocking(&mut inv, 0, &mut off, Hand::Main, full, 5);
+        assert_eq!(off, sp.offhand, "both copies agree");
+        assert_eq!(inv.slot(0), sp.inventory.slot(0));
+    }
+
+    /// Review 2 finding 2, second case: a shield in each hand. The blocking one pays,
+    /// whichever hand it is in by the time the wear lands.
+    #[test]
+    fn a_shield_wear_with_a_shield_in_each_hand_wears_the_blocking_one() {
+        use crate::hands::Hand;
+        let shield = |durability| Tool { durability, ..Tool::new(ToolType::Shield, ToolMaterial::Wood) };
+        let dur = |stack: Option<&ItemStack>| match stack.map(|s| &s.item) {
+            Some(Item::Tool(t)) => Some(t.durability),
+            _ => None,
+        };
+        // No swap: the main hand's (200) blocked.
+        let mut sp = joiner();
+        sp.inventory.set_slot(0, Some(ItemStack::new_tool(shield(200))));
+        sp.offhand = Some(ItemStack::new_tool(shield(50)));
+        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Main, durability: 200, amount: 5 }, 0);
+        apply_through(&mut sp, 1, 0);
+        assert_eq!((dur(sp.inventory.slot(0)), dur(sp.offhand.as_ref())), (Some(195), Some(50)), "the blocking one paid");
+        // F swapped them before the wear landed: the 200 one is in the off-hand now.
+        let mut sp = joiner();
+        sp.inventory.set_slot(0, Some(ItemStack::new_tool(shield(50))));
+        sp.offhand = Some(ItemStack::new_tool(shield(200)));
+        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Main, durability: 200, amount: 5 }, 0);
+        apply_through(&mut sp, 1, 0);
+        assert_eq!((dur(sp.inventory.slot(0)), dur(sp.offhand.as_ref())), (Some(50), Some(195)), "still the blocking one");
+    }
+
+    /// Review 2 finding 2: a Strict fold reports a wear only when something wore. A
+    /// pending shield wear that finds no shield is ambiguous, not a free `Wore`.
+    #[test]
+    fn a_strict_fold_of_a_shield_wear_that_finds_no_shield_is_refused() {
+        use crate::hands::Hand;
+        let shield = Tool::new(ToolType::Shield, ToolMaterial::Wood);
+        let registry = crate::block::BlockRegistry::new();
+        let mut sp = joiner();
+        sp.inventory.set_slot(0, Some(ItemStack::new_tool(shield)));
+        queue(&mut sp, WindowEvent::WearShield { slot: 0, hand: Hand::Main, durability: shield.durability, amount: 5 }, 0);
+        assert!(strict_effective_marker(&sp, &registry).is_ok(), "a shield holds it");
+        sp.inventory.set_slot(0, None);
+        assert!(
+            matches!(strict_effective_marker(&sp, &registry), Err(StrictStageError::AmbiguousWear)),
+            "nothing wore: not a wear",
+        );
+        // And a new wear staged on a Strict seat finds the shield wherever it is: the
+        // off-hand, after an F swap, backed by the off-hand's own place.
+        sp.offhand = Some(ItemStack::new_tool(shield));
+        let event = WindowEvent::WearShield { slot: 0, hand: Hand::Main, durability: shield.durability, amount: 5 };
+        assert!(stage_strict_effects(&sp, &registry, &[event]).is_ok(), "found in the off-hand");
+        sp.offhand = None;
+        assert!(
+            stage_strict_effects(&sp, &registry, &[WindowEvent::WearShield { slot: 0, hand: Hand::Main, durability: shield.durability, amount: 5 }]).is_err(),
+            "no shield anywhere: refused",
+        );
     }
 
     #[test]

@@ -22,6 +22,12 @@
 //! no player-versus-player melee, so those two paths do not exist to hook;
 //! [`blocks`] takes any attacker position, so they would use it unchanged.
 //!
+//! **Effective durability.** Whether a seat can block is read from the *effective*
+//! window, never the raw one: the durability a block already owes (a queued
+//! `WearShield`, or wear this very tick that is not queued yet) comes off first, so
+//! a shield owed broken protects nothing, whether or not its client has said it
+//! wore it ([`Guard::durability`], [`crate::combat::PlayerCombat::shield_blocks`]).
+//!
 //! **Wear and the block window.** A block costs the shield `1 + floor(damage)`
 //! durability ([`wear_for`], the damage being the hit before armour and after
 //! the difficulty scale). Hostile melee has no attack cooldown (the only rate
@@ -51,6 +57,13 @@ pub struct Guard {
     pub look: Vec3,
     /// Consecutive ticks the shield has been raised.
     pub raised_for: u32,
+    /// The hand of the shield that guards (the main hand's first,
+    /// [`guard_hand`]) and the durability it has EFFECTIVELY: what it holds once
+    /// every wear already owed is taken off. A shield with none left protects
+    /// nothing, and wear owed from this guard names it by both
+    /// ([`ShieldOwed`]).
+    pub hand: Hand,
+    pub durability: u16,
 }
 
 impl Guard {
@@ -117,6 +130,16 @@ pub fn guard_hand(main: Option<&Item>, off: Option<&Item>) -> Option<Hand> {
     }
 }
 
+/// Durability one block of a raised shield owes, naming the shield by its hand
+/// and the durability it had when the block fell (the identity a `WearShield`
+/// carries; see [`wear_blocking`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShieldOwed {
+    pub hand: Hand,
+    pub durability: u16,
+    pub amount: u16,
+}
+
 /// What a shield did while one body's hits were landed: the durability it lost
 /// and the clacks that sounded (one per wearing block).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -139,7 +162,7 @@ impl ShieldCtx {
     }
 }
 
-/// What [`wear`] found.
+/// What [`wear_blocking`] found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WearOutcome {
     /// The shield lost durability; `broke` when it reached 0 and was removed.
@@ -148,32 +171,78 @@ pub enum WearOutcome {
     Missing,
 }
 
-/// Wear the shield in `hand` by `n` durability, breaking it at 0 like any tool
-/// (`Inventory::use_tool_at`, the cell rule every tool wears by). `slot` is the
-/// hotbar slot the main hand names. The ONE wear rule: a local body wears its own
-/// shield by it, and the two copies of a joiner's window (the server's and its
-/// client's) wear the same shield by it when a block is reported
-/// (`WindowEvent::WearShield`).
-pub fn wear(
+/// The durability of the shield `item` is, if it is one.
+fn shield_durability(item: Option<&crate::item::ItemStack>) -> Option<u16> {
+    match item.map(|s| &s.item) {
+        Some(Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shield => Some(t.durability),
+        _ => None,
+    }
+}
+
+/// The hand that guards given both hands' stacks, with the durability its shield
+/// has: [`guard_hand`] plus the number. `None` when neither hand holds a shield.
+pub fn guarding(main: Option<&crate::item::ItemStack>, off: Option<&crate::item::ItemStack>) -> Option<(Hand, u16)> {
+    let hand = guard_hand(main.map(|s| &s.item), off.map(|s| &s.item))?;
+    let durability = shield_durability(match hand {
+        Hand::Main => main,
+        Hand::Off => off,
+    })?;
+    Some((hand, durability))
+}
+
+/// Where the shield a wear is owed against is NOW, for both copies of a joiner's
+/// window: a block named the shield by its `hand` (the main hand names hotbar slot
+/// `slot`) and the `durability` it had, and an F swap may have moved it since. The
+/// shield with exactly that durability wins (the named hand's place first, then the
+/// other), so two shields never swap bills; failing that, the shared hand-aware
+/// resolution a swing's wear uses ([`crate::joiner_actions::where_now_hand`]) finds a
+/// shield by kind (it is single-tier), the named hand's place first.
+pub fn locate(
+    inventory: &crate::inventory::Inventory,
+    offhand: &Option<crate::item::ItemStack>,
+    hand: Hand,
+    slot: usize,
+    durability: u16,
+) -> Option<crate::joiner_actions::HeldAt> {
+    use crate::joiner_actions::HeldAt;
+    let places = match hand {
+        Hand::Main => [HeldAt::Slot(slot), HeldAt::Offhand],
+        Hand::Off => [HeldAt::Offhand, HeldAt::Slot(slot)],
+    };
+    let stack = |at: HeldAt| match at {
+        HeldAt::Slot(i) => inventory.slot(i),
+        HeldAt::Offhand => offhand.as_ref(),
+    };
+    if let Some(at) = places.into_iter().find(|&at| shield_durability(stack(at)) == Some(durability)) {
+        return Some(at);
+    }
+    let any = Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Shield, crate::crafting::ToolMaterial::Wood));
+    crate::joiner_actions::where_now_hand(inventory, offhand, hand, slot, &any)
+}
+
+/// Wear the shield a block was owed against, wherever it is now ([`locate`]), by
+/// `n` durability, breaking it at 0 like any tool (`Inventory::use_tool_at`, the
+/// cell rule every tool wears by). THE wear rule: a `WearShield` window event
+/// applies it on both copies of a joiner's window, the fold that reads a shield's
+/// effective durability applies it, and a local body wears the shield it has just
+/// blocked with by it, at once.
+pub fn wear_blocking(
     inventory: &mut crate::inventory::Inventory,
     slot: usize,
     offhand: &mut Option<crate::item::ItemStack>,
     hand: Hand,
+    durability: u16,
     n: u16,
 ) -> WearOutcome {
-    let holds = |item: Option<&crate::item::ItemStack>| is_shield(item.map(|s| &s.item));
-    let present = match hand {
-        Hand::Main => holds(inventory.slot(slot)),
-        Hand::Off => holds(offhand.as_ref()),
-    };
-    if !present {
+    use crate::joiner_actions::HeldAt;
+    let Some(at) = locate(inventory, offhand, hand, slot, durability) else {
         return WearOutcome::Missing;
-    }
+    };
     let mut broke = false;
     for _ in 0..n {
-        let info = match hand {
-            Hand::Main => inventory.use_tool_at(slot),
-            Hand::Off => crate::inventory::use_tool_cell(offhand),
+        let info = match at {
+            HeldAt::Slot(i) => inventory.use_tool_at(i),
+            HeldAt::Offhand => crate::inventory::use_tool_cell(offhand),
         };
         match info {
             Some(info) if info.just_broke => {
@@ -302,14 +371,14 @@ mod tests {
         let mut inv = crate::inventory::Inventory::new();
         let mut off = Some(shield_stack(10));
         inv.set_slot(2, Some(shield_stack(100)));
-        assert_eq!(wear(&mut inv, 2, &mut off, Hand::Main, 4), WearOutcome::Worn { broke: false });
+        assert_eq!(wear_blocking(&mut inv, 2, &mut off, Hand::Main, 100, 4), WearOutcome::Worn { broke: false });
         assert_eq!(durability(inv.slot(2)), Some(96));
         assert_eq!(durability(off.as_ref()), Some(10), "the off-hand is untouched");
-        assert_eq!(wear(&mut inv, 2, &mut off, Hand::Off, 9), WearOutcome::Worn { broke: false });
+        assert_eq!(wear_blocking(&mut inv, 2, &mut off, Hand::Off, 10, 9), WearOutcome::Worn { broke: false });
         assert_eq!(durability(off.as_ref()), Some(1));
-        assert_eq!(wear(&mut inv, 2, &mut off, Hand::Off, 5), WearOutcome::Worn { broke: true });
+        assert_eq!(wear_blocking(&mut inv, 2, &mut off, Hand::Off, 1, 5), WearOutcome::Worn { broke: true });
         assert!(off.is_none(), "a shield worn to nothing is gone, as any tool is");
-        assert_eq!(wear(&mut inv, 2, &mut off, Hand::Off, 1), WearOutcome::Missing, "nothing left to wear");
+        assert_eq!(durability(inv.slot(2)), Some(96), "the other shield did not pay for it");
     }
 
     #[test]
@@ -318,9 +387,53 @@ mod tests {
         let mut inv = crate::inventory::Inventory::new();
         let mut off = None;
         inv.set_slot(0, Some(crate::item::ItemStack::new_tool(Tool::new(ToolType::Sword, ToolMaterial::Iron))));
-        assert_eq!(wear(&mut inv, 0, &mut off, Hand::Main, 3), WearOutcome::Missing, "a sword is not worn as a shield");
-        assert_eq!(wear(&mut inv, 5, &mut off, Hand::Main, 3), WearOutcome::Missing, "an empty slot");
+        assert_eq!(wear_blocking(&mut inv, 0, &mut off, Hand::Main, 100, 3), WearOutcome::Missing, "a sword is not worn as a shield");
+        assert_eq!(wear_blocking(&mut inv, 5, &mut off, Hand::Main, 100, 3), WearOutcome::Missing, "an empty slot");
         assert_eq!(durability(inv.slot(0)), Some(Tool::new(ToolType::Sword, ToolMaterial::Iron).durability), "unchanged");
+    }
+
+    /// The blocking shield pays wherever an F swap has put it: a sword now in
+    /// the named slot is not worn, and with a shield in each hand the one that
+    /// blocked (by its durability) pays, not the one now in the named hand.
+    #[test]
+    fn a_swap_in_flight_moves_the_wear_with_the_shield() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        let sword = || crate::item::ItemStack::new_tool(Tool::new(ToolType::Sword, ToolMaterial::Iron));
+        let sword_full = Tool::new(ToolType::Sword, ToolMaterial::Iron).durability;
+        // The shield blocked from the main hand (slot 0, durability 100), then F put
+        // it in the off-hand and the sword in the main hand.
+        let mut inv = crate::inventory::Inventory::new();
+        inv.set_slot(0, Some(sword()));
+        let mut off = Some(shield_stack(100));
+        assert_eq!(wear_blocking(&mut inv, 0, &mut off, Hand::Main, 100, 5), WearOutcome::Worn { broke: false });
+        assert_eq!(durability(off.as_ref()), Some(95), "the shield, now in the off-hand, paid");
+        assert_eq!(durability(inv.slot(0)), Some(sword_full), "the sword is untouched");
+        // A shield in each hand, the main one the blocker (200); F swapped them.
+        let mut inv = crate::inventory::Inventory::new();
+        inv.set_slot(0, Some(shield_stack(50)));
+        let mut off = Some(shield_stack(200));
+        assert_eq!(wear_blocking(&mut inv, 0, &mut off, Hand::Main, 200, 5), WearOutcome::Worn { broke: false });
+        assert_eq!(durability(off.as_ref()), Some(195), "the blocker (200) paid, though it is in the other hand now");
+        assert_eq!(durability(inv.slot(0)), Some(50), "the other shield did not");
+        // No swap, a shield in each hand: the named hand's.
+        let mut inv = crate::inventory::Inventory::new();
+        inv.set_slot(0, Some(shield_stack(200)));
+        let mut off = Some(shield_stack(50));
+        wear_blocking(&mut inv, 0, &mut off, Hand::Main, 200, 5);
+        assert_eq!((durability(inv.slot(0)), durability(off.as_ref())), (Some(195), Some(50)));
+        // Equal durabilities: the named hand's place.
+        let mut inv = crate::inventory::Inventory::new();
+        inv.set_slot(0, Some(shield_stack(80)));
+        let mut off = Some(shield_stack(80));
+        wear_blocking(&mut inv, 0, &mut off, Hand::Off, 80, 5);
+        assert_eq!((durability(inv.slot(0)), durability(off.as_ref())), (Some(80), Some(75)));
+    }
+
+    #[test]
+    fn guarding_names_the_hand_and_the_durability() {
+        assert_eq!(guarding(Some(&shield_stack(7)), Some(&shield_stack(9))), Some((Hand::Main, 7)));
+        assert_eq!(guarding(None, Some(&shield_stack(9))), Some((Hand::Off, 9)));
+        assert_eq!(guarding(None, None), None);
     }
 
     /// The window event the server queues and the client applies is this one rule on
@@ -328,21 +441,21 @@ mod tests {
     #[test]
     fn the_wear_window_event_wears_both_copies_alike() {
         use crate::window_events::WindowEvent;
-        let event = WindowEvent::WearShield { slot: 1, hand: Hand::Main, amount: 5 };
-        let WindowEvent::WearShield { slot, hand, amount } = event else { unreachable!() };
+        let event = WindowEvent::WearShield { slot: 1, hand: Hand::Main, durability: 200, amount: 5 };
+        let WindowEvent::WearShield { slot, hand, durability: worn_at, amount } = event else { unreachable!() };
         let (mut server, mut client) = (crate::inventory::Inventory::new(), crate::inventory::Inventory::new());
         let (mut server_off, mut client_off) = (None, None);
         server.set_slot(1, Some(shield_stack(200)));
         client.set_slot(1, Some(shield_stack(200)));
-        wear(&mut server, slot, &mut server_off, hand, amount);
-        wear(&mut client, slot, &mut client_off, hand, amount);
+        wear_blocking(&mut server, slot, &mut server_off, hand, worn_at, amount);
+        wear_blocking(&mut client, slot, &mut client_off, hand, worn_at, amount);
         assert_eq!(durability(server.slot(1)), Some(195));
         assert_eq!(durability(server.slot(1)), durability(client.slot(1)));
     }
 
     #[test]
     fn a_guard_asks_the_one_rule() {
-        let g = Guard { victim: V, look: look(), raised_for: 5 };
+        let g = Guard { victim: V, look: look(), raised_for: 5, hand: Hand::Main, durability: 10 };
         assert!(g.blocks(at(0.0)));
         assert!(!g.blocks(at(180.0)));
         assert!(!Guard { raised_for: 4, ..g }.blocks(at(0.0)));

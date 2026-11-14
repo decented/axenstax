@@ -698,12 +698,19 @@ impl PlayerSlot {
         if self.combat.dead {
             return None;
         }
-        let (main, off) = self.hands_items();
-        crate::shield::guard_hand(main, off)?;
+        // A local body wears at once (`settle_shield`), so its raw window is its
+        // effective one between hit passes; within a pass the ctx's own tally
+        // keeps a shield owed broken from blocking twice.
+        let (hand, durability) = crate::shield::guarding(
+            self.inventory.hotbar_slot(self.hotbar_slot),
+            self.offhand.as_ref(),
+        )?;
         Some(crate::shield::Guard {
             victim: self.player.pos,
             look: crate::shield::look_from_yaw(self.camera.yaw),
             raised_for: self.shield_ticks,
+            hand,
+            durability,
         })
     }
 
@@ -713,16 +720,21 @@ impl PlayerSlot {
     }
 
     /// Settle what a shield blocked while hits were landed: wear the guarding
-    /// shield (`shield::wear`) and queue the clacks.
-    pub fn settle_shield(&mut self, tally: crate::shield::BlockTally) {
-        if tally.wear > 0 {
-            let (main, off) = self.hands_items();
-            if let Some(hand) = crate::shield::guard_hand(main, off) {
-                let slot = self.hotbar_slot;
-                crate::shield::wear(&mut self.inventory, slot, &mut self.offhand, hand, tally.wear);
-            }
+    /// shield (`shield::wear_blocking`, by the hand and durability the guard
+    /// named) and queue the clacks.
+    pub fn settle_shield(&mut self, shield: crate::shield::ShieldCtx) {
+        if shield.tally.wear > 0 && let Some(guard) = shield.guard {
+            let slot = self.hotbar_slot;
+            crate::shield::wear_blocking(
+                &mut self.inventory,
+                slot,
+                &mut self.offhand,
+                guard.hand,
+                guard.durability,
+                shield.tally.wear,
+            );
         }
-        self.shield_clacks = self.shield_clacks.saturating_add(tally.clacks);
+        self.shield_clacks = self.shield_clacks.saturating_add(shield.tally.clacks);
     }
 
     /// Drain the clacks to play (one sound however many blocked this tick).
@@ -742,7 +754,7 @@ impl PlayerSlot {
     ) -> bool {
         let mut shield = self.shield_ctx();
         if !self.combat.dead && self.combat.shield_blocks(&mut shield, from, raw) {
-            self.settle_shield(shield.tally);
+            self.settle_shield(shield);
             return false;
         }
         let landed = self.take_damage_with_armour_from(raw, cause);

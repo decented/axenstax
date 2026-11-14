@@ -390,7 +390,9 @@ impl PlayerCombat {
     /// the hit comes from, `raw` its damage before armour. A blocked hit does no
     /// damage and starts no i-frame window; the first block of a window wears the
     /// shield (`1 + floor(raw)` into `tally`, one clack) and opens the window,
-    /// the rest of it blocks free. Returns whether the hit was blocked.
+    /// the rest of it blocks free, until the shield's effective durability
+    /// ([`crate::shield::Guard::durability`]) is spent. Returns whether the hit
+    /// was blocked.
     pub fn shield_blocks(
         &mut self,
         shield: &mut crate::shield::ShieldCtx,
@@ -399,6 +401,12 @@ impl PlayerCombat {
     ) -> bool {
         let Some(guard) = shield.guard else { return false };
         if !guard.blocks(attacker) {
+            return false;
+        }
+        // A shield owed broken protects no more: what its blocks already owe
+        // (an earlier hit of this very pass) takes its effective durability to
+        // nothing, whether or not the wear has landed on a window yet.
+        if shield.tally.wear >= guard.durability {
             return false;
         }
         if self.shield_window == 0 {
@@ -1192,7 +1200,7 @@ pub fn land_mob_attacks(
     for _ in &landed {
         slot.wear_armour();
     }
-    slot.settle_shield(shield.tally);
+    slot.settle_shield(shield);
     landed
 }
 
@@ -2396,5 +2404,52 @@ mod shield_block_tests {
             assert!(slot.combat.health < hp);
             assert_eq!(shield_durability(&slot), Some(crate::crafting::SHIELD_DURABILITY), "and wears nothing");
         }
+    }
+
+    /// Review 2 finding 1 (local half): a shield whose effective durability is spent
+    /// blocks nothing more, in the same pass (the tally already owes it broken) and
+    /// when it has none to begin with.
+    #[test]
+    fn a_shield_owed_broken_blocks_no_second_hit() {
+        use crate::shield::{Guard, ShieldCtx};
+        let guard = |durability| Guard {
+            victim: Vec3::new(0.0, 64.0, 0.0),
+            look: crate::shield::look_from_yaw(0.0),
+            raised_for: RAISE_TICKS,
+            hand: crate::hands::Hand::Main,
+            durability,
+        };
+        let front = Vec3::new(0.0, 64.0, -1.0);
+        let mut combat = PlayerCombat::new();
+        // 3 durability left, a block costing 5: the first is blocked and owes it broken.
+        let mut ctx = ShieldCtx::with(Some(guard(3)));
+        assert!(combat.shield_blocks(&mut ctx, front, 4.0), "the first hit is blocked");
+        assert_eq!(ctx.tally.wear, 5);
+        assert!(!combat.shield_blocks(&mut ctx, front, 4.0), "a second, inside the open window: the shield is spent");
+        // Enough durability: the window keeps blocking free.
+        let mut combat = PlayerCombat::new();
+        let mut ctx = ShieldCtx::with(Some(guard(6)));
+        assert!(combat.shield_blocks(&mut ctx, front, 4.0));
+        assert!(combat.shield_blocks(&mut ctx, front, 4.0), "5 owed of 6: still up");
+        // None effective at all.
+        let mut combat = PlayerCombat::new();
+        let mut ctx = ShieldCtx::with(Some(guard(0)));
+        assert!(!combat.shield_blocks(&mut ctx, front, 4.0), "0 durability blocks nothing");
+        assert_eq!(ctx.tally.wear, 0);
+    }
+
+    /// A local body wears at once: the block that breaks a 1-durability shield is
+    /// the last it makes, and the next front hit lands.
+    #[test]
+    fn a_local_shield_broken_by_a_block_protects_the_next_hit_no_more() {
+        let (ecs, _) = brigand(true);
+        let mut slot = guarded(RAISE_TICKS);
+        slot.inventory.set_slot(0, Some(ItemStack::new_tool(Tool { durability: 1, ..Tool::new(ToolType::Shield, ToolMaterial::Wood) })));
+        let hp = slot.combat.health;
+        assert!(tick_mob_attacks(&ecs, &mut slot, NORMAL).is_empty(), "blocked");
+        assert!(slot.inventory.slot(0).is_none(), "and broken");
+        assert_eq!(slot.combat.health, hp);
+        assert!(!tick_mob_attacks(&ecs, &mut slot, NORMAL).is_empty(), "the next hit lands");
+        assert!(slot.combat.health < hp);
     }
 }

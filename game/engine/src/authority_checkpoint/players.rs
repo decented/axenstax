@@ -196,7 +196,7 @@ fn every_field_is_accounted_for(sp: &ServerPlayer) {
         // left out: a raise count, rebuilt from the latch (a restored body starts lowered)
         shield_ticks: _,
         // left out: a wear tally for the tick, drained into window events the same tick
-        shield_wear: _,
+        shield_owed: _,
         // left out: a log-once flag
         shield_flag_logged: _,
     } = sp;

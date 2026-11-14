@@ -445,7 +445,7 @@ pub fn apply_joiner_blast_damage(
         if raw > 0.0 {
             let mut shield = sp.shield_ctx();
             let blocked = sp.combat.shield_blocks(&mut shield, glam::Vec3::new(c.0, c.1, c.2), raw);
-            sp.settle_shield(shield.tally);
+            sp.settle_shield(shield);
             if blocked {
                 continue;
             }

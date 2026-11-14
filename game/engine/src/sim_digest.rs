@@ -558,7 +558,7 @@ impl GameServer {
             // Off-hand release (slice 5) — the raise the server counts, the block it owes.
             e.bool(sp.shield_latch);
             e.u32(sp.shield_ticks);
-            e.u32(u32::from(sp.shield_wear));
+            e.u32(sp.shield_owed.iter().map(|o| u32::from(o.amount)).sum());
             e.u32(sp.interact_cooldown);
             e.u32(sp.eat_cooldown);
             e.u32(sp.attach_gen);

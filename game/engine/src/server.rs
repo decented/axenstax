@@ -229,9 +229,12 @@ pub struct ServerPlayer {
     /// raise itself and never takes a client's count.
     pub shield_ticks: u32,
     /// Durability the server's blocks owe this joiner's shield since the last
-    /// `PlayerEventType::ShieldWorn` (`1 + floor(damage)` per wearing block).
-    /// Drained by `HostedServer` every tick, like `armour_wear_hits`.
-    pub shield_wear: u16,
+    /// `PlayerEventType::ShieldWorn` (`1 + floor(damage)` per wearing block), each
+    /// entry naming the shield it is owed against by hand and durability. Drained by
+    /// `HostedServer` every tick (before the deaths settle), like
+    /// `armour_wear_hits`; until then it counts against the shield's EFFECTIVE
+    /// durability ([`Self::effective_shield`]).
+    pub shield_owed: Vec<crate::shield::ShieldOwed>,
     /// The flag was raised with no shield in the server's copy, and it has been
     /// said so in the log (once per connection).
     pub shield_flag_logged: bool,
@@ -649,7 +652,7 @@ impl ServerPlayer {
             armour_wear_hits: 0,
             shield_latch: false,
             shield_ticks: 0,
-            shield_wear: 0,
+            shield_owed: Vec::new(),
             shield_flag_logged: false,
             interact_cooldown: 0,
             attach_gen: 0,
@@ -744,7 +747,7 @@ impl ServerPlayer {
         self.dead_ticks = 0;
         self.armour_wear_hits = 0;
         self.shield_ticks = 0;
-        self.shield_wear = 0;
+        self.shield_owed.clear();
         self.combat.shield_window = 0;
         self.player.reset_fall();
         crate::spawn_protection::arm(self);
@@ -820,30 +823,46 @@ pub fn sanitise_reported_health_change(delta: f32) -> f32 {
 }
 
 impl ServerPlayer {
-    /// Off-hand release (slice 5) — which hand of the server's copy of this
-    /// joiner's window holds a shield (the main hand's selected slot, then the
-    /// off-hand): the shield the joiner's raise counts for, and the one a block
-    /// wears. `None` for a local slot (its client runs its own shield) and for a
-    /// copy that holds none, though the client's flag is set.
-    pub fn shield_hand(&self) -> Option<crate::hands::Hand> {
+    /// Off-hand release (slice 5) — which shield of the server's copy of this
+    /// joiner's window guards, and how much durability it EFFECTIVELY has: the
+    /// main hand's selected slot first, then the off-hand ([`crate::shield::guarding`]),
+    /// read from the window with every wear already owed taken off, never from the
+    /// raw one. The wear owed is the `WearShield` events still waiting for the
+    /// joiner's client to say it wore its own, and the blocks of this very tick that
+    /// are not queued yet ([`Self::shield_owed`]). A shield owed broken is gone here
+    /// (as it will be on both copies), so it neither blocks nor counts a raise.
+    /// `None` for a local slot (its client runs its own shield) and for a copy that
+    /// holds none, though the client's flag is set.
+    pub fn effective_shield(&self) -> Option<(crate::hands::Hand, u16)> {
         if !self.server_simulated {
             return None;
         }
-        crate::shield::guard_hand(
-            self.inventory.hotbar_slot(self.hotbar_slot).map(|s| &s.item),
-            self.offhand.as_ref().map(|s| &s.item),
-        )
+        let owed = !self.shield_owed.is_empty();
+        let pending = self.window_events.has_waiting_shield_wear();
+        if !owed && !pending {
+            return crate::shield::guarding(self.inventory.hotbar_slot(self.hotbar_slot), self.offhand.as_ref());
+        }
+        let mut window = crate::window_events::effective_window(self);
+        if owed {
+            for o in &self.shield_owed {
+                crate::shield::wear_blocking(&mut window.inv, self.hotbar_slot, &mut window.offhand, o.hand, o.durability, o.amount);
+            }
+        }
+        crate::shield::guarding(window.inv.hotbar_slot(self.hotbar_slot), window.offhand.as_ref())
     }
 
     /// This joiner's raised shield for the one block rule: its server body's
-    /// position and yaw, the server's own raised count, and a shield in the
-    /// server's copy. No shield there means no protection, whatever the flag.
+    /// position and yaw, the server's own raised count, and the shield in the
+    /// server's copy with the durability it effectively has. No shield there means
+    /// no protection, whatever the flag.
     pub fn shield_guard(&self) -> Option<crate::shield::Guard> {
-        self.shield_hand()?;
+        let (hand, durability) = self.effective_shield()?;
         Some(crate::shield::Guard {
             victim: self.player.pos,
             look: crate::shield::look_from_yaw(self.yaw),
             raised_for: self.shield_ticks,
+            hand,
+            durability,
         })
     }
 
@@ -852,18 +871,28 @@ impl ServerPlayer {
         crate::shield::ShieldCtx::with(self.shield_guard())
     }
 
-    /// What a block owes: the wear is queued for the joiner's client and the
-    /// server's copy (`announce_joiner_hits_and_kills`).
-    pub fn settle_shield(&mut self, tally: crate::shield::BlockTally) {
-        self.shield_wear = self.shield_wear.saturating_add(tally.wear);
+    /// What a block owes: the wear is owed against the shield that blocked (its
+    /// hand and effective durability), counts against it from now on
+    /// ([`Self::effective_shield`]), and is queued for the joiner's client and the
+    /// server's copy (`HostedServer::queue_joiner_shield_wear`).
+    pub fn settle_shield(&mut self, shield: crate::shield::ShieldCtx) {
+        if shield.tally.wear > 0 && let Some(guard) = shield.guard {
+            self.shield_owed.push(crate::shield::ShieldOwed {
+                hand: guard.hand,
+                durability: guard.durability,
+                amount: shield.tally.wear,
+            });
+        }
     }
 
     /// One server tick of this joiner's raise: the count continues while the
-    /// flag is latched and the server's copy holds a shield, and drops to zero
-    /// otherwise (release, no shield, death). A raised flag with no shield in
-    /// the server's copy is logged once.
+    /// flag is latched and the server's copy holds a shield (effectively: one owed
+    /// broken is none), and drops to zero otherwise (release, no shield, death). A
+    /// raised flag with no shield in the server's copy is logged once. Run ONCE
+    /// per tick, before the first damage phase that can be blocked
+    /// ([`GameServer::run_shield_phase`]), so every phase reads the same value.
     pub fn tick_shield(&mut self) {
-        let holds = self.shield_hand().is_some();
+        let holds = self.effective_shield().is_some();
         let raised = self.shield_latch && holds && self.is_present_and_alive();
         if self.shield_latch && !holds && self.server_simulated && !self.shield_flag_logged {
             self.shield_flag_logged = true;
@@ -1155,6 +1184,10 @@ pub struct GameServer {
     /// yet. A second phase while it is open is refused.
     pub(crate) clock_phase_open: bool,
     pub(crate) death_phase_open: bool,
+    /// Off-hand release — this logical tick's shield phase ran
+    /// ([`Self::run_shield_phase`]); the tick's end clears it. A second call in
+    /// the same tick does nothing, so one raise state serves every damage phase.
+    pub(crate) shield_phase_done: bool,
     pub(crate) machine_phase_open: bool,
     pub(crate) hopper_phase_open: bool,
     pub(crate) projectile_phase_open: bool,
@@ -1367,6 +1400,7 @@ impl GameServer {
             clock_phase_open: false,
             death_phase_open: false,
             machine_phase_open: false,
+            shield_phase_done: false,
             hopper_phase_open: false,
             projectile_phase_open: false,
             pending_strike: None,
@@ -1945,6 +1979,7 @@ impl GameServer {
         self.clock_adopted = false;
         self.clock_phase_open = false;
         self.death_phase_open = false;
+        self.shield_phase_done = false;
         self.machine_phase_open = false;
         self.hopper_phase_open = false;
         self.projectile_phase_open = false;
@@ -1981,6 +2016,9 @@ impl GameServer {
         tally.bump(crate::sim_lend::SimSystem::Weather);
         self.clock_phase_open = true;
         let stepped = self.clock_phase_core(has_weather, lock);
+        // The raise state is settled before anything this logical tick can block:
+        // a lent world's early machine blasts run before `tick`.
+        self.run_shield_phase();
         Some(crate::sim_clock::ClockReadback {
             world_time: self.world_time,
             world_time_step: self.world_time_step,
@@ -2097,6 +2135,11 @@ impl GameServer {
         } else {
             Some(self.clock_phase_owned())
         };
+        // Off-hand release — every joiner's raise state for this tick, once,
+        // before the first phase that can land a blockable hit (machine blasts,
+        // species hits, hostile melee). A lent world's early phases got here first
+        // (`run_clock_phase`).
+        self.run_shield_phase();
         let reputation_days = if let Some(owner) = self.lent_day_owner {
             self.lent_day_consumer.consume(owner, self.tick_counter, self.run_id, self.lent_day_offer.take())
         } else if let Some(step) = stepped {
@@ -2640,7 +2683,6 @@ impl GameServer {
             }
             sp.interact_cooldown = sp.interact_cooldown.saturating_sub(1);
             sp.eat_cooldown = sp.eat_cooldown.saturating_sub(1);
-            sp.tick_shield();
             crate::window_ops::watch_table(sp, &self.world);
         }
 
@@ -2668,6 +2710,26 @@ impl GameServer {
         self.end_dead_riders();
         // And last, for whatever moved a body in between: a step, a shove, a seat.
         self.hold_bodies_in_range();
+        // The next logical tick settles the raise state again.
+        self.shield_phase_done = false;
+    }
+
+    /// Off-hand release — one tick of every joiner's shield raise
+    /// ([`ServerPlayer::tick_shield`]): the latch the inputs left, the window with
+    /// its owed wear taken off. Once per logical tick, before the first damage phase
+    /// that a shield can block, so a species hit, a hostile melee hit and a blast
+    /// in the same tick all read the same raise count, and a release (the flag
+    /// down) is already in force for all of them. A lent world runs it from its
+    /// clock phase, ahead of the host's early machine beats; the tick runs it if
+    /// nothing has this tick; a second call is a no-op.
+    pub(crate) fn run_shield_phase(&mut self) {
+        if self.shield_phase_done {
+            return;
+        }
+        self.shield_phase_done = true;
+        for sp in &mut self.players {
+            sp.tick_shield();
+        }
     }
 
     /// Nothing holds a body past the playable limit (the one `/tp` clamps to): it
@@ -3149,7 +3211,7 @@ impl GameServer {
                     self.difficulty,
                     &mut shield,
                 );
-                sp.settle_shield(shield.tally);
+                sp.settle_shield(shield);
                 sp.armour_wear_hits = sp.armour_wear_hits.saturating_add(landed.len() as u8);
             }
             if let Some((raw, cause)) = crate::survival::contact_hazard(
@@ -3205,7 +3267,7 @@ impl GameServer {
         if let Some(from) = from {
             let mut shield = sp.shield_ctx();
             let blocked = sp.combat.shield_blocks(&mut shield, from, raw);
-            sp.settle_shield(shield.tally);
+            sp.settle_shield(shield);
             if blocked {
                 return false;
             }
