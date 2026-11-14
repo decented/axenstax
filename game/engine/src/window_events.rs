@@ -283,6 +283,7 @@ impl WindowEvents {
 
     /// Is a shield wear waiting (`WearShield`)? The effective shield reads the
     /// window with it taken off ([`ServerPlayer::effective_shield`]).
+    #[cfg(test)]
     pub fn has_waiting_shield_wear(&self) -> bool {
         self.waiting.iter().any(|w| matches!(w.event, WindowEvent::WearShield { .. }))
     }

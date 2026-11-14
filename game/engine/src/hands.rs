@@ -212,6 +212,7 @@ pub fn use_hand(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> 
 /// the click)? The question a thing that only acts when the click is otherwise
 /// unclaimed asks. A shield in a hand answers for itself too (its use is the raise,
 /// so it has one wherever no block or mob claims the click).
+#[cfg(test)]
 pub fn either_hand_has_use(main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> bool {
     hand_with_use(main, off, target).is_some()
 }

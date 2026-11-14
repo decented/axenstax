@@ -44,6 +44,7 @@ pub struct MobFacts {
 
 impl MobFacts {
     /// A mob of `kind` in no particular state: wild, adult, ready, untied.
+    #[cfg(test)]
     pub fn of(kind: MobType) -> Self {
         Self { kind, can_breed: true, product_ready: true, tethered: false, tamed: false, own_pet: false }
     }
