@@ -1,14 +1,14 @@
 //! Android only: `AxenstaxActivity`'s own methods, called over JNI: the text
-//! prompt dialog (`text_prompt.rs`'s Android backend) and the end-of-process
-//! handshake (`android_lifecycle.rs`).
+//! prompt dialog (`text_prompt.rs`'s Android backend) and the destroy flag
+//! (`android_lifecycle.rs`).
 //!
 //! Every call is an instance method on the activity object android-activity hands
 //! `ndk-context`, as `android_intent.rs` reads the intent: no `FindClass` by name
 //! from this thread (it would search the system class loader, which cannot see
 //! our class) and no Java `native` methods. None of them waits for the UI thread:
 //! the dialog is posted with `runOnUiThread` and then polled, the destroy flag is
-//! a volatile read, and the rest take a lock the UI thread only ever holds for a
-//! few field writes.
+//! a volatile read, and the prompt's state and answer take a lock the UI thread
+//! only ever holds for a few field writes.
 #![cfg(target_os = "android")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +51,10 @@ fn with_activity<T>(
         let out = env.with_local_frame(16, |env| -> jni::errors::Result<T> {
             // SAFETY: android-activity keeps the activity reference alive while
             // `android_main` runs, which is the only time these calls are made.
+            // NativeActivity drops its global reference only after its onDestroy
+            // callback returns, and that waits for `android_main` to return, which
+            // it never does now (the process ends first), so the destroy flag can
+            // be read throughout the teardown.
             let act = unsafe { JObject::from_raw(activity.cast()) };
             call(env, &act)
         });
@@ -133,17 +137,4 @@ pub(crate) fn activity_destroying() -> bool {
         env.call_method(act, "isBeingDestroyed", "()Z", &[])?.z()
     })
     .unwrap_or(false)
-}
-
-/// Tell the activity the game has ended (its loop returned after the exit
-/// function's save, or it panicked): its onDestroy may end the process now.
-pub(crate) fn report_game_ended() {
-    static WARNED: AtomicBool = AtomicBool::new(false);
-    let told = with_activity(&WARNED, "reporting the game's end", |env, act| {
-        env.call_method(act, "reportGameEnded", "()V", &[])?;
-        Ok(())
-    });
-    if told.is_some() {
-        log::info!("Android: game ended; the activity may end the process");
-    }
 }

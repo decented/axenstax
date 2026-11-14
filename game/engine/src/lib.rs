@@ -207,11 +207,11 @@ mod android_intent;
 // The OS text prompt a touch text field or the touch Chat button asks for: async,
 // one at a time (web `window.prompt()`, Android the activity's text dialog).
 mod text_prompt;
-// Android: AxenstaxActivity's text dialog and end-of-process handshake, over JNI.
+// Android: AxenstaxActivity's text dialog and destroy flag, over JNI.
 #[cfg(target_os = "android")]
 mod android_jni;
-// Android: the process ends once the activity is destroyed (one winit event loop
-// per process). Its decision is pure and tested on every target.
+// Android: the process ends once the game has ended (one winit event loop per
+// process). Its decisions are pure and tested on every target.
 #[cfg(any(target_os = "android", test))]
 mod android_lifecycle;
 // Online play by contact — the per-install runtime key + its persona
@@ -3552,12 +3552,12 @@ fn drive_event_loop(event_loop: EventLoop<()>, local_routing: crate::local_routi
 ///    `self_update` is additionally gated on a running AppImage.
 /// 5. **The event loop is built from the `AndroidApp`**; `EventLoop::new()`
 ///    cannot reach the activity.
-/// 6. **The process ends with the activity.** winit builds one event loop per
+/// 6. **The process ends with the game.** winit builds one event loop per
 ///    process, so a second `android_main` in a cached process could never
-///    start. `AxenstaxActivity.onDestroy` waits for this function to report it
-///    has ended (the drop guard below: after the loop returned and the game
-///    state dropped, or while a panic unwinds), then kills the process. See
-///    `android_lifecycle.rs`.
+///    start. The drop guard below ends the process (SIGKILL) as this function
+///    ends: after the loop returned and the game state dropped, so after the
+///    exit function's save (lobby Quit or Back, or the activity's destroy flag),
+///    or while a panic unwinds. See `android_lifecycle.rs`.
 ///
 /// `unsafe(no_mangle)`: edition 2024 classes symbol-affecting attributes as
 /// unsafe (we assert the exported name collides with nothing in the link).
@@ -3573,9 +3573,21 @@ pub fn android_main(app: android_activity::AndroidApp) {
     );
     log::info!("Axe'n'Stax {} starting on Android", env!("CARGO_PKG_VERSION"));
 
-    // Dropped last, however this function ends: tells the activity the game
-    // has ended, so its onDestroy may end the process (android_lifecycle.rs).
-    let _report_end = crate::android_lifecycle::ReportEndOnDrop;
+    // A panic's message reaches logcat through the default hook's stderr, which
+    // android-activity forwards from another thread, and its own panic log runs
+    // only after this function returns; the guard below ends the process before
+    // either, so log the panic straight to logcat first.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("{info}");
+        default_hook(info);
+    }));
+
+    // Dropped last, however this function ends: once the game has ended (the
+    // loop returned after the exit function's save and the game state dropped,
+    // the event loop could not be built, or a panic is unwinding), the process
+    // ends, so the next launch is a cold start (android_lifecycle.rs).
+    let _end_process = crate::android_lifecycle::EndOnDrop::new(crate::android_lifecycle::end_process);
 
     // The web build reads `navigator.maxTouchPoints`; on Android the answer is
     // simply "yes". This drives `controls_visible()`, which shows the on-screen
@@ -3605,9 +3617,8 @@ pub fn android_main(app: android_activity::AndroidApp) {
         Ok(event_loop) => event_loop,
         Err(e) => {
             // `RecreationAttempt` cannot happen now the process ends with its
-            // activity. Should it, return rather than panic: the activity
-            // finishes, its onDestroy ends this process (the drop guard above
-            // reports at once) and the next launch is a cold start.
+            // game. Should it, return rather than panic: the drop guard above
+            // ends this process and the next launch is a cold start.
             log::error!("failed to build Android event loop: {e}");
             return;
         }
