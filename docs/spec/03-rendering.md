@@ -1388,6 +1388,18 @@ authoritative `PlayerState` on the wire (see Spec 04 §4.2a):
   walk, `2` jump. Walk drives the leg/arm swing cycle on the `animated` parts;
   idle holds neutral; jump holds a jump pose. (Crouch is **not** an anim_state —
   see flags below.)
+- **Airborne legs trail the travel direction** (`entity_model::airborne_leg_angle`).
+  At `anim_state == 2` both legs share one X angle, and the arms keep their lifted
+  pose (-0.4). Sign convention: in the part builder a POSITIVE X angle swings a
+  point below the pivot toward the avatar's FRONT (-Z in model space, world
+  `(cos yaw, sin yaw)`), so the feet trail BEHIND the hips for a NEGATIVE angle.
+  The angle is `-0.5 * clamp(forward_speed / 4.317, -1, 1)` rad, `forward_speed`
+  being the horizontal velocity's component along the facing: travelling forwards
+  puts the feet behind the hips, backwards puts them in front, sideways or
+  standing leaves them straight (0). The wire carries no velocity, so the travel
+  is the avatar's position change between game ticks
+  (`entity_model::observed_travel`, per player index, only while `anim_state != 0`,
+  reused within a tick, zero on a first sighting, a long gap or a teleport).
 - **Crouch** — a transient flag (`player_flags::CROUCHING`) that applies a
   vertical dip to the whole avatar; it can combine with any locomotion state.
 - **Right-arm swing on mine/place** — `player_flags::SWINGING` triggers an
@@ -1397,6 +1409,14 @@ authoritative `PlayerState` on the wire (see Spec 04 §4.2a):
   or material from `PlayerState.held_kind`/`held_id`) is meshed by the shared
   `item_model::held_item_mesh` and anchored at the right hand, so other
   players see the correct item in hand.
+  **The item follows its arm's effective angle:** each arm's X rotation is worked out
+  once (the walk cycle, the airborne lift, the attack swing on the right arm, or
+  `shield_pose::GUARD_ARM_ANGLE` while guarding; the override wins over the walk
+  cycle) and both the arm part and that hand's item (main hand right, off-hand
+  left) are turned about the arm's pivot by that one value. A lowered shield
+  follows its forearm the same way; a raised one is placed by
+  `shield_pose::avatar_transform`, which already includes the guard angle, so it
+  is not turned again.
 
 `item_model::held_item_mesh` (§7.5a) is the **single source of truth** for the
 in-hand item mesh: it is reused by both the avatar hand here and the

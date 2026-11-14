@@ -1490,6 +1490,109 @@ pub fn self_avatar_vertices(
     }
 }
 
+/// `p` turned about the X axis through `pivot` by `a` radians: the rotation the
+/// part builder gives an arm or a leg. A positive angle swings a point below the
+/// pivot toward the FRONT (-Z).
+fn rot_x_about(p: Vec3, pivot: Vec3, a: f32) -> Vec3 {
+    if a.abs() <= 0.001 {
+        return p;
+    }
+    let (s, c) = a.sin_cos();
+    let (dy, dz) = (p.y - pivot.y, p.z - pivot.z);
+    Vec3::new(p.x, pivot.y + dy * c - dz * s, pivot.z + dy * s + dz * c)
+}
+
+/// The most an airborne leg trails or leads (radians).
+const AIRBORNE_LEG_TRAIL: f32 = 0.5;
+/// The forward speed (blocks per second) at which the trail is at its most:
+/// walking pace (`physics::WALK_SPEED`, private there).
+const AIRBORNE_TRAIL_FULL_SPEED: f32 = 4.317;
+
+/// Both legs' shared X angle for an airborne avatar facing `ps_yaw` and moving at
+/// `travel` (horizontal world velocity, blocks per second).
+///
+/// SIGN: the part builder turns a point below the hip toward the FRONT for a
+/// POSITIVE angle (`rot_x_about`), so the feet trail BEHIND the hips for a NEGATIVE
+/// one. Travelling forwards gives a negative angle (feet behind), backwards a
+/// positive one (feet in front), sideways or standing still 0. The magnitude grows
+/// with the forward component of the speed up to [`AIRBORNE_LEG_TRAIL`] at walking
+/// pace. The avatar faces `(cos yaw, sin yaw)` in world (x, z).
+pub fn airborne_leg_angle(ps_yaw: f32, travel: [f32; 2]) -> f32 {
+    let forward = travel[0] * ps_yaw.cos() + travel[1] * ps_yaw.sin();
+    if !forward.is_finite() {
+        return 0.0;
+    }
+    -AIRBORNE_LEG_TRAIL * (forward / AIRBORNE_TRAIL_FULL_SPEED).clamp(-1.0, 1.0)
+}
+
+/// One avatar's last sighting, for [`observed_travel`].
+#[derive(Clone, Copy)]
+struct TravelSample {
+    tick: u32,
+    x: f32,
+    z: f32,
+    vx: f32,
+    vz: f32,
+}
+
+/// A player seen less often than this (in game ticks) starts a fresh sample.
+const TRAVEL_MAX_GAP_TICKS: u32 = 10;
+/// Faster than this (blocks per second) is a teleport, not travel.
+const TRAVEL_MAX_SPEED: f32 = 40.0;
+
+thread_local! {
+    static TRAVEL_SAMPLES: std::cell::RefCell<std::collections::HashMap<u32, TravelSample>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The horizontal velocity (world x, z; blocks per second) an avatar is moving at,
+/// seen from its position change between game ticks. The avatar's wire state
+/// carries no velocity, so every caller (the local player's own body, a remote
+/// peer, a split-screen body) goes through this. Only a moving or airborne state
+/// (`anim_state != 0`) reads or writes a sample, so the idle Workshop mannequin
+/// and the skin preview, which reuse player index 0, never touch the local
+/// player's. The builder runs more than once per tick, so the sample is updated
+/// only when `time_ticks` advances and is reused until then. A first sighting, a
+/// long gap or a teleport reads as no travel.
+pub fn observed_travel(ps: &crate::protocol::PlayerState, time_ticks: u32) -> [f32; 2] {
+    if ps.anim_state == 0 || !(ps.x.is_finite() && ps.z.is_finite()) {
+        return [0.0, 0.0];
+    }
+    TRAVEL_SAMPLES.with(|samples| {
+        let mut samples = samples.borrow_mut();
+        if samples.len() > 64 {
+            samples.retain(|_, s| time_ticks.wrapping_sub(s.tick) <= TRAVEL_MAX_GAP_TICKS);
+        }
+        let fresh = TravelSample { tick: time_ticks, x: ps.x, z: ps.z, vx: 0.0, vz: 0.0 };
+        let Some(prev) = samples.get(&ps.player_index).copied() else {
+            samples.insert(ps.player_index, fresh);
+            return [0.0, 0.0];
+        };
+        if time_ticks == prev.tick {
+            return [prev.vx, prev.vz];
+        }
+        let gap = time_ticks.wrapping_sub(prev.tick);
+        if time_ticks < prev.tick || gap > TRAVEL_MAX_GAP_TICKS {
+            samples.insert(ps.player_index, fresh);
+            return [0.0, 0.0];
+        }
+        let dt = gap as f32 / 20.0;
+        let (mut vx, mut vz) = ((ps.x - prev.x) / dt, (ps.z - prev.z) / dt);
+        if vx.hypot(vz) > TRAVEL_MAX_SPEED {
+            samples.insert(ps.player_index, fresh);
+            return [0.0, 0.0];
+        }
+        // Ease between samples so a network peer's uneven position updates do not
+        // flick the legs; the first real sample after a fresh start is taken whole.
+        if prev.vx != 0.0 || prev.vz != 0.0 {
+            vx = 0.5 * (vx + prev.vx);
+            vz = 0.5 * (vz + prev.vz);
+        }
+        samples.insert(ps.player_index, TravelSample { tick: time_ticks, x: ps.x, z: ps.z, vx, vz });
+        [vx, vz]
+    })
+}
+
 pub fn build_player_avatar_vertices_with(
     ps: &crate::protocol::PlayerState,
     swing_progress: f32, // 0.0..=1.0 within the swing window; 0 = not swinging
@@ -1502,6 +1605,23 @@ pub fn build_player_avatar_vertices_with(
     fade: f32,
     registry: &crate::block::BlockRegistry,
     opts: SkinRenderOpts,
+) -> (Vec<Vertex>, Vec<Vertex>) {
+    build_player_avatar_vertices_travelling(ps, swing_progress, time_ticks, skin_layer, fade, registry, opts, [0.0, 0.0])
+}
+
+/// [`build_player_avatar_vertices_with`] for an avatar moving at `travel`, its
+/// horizontal velocity in world space (x, z; blocks per second). Only an airborne
+/// avatar reads it (its legs trail the direction of travel).
+#[allow(clippy::too_many_arguments)]
+pub fn build_player_avatar_vertices_travelling(
+    ps: &crate::protocol::PlayerState,
+    swing_progress: f32,
+    time_ticks: u32,
+    skin_layer: u32,
+    fade: f32,
+    registry: &crate::block::BlockRegistry,
+    opts: SkinRenderOpts,
+    travel: [f32; 2],
 ) -> (Vec<Vertex>, Vec<Vertex>) {
     use crate::protocol::player_flags;
     let mut skin_verts = Vec::new();
@@ -1544,6 +1664,10 @@ pub fn build_player_avatar_vertices_with(
     const RIGHT_ARM_INDEX: usize = 3;
     const LEFT_LEG_INDEX: usize = 4;
     const RIGHT_LEG_INDEX: usize = 5;
+    let leg_angle = airborne_leg_angle(ps.yaw, travel);
+    // Each part's effective X rotation, as the part builder will apply it (the
+    // override wins over the walk cycle). A held item rides its arm's entry.
+    let mut part_angle = [0.0_f32; 6];
     for (i, part) in parts.iter().enumerate() {
         let walk_swing = if ps.anim_state == 1 && part.animated {
             // Walk: alternating sinusoidal swing per part phase.
@@ -1554,8 +1678,9 @@ pub fn build_player_avatar_vertices_with(
             // playtest-tunable; the right arm's swing (arm_override) still wins
             // over this when SWINGING.
             match i {
-                LEFT_LEG_INDEX | RIGHT_LEG_INDEX => 0.5, // legs tuck behind
-                LEFT_ARM_INDEX | RIGHT_ARM_INDEX => -0.4, // arms forward/up
+                // The legs trail the direction of travel (see `airborne_leg_angle`).
+                LEFT_LEG_INDEX | RIGHT_LEG_INDEX => leg_angle,
+                LEFT_ARM_INDEX | RIGHT_ARM_INDEX => -0.4, // arms lifted
                 _ => 0.0,
             }
         } else {
@@ -1569,6 +1694,9 @@ pub fn build_player_avatar_vertices_with(
             arm_override = Some(crate::shield_pose::GUARD_ARM_ANGLE);
         }
         let pose = PartPose { walk_swing, head_pitch: ps.pitch, arm_override, ..Default::default() };
+        if let Some(slot) = part_angle.get_mut(i) {
+            *slot = arm_override.unwrap_or(walk_swing);
+        }
         // Limbs-apart displaces the part in MODEL space. The part builder applies
         // R_y(yaw) then translates by entity_pos, so the offset must be rotated
         // by the same yaw to stay a model-space displacement — otherwise the
@@ -1603,15 +1731,13 @@ pub fn build_player_avatar_vertices_with(
     // A hand's anchor is the bottom of its arm cuboid (the right arm, classic:
     // origin.y - size.y/2 = 1.05 - 0.35 = 0.70; a slim arm's hand is narrower and
     // half a pixel lower, which is why it is derived from the part). The
-    // local-space item mesh is centred at the hand, rotated by the arm swing about
-    // the arm pivot (X), then by yaw (Y), then translated to foot_pos — matching
-    // the part-builder transform order so the item rides the hand. The left arm
-    // does not swing (a remote peer's off-hand use is not on the wire).
+    // local-space item mesh is centred at the hand, rotated about the arm pivot
+    // (X) by that arm's EFFECTIVE angle (`part_angle`: the same value the arm part
+    // itself was turned by, whether the walk cycle, the airborne lift, the attack
+    // swing or the guard), then by yaw (Y), then translated to foot_pos, matching
+    // the part-builder transform order so the item rides the hand in every pose.
     let (sin_y, cos_y) = yaw.sin_cos();
-    for (side, held, swing) in [
-        (crate::viewmodel::HandSide::Right, main_wire, arm_swing),
-        (crate::viewmodel::HandSide::Left, off_wire, None),
-    ] {
+    for (side, held) in [(crate::viewmodel::HandSide::Right, main_wire), (crate::viewmodel::HandSide::Left, off_wire)] {
         let held = crate::item_model::HeldItem::from_wire(held);
         if held.is_empty() {
             continue;
@@ -1619,6 +1745,7 @@ pub fn build_player_avatar_vertices_with(
         let arm = &parts[side.arm_index()];
         let hand_anchor = avatar_hand_anchor(side, opts.arm_model);
         let arm_pivot = arm.pivot;
+        let x_rot = part_angle[side.arm_index()];
         let mut item_verts = crate::item_model::held_item_mesh(held, registry, side);
         // Off-hand release (slice 5) — a shield is placed by its own pose (worn on
         // the outside of the forearm, or lifted in front of the raised arm), not
@@ -1627,6 +1754,15 @@ pub fn build_player_avatar_vertices_with(
             let raised = guard_side == Some(side);
             let m = crate::shield_pose::avatar_transform(arm.origin, arm.size, arm.pivot, side, raised);
             crate::shield_pose::transform_vertices(&mut item_verts, &m);
+            // A raised board is already placed for the lifted arm (`avatar_transform`
+            // bakes in `GUARD_ARM_ANGLE`); a lowered one follows its forearm.
+            if !raised {
+                for v in &mut item_verts {
+                    let p = rot_x_about(Vec3::from(v.position), arm_pivot, x_rot);
+                    v.position = p.to_array();
+                    v.normal = rot_x_about(Vec3::from(v.normal), Vec3::ZERO, x_rot).to_array();
+                }
+            }
             for v in &mut item_verts {
                 let p = rotate_model_yaw(Vec3::from(v.position), (sin_y, cos_y));
                 v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
@@ -1634,18 +1770,9 @@ pub fn build_player_avatar_vertices_with(
             held_verts.extend(item_verts);
             continue;
         }
-        let x_rot = swing.unwrap_or(0.0);
-        let (sin_x, cos_x) = x_rot.sin_cos();
         for v in &mut item_verts {
-            // Translate local-space item to the hand anchor.
-            let mut p = Vec3::from(v.position) + hand_anchor;
-            // Arm swing about the arm pivot (X axis), matching build_part_vertices.
-            if x_rot.abs() > 0.001 {
-                let dy = p.y - arm_pivot.y;
-                let dz = p.z - arm_pivot.z;
-                p.y = arm_pivot.y + dy * cos_x - dz * sin_x;
-                p.z = arm_pivot.z + dy * sin_x + dz * cos_x;
-            }
+            // Translate local-space item to the hand anchor, then swing it with the arm.
+            let p = rot_x_about(Vec3::from(v.position) + hand_anchor, arm_pivot, x_rot);
             // Yaw about Y, then translate to foot position.
             let p = rotate_model_yaw(p, (sin_y, cos_y));
             v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
@@ -1671,7 +1798,7 @@ pub fn build_player_avatar_vertices(
     registry: &crate::block::BlockRegistry,
     arm_model: crate::skin_uv::ArmModel,
 ) -> (Vec<Vertex>, Vec<Vertex>) {
-    build_player_avatar_vertices_with(
+    build_player_avatar_vertices_travelling(
         ps,
         swing_progress,
         time_ticks,
@@ -1679,6 +1806,7 @@ pub fn build_player_avatar_vertices(
         fade,
         registry,
         SkinRenderOpts { arm_model, ..Default::default() },
+        observed_travel(ps, time_ticks),
     )
 }
 
@@ -4314,6 +4442,235 @@ mod tests {
         // And the override result equals using that angle as the sole walk_swing.
         let as_swing = part_verts(&arm, PartPose { walk_swing: swing_angle(0.5), ..PartPose::default() });
         assert!(!positions_differ(&overridden, &as_swing));
+    }
+
+    // ── Third person: the held item rides its arm; airborne legs trail travel ──
+
+    /// A point turned about the X axis through `pivot`, the part builder's rotation.
+    fn rot_x(p: Vec3, pivot: Vec3, a: f32) -> Vec3 {
+        let (s, c) = a.sin_cos();
+        let (dy, dz) = (p.y - pivot.y, p.z - pivot.z);
+        Vec3::new(p.x, pivot.y + dy * c - dz * s, pivot.z + dy * s + dz * c)
+    }
+
+    fn centroid(v: &[Vertex]) -> Vec3 {
+        v.iter().map(|v| Vec3::from(v.position)).sum::<Vec3>() / v.len() as f32
+    }
+
+    /// An avatar at the origin whose model yaw is the identity, in the given pose.
+    fn posed(anim_state: u8, guarding: bool, main: crate::protocol::HeldWire, off: crate::protocol::HeldWire) -> crate::protocol::PlayerState {
+        let mut ps = avatar_state(main.kind, main.id, if guarding { crate::protocol::player_flags::GUARDING } else { 0 });
+        ps.yaw = -std::f32::consts::FRAC_PI_2;
+        ps.pitch = 0.0;
+        ps.anim_state = anim_state;
+        ps.held_tool = main.tool;
+        ps.off_kind = off.kind;
+        ps.off_id = off.id;
+        ps.off_tool = off.tool;
+        ps
+    }
+
+    /// The torch's centroid in the `side` hand, in model space, for a pose. With
+    /// `guard_other` the OTHER hand holds a raised shield (its arm lifted).
+    fn torch_centroid(side: crate::viewmodel::HandSide, anim_state: u8, ticks: u32, swing: f32, guard_other: bool) -> Vec3 {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        use crate::protocol::HeldWire;
+        use crate::viewmodel::HandSide;
+        let reg = crate::block::BlockRegistry::new();
+        let torch = HeldWire::of(Some(&crate::item::Item::Block(crate::block::TORCH)));
+        let shield = HeldWire::of(Some(&crate::item::Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))));
+        let none = HeldWire::EMPTY;
+        let build = |main, off| {
+            let ps = posed(anim_state, guard_other, main, off);
+            build_player_avatar_vertices(&ps, swing, ticks, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic).1
+        };
+        let (with, only_shield) = match (side, guard_other) {
+            (HandSide::Right, false) => (build(torch, none), Vec::new()),
+            (HandSide::Left, false) => (build(none, torch), Vec::new()),
+            (HandSide::Right, true) => (build(torch, shield), build(none, shield)),
+            (HandSide::Left, true) => (build(shield, torch), build(shield, none)),
+        };
+        // Main hand's mesh comes first. The torch is what the shield's own mesh leaves.
+        let torch_verts = match (side, guard_other) {
+            (HandSide::Right, _) => &with[..with.len() - only_shield.len()],
+            (HandSide::Left, _) => &with[only_shield.len()..],
+        };
+        assert!(!torch_verts.is_empty());
+        centroid(torch_verts)
+    }
+
+    #[test]
+    fn a_held_torch_rides_its_hand_through_every_arm_pose() {
+        use crate::viewmodel::HandSide;
+        let arms = player_model_for(crate::skin_uv::ArmModel::Classic);
+        // (label, anim_state, ticks, swing progress, the other hand guards)
+        let poses: [(&str, u8, u32, f32, bool); 7] = [
+            ("walk, arm swung back", 1, 13, 0.0, false),
+            ("walk, arm swung forward", 1, 38, 0.0, false),
+            ("airborne", 2, 10, 0.0, false),
+            ("mid attack swing", 0, 0, 0.35, false),
+            ("walking while the other hand guards", 1, 13, 0.0, true),
+            ("airborne while the other hand guards", 2, 0, 0.0, true),
+            ("idle", 0, 0, 0.0, false),
+        ];
+        for side in [HandSide::Right, HandSide::Left] {
+            let arm = &arms[side.arm_index()];
+            let hand = avatar_hand_anchor(side, crate::skin_uv::ArmModel::Classic);
+            // Where the torch sits from the hand at rest.
+            let rest = torch_centroid(side, 0, 0, 0.0, false) - hand;
+            for (label, anim, ticks, swing, guard_other) in poses {
+                // The swing is the main hand's (right arm) only.
+                let swing = if side == HandSide::Right { swing } else { 0.0 };
+                // The arm's own angle, worked out from the pose rules here, not read from the builder.
+                let angle = match anim {
+                    _ if swing > 0.0 => swing_angle(swing),
+                    1 => (ticks as f32 / 20.0 * 2.5 + arm.phase * std::f32::consts::TAU).sin() * 0.4,
+                    2 => -0.4,
+                    _ => 0.0,
+                };
+                let got = torch_centroid(side, anim, ticks, swing, guard_other);
+                let want = rot_x(hand + rest, arm.pivot, angle);
+                assert!(
+                    (got - want).length() < 0.03,
+                    "{side:?} hand, {label} (arm angle {angle:.2}): the torch is {got:?}, the hand carries it to {want:?}"
+                );
+            }
+        }
+    }
+
+    /// The mean z (model space, front = -Z) of the lowest face of each leg in an
+    /// airborne avatar moving at `travel`, and the leg pivots' z (the hips).
+    fn airborne_feet_vs_hips(travel: [f32; 2]) -> (f32, f32) {
+        let reg = crate::block::BlockRegistry::new();
+        let ps = posed(2, false, crate::protocol::HeldWire::EMPTY, crate::protocol::HeldWire::EMPTY);
+        let (skin, _) = build_player_avatar_vertices_travelling(
+            &ps, 0.0, 10, 0, 1.0, &reg,
+            SkinRenderOpts { draw_overlay: false, ..Default::default() },
+            travel,
+        );
+        let parts = player_model_for(crate::skin_uv::ArmModel::Classic);
+        let mut feet = Vec::new();
+        for leg in [4usize, 5] {
+            let mut zs: Vec<(f32, f32)> = skin[leg * 36..(leg + 1) * 36].iter().map(|v| (v.position[1], v.position[2])).collect();
+            zs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            feet.push(zs[..6].iter().map(|p| p.1).sum::<f32>() / 6.0);
+        }
+        ((feet[0] + feet[1]) * 0.5, parts[4].pivot.z)
+    }
+
+    #[test]
+    fn the_avatars_front_is_where_its_yaw_faces() {
+        // The facing the leg rule uses: yaw -> (cos, sin) in the world's (x, z),
+        // the same direction the model's front (-Z) is turned to.
+        for yaw in [-1.3_f32, 0.0, 0.7, 2.5] {
+            let front = avatar_world_point(Vec3::ZERO, yaw, Vec3::new(0.0, 0.0, -1.0));
+            assert!((front.x - yaw.cos()).abs() < 1e-5 && (front.z - yaw.sin()).abs() < 1e-5, "yaw {yaw}: {front:?}");
+        }
+    }
+
+    #[test]
+    fn airborne_legs_trail_behind_forward_travel_and_lead_in_backward_travel() {
+        // yaw -pi/2: the front is -Z, so "behind" is +Z.
+        let (feet_fwd, hips) = airborne_feet_vs_hips([0.0, -4.3]);
+        assert!(feet_fwd - hips > 0.1, "travelling forwards the feet are behind the hips: feet z {feet_fwd}, hips z {hips}");
+        let (feet_back, hips) = airborne_feet_vs_hips([0.0, 4.3]);
+        assert!(feet_back - hips < -0.1, "travelling backwards the feet are in front of the hips: feet z {feet_back}, hips z {hips}");
+        // Sideways, or standing, they neither trail nor lead.
+        for travel in [[4.3, 0.0], [-4.3, 0.0], [0.0, 0.0]] {
+            let (feet, hips) = airborne_feet_vs_hips(travel);
+            assert!((feet - hips).abs() < 0.05, "travel {travel:?}: feet z {feet}, hips z {hips}");
+        }
+        // A faster run is no further than the walking pace's pose.
+        let (walk, _) = airborne_feet_vs_hips([0.0, -4.3]);
+        let (sprint, _) = airborne_feet_vs_hips([0.0, -9.0]);
+        assert!((walk - sprint).abs() < 0.05, "the trail is clamped: {walk} vs {sprint}");
+    }
+
+    #[test]
+    fn the_avatar_builder_learns_its_travel_from_the_position_change() {
+        // The wrapper every caller uses: no velocity on the state, so the travel is
+        // seen from the position change between game ticks (here 4.3 b/s forwards).
+        let reg = crate::block::BlockRegistry::new();
+        let mut ps = posed(2, false, crate::protocol::HeldWire::EMPTY, crate::protocol::HeldWire::EMPTY);
+        ps.player_index = 4242;
+        let mut feet_z = 0.0;
+        for tick in 0..8u32 {
+            ps.z = -0.215 * tick as f32;
+            let (skin, _) = build_player_avatar_vertices(&ps, 0.0, 100 + tick, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+            // overlay on: each part is 72 verts, the leg's base box first.
+            let mut zs: Vec<(f32, f32)> = skin[4 * 72..4 * 72 + 36].iter().map(|v| (v.position[1], v.position[2] - ps.z)).collect();
+            zs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            feet_z = zs[..6].iter().map(|p| p.1).sum::<f32>() / 6.0;
+        }
+        assert!(feet_z > 0.1, "moving forwards through the air the feet trail behind (+Z): {feet_z}");
+    }
+
+    #[test]
+    fn a_lowered_shield_follows_its_forearm_and_a_raised_one_keeps_its_guard_pose() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        use crate::protocol::HeldWire;
+        let reg = crate::block::BlockRegistry::new();
+        let shield = HeldWire::of(Some(&crate::item::Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))));
+        // The shield in the OFF hand (left arm).
+        let at = |anim: u8, ticks: u32, guarding: bool| {
+            let ps = posed(anim, guarding, HeldWire::EMPTY, shield);
+            centroid(&build_player_avatar_vertices(&ps, 0.0, ticks, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic).1)
+        };
+        let arm = &player_model_for(crate::skin_uv::ArmModel::Classic)[2];
+        let idle = at(0, 0, false);
+        // Lowered, walking: the board is carried to where the swung arm takes it.
+        let walk_angle = (13.0_f32 / 20.0 * 2.5 + arm.phase * std::f32::consts::TAU).sin() * 0.4;
+        assert!(walk_angle.abs() > 0.3);
+        let walking = at(1, 13, false);
+        assert!((walking - rot_x(idle, arm.pivot, walk_angle)).length() < 0.03, "walking: {walking:?} vs idle {idle:?} swung {walk_angle}");
+        // Lowered, airborne.
+        let airborne = at(2, 0, false);
+        assert!((airborne - rot_x(idle, arm.pivot, -0.4)).length() < 0.03, "airborne: {airborne:?}");
+        // Raised: the guard pose, whatever the walk cycle or the jump does.
+        let raised = at(0, 0, true);
+        for (anim, ticks) in [(1, 13), (2, 0)] {
+            let r = at(anim, ticks, true);
+            assert!((r - raised).length() < 1e-4, "a raised shield is not turned twice (anim {anim}): {r:?} vs {raised:?}");
+        }
+    }
+
+    #[test]
+    fn two_builds_in_one_tick_give_the_same_airborne_pose() {
+        // The builder runs several times per game tick (frames outpace ticks, and
+        // every split-screen viewport draws the bodies): the travel is only
+        // re-read when the tick advances, so the legs never flicker between them.
+        let reg = crate::block::BlockRegistry::new();
+        let mut ps = posed(2, false, crate::protocol::HeldWire::EMPTY, crate::protocol::HeldWire::EMPTY);
+        ps.player_index = 4343;
+        let build = |ps: &crate::protocol::PlayerState, tick: u32| {
+            build_player_avatar_vertices(ps, 0.0, tick, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic).0
+        };
+        for tick in 0..4u32 {
+            ps.z = -0.215 * tick as f32;
+            build(&ps, 200 + tick);
+        }
+        let first = build(&ps, 204);
+        let again = build(&ps, 204);
+        assert!(!positions_differ(&first, &again), "same tick, same state: same mesh");
+    }
+
+    #[test]
+    fn an_idle_body_never_touches_the_travel_samples_of_a_moving_one() {
+        // The Workshop mannequin and the skin preview are idle and reuse player
+        // index 0; the local player is index 0 too.
+        let mut walker = posed(2, false, crate::protocol::HeldWire::EMPTY, crate::protocol::HeldWire::EMPTY);
+        walker.player_index = 4444;
+        for tick in 0..4u32 {
+            walker.z = -0.215 * tick as f32;
+            observed_travel(&walker, 300 + tick);
+        }
+        let before = observed_travel(&walker, 303);
+        let mut mannequin = posed(0, false, crate::protocol::HeldWire::EMPTY, crate::protocol::HeldWire::EMPTY);
+        mannequin.player_index = 4444;
+        mannequin.z = 50.0;
+        assert_eq!(observed_travel(&mannequin, 304), [0.0, 0.0]);
+        assert_eq!(observed_travel(&walker, 303), before);
+        assert!(before[1] < -3.0, "walked forwards (-Z) at about 4.3 b/s: {before:?}");
     }
 
     #[test]
