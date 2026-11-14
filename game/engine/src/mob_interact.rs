@@ -231,11 +231,10 @@ pub fn feed(
     tick: u64,
 ) -> Option<Interaction> {
     let mat = held_material(held)?;
-    let applies = crate::breeding::breeding_food(kind) == Some(mat)
-        && crate::breeding::breeding_feed_allowed(kind, sneak)
-        && ecs.get::<&crate::breeding::Baby>(target).is_err()
+    let can_breed = ecs.get::<&crate::breeding::Baby>(target).is_err()
         && ecs.get::<&crate::breeding::BreedCooldown>(target).is_err()
         && ecs.get::<&crate::breeding::InLove>(target).is_err();
+    let applies = crate::mob_uses::feeds(kind, can_breed, sneak, mat);
     if !applies {
         return None;
     }
@@ -337,7 +336,7 @@ pub fn tame_companion(
 ) -> Option<Interaction> {
     let mat = held_material(held)?;
     let is_treat = mat == MaterialId::CatTreat && kind == MobType::Cat;
-    if !is_treat && crate::companion::tame_food(kind) != Some(mat) {
+    if !crate::mob_uses::companion_food(kind, mat) {
         return None;
     }
     let tamed_already = ecs
@@ -531,9 +530,7 @@ pub fn lead_attach(
     held: Option<&Item>,
     actor: &Actor,
 ) -> Option<Interaction> {
-    if held_material(held) != Some(MaterialId::Lead)
-        || crate::mob::mob_def(kind).category != crate::mob::MobCategory::Passive
-    {
+    if held_material(held) != Some(MaterialId::Lead) || !crate::mob_uses::lead_attaches(kind) {
         return None;
     }
     let _ = ecs.remove_one::<Tethered>(target);

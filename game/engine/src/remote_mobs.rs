@@ -111,6 +111,21 @@ pub enum MirrorClick {
 }
 
 impl MirrorTarget {
+    /// What the hand rule needs to know about this mob (`mob_uses::MobFacts`),
+    /// as far as a joiner can see it: it cannot see a breeding cooldown (a baby
+    /// is the only "can't breed" it knows), nor whose pet a tamed mob is (the
+    /// server checks that, so any tamed mob may be a command).
+    pub fn facts(&self) -> crate::mob_uses::MobFacts {
+        crate::mob_uses::MobFacts {
+            kind: self.kind,
+            can_breed: !self.baby,
+            product_ready: !self.product_not_ready,
+            tethered: self.tethered,
+            tamed: self.tamed,
+            own_pet: self.tamed,
+        }
+    }
+
     /// What a right-click holding `held` (`None` = empty hand) on this mob
     /// asks for, in single-player's own order of right-click branches (so a
     /// joiner's click means what it would mean in single-player): a Lead on
@@ -141,15 +156,11 @@ impl MirrorTarget {
             _ => None,
         };
         let ask = |k| Some(MirrorClick::Interact(k));
-        if mat == Some(MaterialId::Lead)
-            && crate::mob::mob_def(kind).category == crate::mob::MobCategory::Passive
-        {
+        if mat == Some(MaterialId::Lead) && crate::mob_uses::lead_attaches(kind) {
             return ask(InteractKind::LeadAttach);
         }
         if let Some(m) = mat
-            && !self.baby
-            && crate::breeding::breeding_food(kind) == Some(m)
-            && crate::breeding::breeding_feed_allowed(kind, sneak)
+            && crate::mob_uses::feeds(kind, !self.baby, sneak, m)
         {
             return ask(InteractKind::Feed);
         }
@@ -167,8 +178,7 @@ impl MirrorTarget {
         }
         if let Some(m) = mat
             && !self.tamed
-            && ((kind == MobType::Cat && m == MaterialId::CatTreat)
-                || crate::companion::tame_food(kind) == Some(m))
+            && crate::mob_uses::companion_food(kind, m)
         {
             return ask(InteractKind::Tame);
         }
@@ -183,7 +193,7 @@ impl MirrorTarget {
         if self.tethered && mat != Some(MaterialId::Lead) {
             return ask(InteractKind::LeadDetach);
         }
-        if matches!(kind, MobType::Villager | MobType::Peddler) {
+        if crate::mob_uses::trades(kind) {
             return Some(MirrorClick::QuestTalk);
         }
         if (kind == MobType::Wolf && mat == Some(MaterialId::Bone))

@@ -143,10 +143,57 @@ pub fn mirror_mint(
     Mirrored { placed, paid }
 }
 
+/// The request a client's art capture or Plan commit sends for a mint
+/// (`GameState::send_plan_minted` sends exactly this): `source`, the cell and face,
+/// the hotbar slot the paper was spent from, the HAND it was spent with (the server
+/// pays the mint from the same one), what was spent (`None` for a commit that
+/// spends nothing) and the Plan placeholder. `events_applied` is stamped by the
+/// connection when it sends.
+pub fn plan_minted_request(
+    seq: u32,
+    source: MintSource,
+    cell: (i32, i32, i32),
+    face: crate::mesh::Face,
+    (slot, hand): (usize, crate::hands::Hand),
+    spent: Option<&ItemStack>,
+    plan: crate::protocol::WireItem,
+) -> crate::protocol::ItemActionPacket {
+    crate::protocol::ItemActionPacket {
+        seq,
+        action: crate::protocol::ItemAction::PlanMinted {
+            source: source.to_wire(),
+            x: cell.0,
+            y: cell.1,
+            z: cell.2,
+            face: face.index() as u8,
+            hotbar_slot: slot.min(usize::from(u8::MAX)) as u8,
+            spent: spent.map(crate::inventory::stack_to_wire),
+            plan,
+        },
+        events_applied: 0,
+        hand,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::plan::{marker, DevelopState, PlanData};
+
+    /// Review 3 (review 1 #1's test gap): the request the client's sending code builds
+    /// carries the hand the paper was spent with, so the server pays from the same
+    /// hand. (The server-side tests stamp the hand by hand; this is the client's end.)
+    #[test]
+    fn the_clients_mint_request_carries_the_hand_the_paper_was_spent_with() {
+        let spent = paper(1);
+        let plan = crate::protocol::WireItem::Plan { marker: [7; 32], developed: false };
+        for hand in [crate::hands::Hand::Main, crate::hands::Hand::Off] {
+            let pkt = plan_minted_request(5, MintSource::ALL[0], (1, 2, 3), crate::mesh::Face::Top, (4, hand), Some(&spent), plan.clone());
+            assert_eq!(pkt.hand, hand, "the packet's hand is the hand the paper came from");
+            assert_eq!(pkt.seq, 5);
+            assert!(matches!(pkt.action, crate::protocol::ItemAction::PlanMinted { hotbar_slot: 4, x: 1, y: 2, z: 3, .. }));
+        }
+    }
 
     fn paper(n: u8) -> ItemStack {
         ItemStack::new_block(crate::block::BLUEPRINT_PAPER, n)

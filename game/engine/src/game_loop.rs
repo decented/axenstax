@@ -4613,21 +4613,25 @@ impl super::GameState {
     /// What player `pidx` is aiming at and how they are, for the hand rule
     /// ([`crate::hands::use_hand`]): the block under the crosshair, a mob under it
     /// (a joined client asks its mirrored mobs), and what a click could use.
-    fn use_target(&self, pidx: usize) -> crate::hands::UseTarget {
+    fn use_target(&self, pidx: usize, sneak: bool) -> crate::hands::UseTarget {
         let p = &self.players[pidx];
-        // The species of the mob in the crosshair. A joined client's mobs live in
-        // the render-only mirror, not in `self.ecs`: ask it the way the joined mob
-        // arm finds its mob, so the hand rule sees the same mob in local play and
-        // joined (off-hand review M2).
-        let mob_kind = if self.joined() {
-            self.joined_mob_under_crosshair(pidx).map(|m| m.kind)
+        // The mob in the crosshair, its species and state. A joined client's mobs
+        // live in the render-only mirror, not in `self.ecs`: ask it the way the
+        // joined mob arm finds its mob, so the hand rule sees the same mob in local
+        // play and joined (off-hand review M2).
+        let mob_facts = if self.joined() {
+            self.joined_mob_under_crosshair(pidx).map(|m| m.facts())
         } else {
-            crate::combat::find_attack_target(&self.ecs, p.player.eye_pos(), p.camera.forward()).and_then(|(_, kind)| kind)
+            crate::combat::find_attack_target(&self.ecs, p.player.eye_pos(), p.camera.forward()).and_then(|(e, kind)| {
+                let key = crate::tameable::local_owner_key(pidx);
+                kind.map(|k| crate::local_mob_click::mob_facts(&self.ecs, e, k, Some(&key), self.tick_counter))
+            })
         };
         crate::hands::UseTarget {
             block: p.target_block.map(|b| self.world.get_block(b[0], b[1], b[2])),
-            mob: mob_kind.is_some(),
-            mob_kind,
+            mob: mob_facts.is_some(),
+            sneak,
+            mob_facts,
             face: p.target_face,
             edit_blocked: !self.play_mode.can_edit_world(),
             wants_to_eat: p.combat.hunger < p.combat.max_hunger || p.combat.health < p.combat.max_health,
@@ -4638,19 +4642,24 @@ impl super::GameState {
         }
     }
 
-    /// Off-hand release — does player `pidx`'s held use button raise a shield this
-    /// frame (`hands::shield_raises`: a shield in a hand, and neither hand has a use
-    /// on what the crosshair is on)? Cheap when no shield is held.
-    fn shield_raise_wanted(&self, pidx: usize, intent: &PlayerIntent) -> bool {
+    /// Off-hand release — what player `pidx`'s shield does this frame: the target
+    /// check (`hands::shield_raises`: a shield in a hand, and no other use for what
+    /// the crosshair is on) when the press starts, then held up while the button is
+    /// (`hands::shield_hold`, reading last frame's latch `local_guard`). Cheap when
+    /// no shield is held.
+    fn shield_hold(&self, pidx: usize, intent: &PlayerIntent) -> crate::hands::ShieldHold {
+        const DOWN: crate::hands::ShieldHold = crate::hands::ShieldHold { raised: false, held_over: false };
         let p = &self.players[pidx];
-        if !((intent.place_block || intent.use_held) && intent.cursor_captured) || p.combat.dead {
-            return false;
-        }
+        let holding = (intent.place_block || intent.use_held) && intent.cursor_captured && !p.combat.dead;
         let (main, off) = p.hands_items();
-        if !(crate::shield::is_shield(main) || crate::shield::is_shield(off)) {
-            return false;
+        let shield_in_hand = crate::shield::is_shield(main) || crate::shield::is_shield(off);
+        if !holding || !shield_in_hand {
+            return DOWN;
         }
-        crate::hands::shield_raises(main, off, &self.use_target(pidx))
+        let was_raised = self.local_guard.contains(&pidx);
+        // The target is asked only when it can decide: not for a held-up shield.
+        let raises_here = !was_raised && crate::hands::shield_raises(main, off, &self.use_target(pidx, intent.sneak));
+        crate::hands::shield_hold(was_raised, holding, shield_in_hand, raises_here)
     }
 
     /// Does this client's block edit (and its `mined` tag) reach the server it
@@ -11697,7 +11706,7 @@ impl super::GameState {
             // click does nothing and a break in progress stops (its progress resets
             // in the `!should_break` branch below). A client gate only, local and
             // joined; the server does not enforce it this release.
-            if self.shield_raise_wanted(pidx, intent) {
+            if self.shield_hold(pidx, intent).raised {
                 intent.break_block = false;
             }
 
@@ -13778,21 +13787,28 @@ impl super::GameState {
                 crate::hands::Hand::Main
             } else {
                 let p = &self.players[pidx];
-                let target = self.use_target(pidx);
+                let target = self.use_target(pidx, intent.sneak);
                 let (main, off) = p.hands_items();
                 crate::hands::use_hand(main, off, &target)
             };
             // Off-hand release (slice 5) — a held use button raises a shield when
-            // the click has no other use: the hand `use_hand` picks holds a shield.
-            // The chain below still runs (a shield has no arm to take the click),
-            // so raising is a latch the tick turns into `guarding`, never a swallow.
-            // The target's own use wins (a door, a chest, a mob): see
-            // `hands::shield_raises`.
-            let raise = self.shield_raise_wanted(pidx, intent);
-            if raise {
+            // the click has no other use: no hand has one here and no door, chest or
+            // mob that a hand works on is aimed at (`hands::shield_raises`, asked
+            // when the press starts). Once raised it stays up while the button is
+            // held, whatever comes under the crosshair (`hands::shield_hold`), and a
+            // shield held on takes the whole click: the chain below does not run on
+            // what is under the crosshair now (that is the press frame's question).
+            // The press frame still runs the chain (a shield has no arm to take the
+            // click), so raising is a latch the tick turns into `guarding`.
+            let hold = self.shield_hold(pidx, intent);
+            if hold.raised {
                 self.local_guard.insert(pidx);
             } else {
                 self.local_guard.remove(&pidx);
+            }
+            if hold.held_over {
+                intent.place_block = false;
+                intent.use_held = false;
             }
             // The swing arming in `tick` reads this: a held right-click that
             // routes to the off-hand swings the left hand (first person).
@@ -14420,11 +14436,7 @@ impl super::GameState {
                 if let Some((target, Some(kind))) =
                     crate::combat::find_attack_target(&self.ecs, eye, look_dir)
                 {
-                    if matches!(
-                        kind,
-                        crate::mob::MobType::Villager
-                            | crate::mob::MobType::Peddler
-                    ) {
+                    if crate::mob_uses::trades(kind) {
                         // Range check — `find_attack_target` uses ATTACK_REACH
                         // (~4 blocks); INTERACT_RANGE matches. Open dialogue.
                         let dist_opt = self
@@ -23168,23 +23180,13 @@ impl super::GameState {
         spent: Option<&crate::item::ItemStack>,
         plan: crate::protocol::WireItem,
     ) {
-        let spent = spent.map(crate::inventory::stack_to_wire);
         let seq = self.joiner_actions.unanswered();
-        self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
-            seq,
-            action: crate::protocol::ItemAction::PlanMinted {
-                source: source.to_wire(),
-                x: cell.0,
-                y: cell.1,
-                z: cell.2,
-                face: face.index() as u8,
-                hotbar_slot: slot.min(usize::from(u8::MAX)) as u8,
-                spent,
-                plan,
-            },
-            // Stamped by `RemoteClient::send_item_action`. The hand the paper was
-            // spent with: the server pays the mint from the same one.
-            events_applied: 0, hand }));
+        // Stamped by `RemoteClient::send_item_action`: `events_applied`. The packet
+        // carries the hand the paper was spent with (the server pays the mint from
+        // the same one; `plan_mint::plan_minted_request` is pinned by a test).
+        self.send_request(crate::remote_client::Request::Item(crate::plan_mint::plan_minted_request(
+            seq, source, cell, face, (slot, hand), spent, plan,
+        )));
     }
 
     /// C2a — ask the server to let player `pidx` (a joiner) sleep in the bed

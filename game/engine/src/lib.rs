@@ -321,6 +321,7 @@ mod hostile_acts;
 mod grave;
 mod death;
 mod hands;
+mod mob_uses; // Off-hand review 3: the per-mob predicates (feed, tame, Lead, milk, shear, ride, trade, pet command) the chain's arms and the hand rule share.
 mod tool_uses; // Off-hand review fixes: the per-target predicates the right-click arms and the hand rule share.
 mod shield; // Off-hand slice 5 — the shield: the front-arc block rule, wear and the raise.
 mod shield_pose; // Off-hand slice 5 — where the shield's mesh goes in each view and pose.

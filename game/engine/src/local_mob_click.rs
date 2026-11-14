@@ -89,15 +89,12 @@ pub fn plan_right_click(ctx: &ArmCtx) -> MobArm {
         Some(Item::Material(m)) => Some(*m),
         _ => None,
     };
-    if mat == Some(MaterialId::Lead)
-        && crate::mob::mob_def(ctx.kind).category == crate::mob::MobCategory::Passive
-    {
+    use crate::mob_uses;
+    if mat == Some(MaterialId::Lead) && mob_uses::lead_attaches(ctx.kind) {
         return MobArm::LeadAttach;
     }
     if let Some(m) = mat
-        && ctx.can_breed
-        && crate::breeding::breeding_food(ctx.kind) == Some(m)
-        && crate::breeding::breeding_feed_allowed(ctx.kind, ctx.sneak)
+        && mob_uses::feeds(ctx.kind, ctx.can_breed, ctx.sneak, m)
     {
         return MobArm::Feed;
     }
@@ -122,16 +119,33 @@ pub fn plan_at_crosshair(ecs: &hecs::World, slot: &PlayerSlot, hand: crate::hand
     let Some((target, Some(kind))) = crate::combat::find_attack_target(ecs, eye, look_dir) else {
         return MobArm::Later;
     };
-    let can_breed = ecs.get::<&crate::breeding::Baby>(target).is_err()
-        && ecs.get::<&crate::breeding::BreedCooldown>(target).is_err()
-        && ecs.get::<&crate::breeding::InLove>(target).is_err();
-    plan_right_click(&ArmCtx {
+    let f = mob_facts(ecs, target, kind, None, tick);
+    plan_right_click(&ArmCtx { kind, held, can_breed: f.can_breed, product_ready: f.product_ready, sneak })
+}
+
+/// What a click's caller needs to know about the mob `target` of species `kind`
+/// (`mob_uses::MobFacts`), read off the ECS: the one place local play and a
+/// host's seats read them, for the arms' plan and for the hand rule's
+/// [`crate::hands::UseTarget`]. `owner_key` is the player's pet-owner key
+/// (`tameable::local_owner_key`): when given, `own_pet` says the mob is theirs.
+pub fn mob_facts(
+    ecs: &hecs::World,
+    target: hecs::Entity,
+    kind: MobType,
+    owner_key: Option<&str>,
+    tick: u64,
+) -> crate::mob_uses::MobFacts {
+    let owner = crate::tameable::pet_owner_of(ecs, target);
+    crate::mob_uses::MobFacts {
         kind,
-        held,
-        can_breed,
+        can_breed: ecs.get::<&crate::breeding::Baby>(target).is_err()
+            && ecs.get::<&crate::breeding::BreedCooldown>(target).is_err()
+            && ecs.get::<&crate::breeding::InLove>(target).is_err(),
         product_ready: crate::mob_interact::product_ready(ecs, target, tick),
-        sneak,
-    })
+        tethered: ecs.get::<&crate::tether::Tethered>(target).is_ok(),
+        tamed: owner.is_some(),
+        own_pet: owner.as_deref().is_some_and(|o| owner_key == Some(o)),
+    }
 }
 
 /// A right-click that reached a mob: which, what species, and what happened.
