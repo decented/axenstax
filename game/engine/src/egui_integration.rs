@@ -424,6 +424,12 @@ fn create_egui_texture_view(
 
 /// Share the Copperline treatment between the live game and headless previews.
 pub(crate) fn configure_style(ctx: &egui::Context) {
+    configure_style_for(ctx, cfg!(target_os = "android"));
+}
+
+/// [`configure_style`] with the touch sizing chosen by the caller, so a headless test can
+/// draw a menu exactly as the phone does (thumb-sized rows and spacing) on a Linux host.
+pub(crate) fn configure_style_for(ctx: &egui::Context, touch: bool) {
     let mut style = egui::Style { visuals: egui::Visuals::dark(), ..Default::default() };
     style.visuals.window_corner_radius = egui::CornerRadius::same(8);
     style.visuals.window_fill = crate::brand::SURFACE;
@@ -467,7 +473,7 @@ pub(crate) fn configure_style(ctx: &egui::Context) {
     // for desktop browsers AND tablets, and the live web taster's layout is
     // not to change under its desktop users. Web tablets can opt in later
     // off the runtime `touch_input::is_touch_device()`.
-    if cfg!(target_os = "android") {
+    if touch {
         style.spacing.interact_size.y = 44.0;
         style.spacing.button_padding = egui::vec2(12.0, 10.0);
         style.spacing.item_spacing.y = 8.0;
@@ -483,6 +489,53 @@ pub(crate) fn configure_style(ctx: &egui::Context) {
     }
 
     ctx.set_global_style(style);
+}
+
+/// The events egui-winit 0.34 (`State::on_touch`) hands egui for one finger on the glass: a
+/// `Touch` event plus the emulated mouse (`PointerMoved`, `PointerButton`, and `PointerGone`
+/// when the finger lifts). Headless menu tests drive the phone's real input path with these,
+/// not with mouse-wheel events a phone never sends.
+#[cfg(test)]
+pub(crate) mod touch_events {
+    use egui::{Event, PointerButton, Pos2, TouchDeviceId, TouchId, TouchPhase};
+
+    fn touch(phase: TouchPhase, at: Pos2) -> Event {
+        Event::Touch { device_id: TouchDeviceId(1), id: TouchId(1), phase, pos: at, force: None }
+    }
+
+    fn button(at: Pos2, pressed: bool) -> Event {
+        Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    /// The finger lands.
+    pub fn start(at: Pos2) -> Vec<Event> {
+        vec![touch(TouchPhase::Start, at), Event::PointerMoved(at), button(at, true)]
+    }
+
+    /// The finger moves, still down.
+    pub fn moved(at: Pos2) -> Vec<Event> {
+        vec![touch(TouchPhase::Move, at), Event::PointerMoved(at)]
+    }
+
+    /// The finger lifts.
+    pub fn end(at: Pos2) -> Vec<Event> {
+        vec![touch(TouchPhase::End, at), button(at, false), Event::PointerGone]
+    }
+
+    /// A tap: down, one frame held, up. One entry per frame.
+    pub fn tap(at: Pos2) -> Vec<Vec<Event>> {
+        vec![start(at), vec![], end(at)]
+    }
+
+    /// A drag from `from` to `to` in `steps` equal moves, one per frame, then the lift.
+    pub fn drag(from: Pos2, to: Pos2, steps: usize) -> Vec<Vec<Event>> {
+        let mut frames = vec![start(from)];
+        for i in 1..=steps {
+            frames.push(moved(from + (to - from) * (i as f32 / steps as f32)));
+        }
+        frames.push(end(to));
+        frames
+    }
 }
 
 #[cfg(test)]

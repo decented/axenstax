@@ -5,6 +5,7 @@
 //! old layout.
 use super::keeps_dialog_tests::{placed, texts};
 use super::*;
+use crate::egui_integration::touch_events;
 
 const PIXEL_PORTRAIT: egui::Vec2 = egui::vec2(412.0, 915.0);
 const SMALL_PORTRAIT: egui::Vec2 = egui::vec2(360.0, 640.0);
@@ -12,6 +13,12 @@ const PIXEL_LANDSCAPE: egui::Vec2 = egui::vec2(914.0, 411.0);
 const SMALL_LANDSCAPE: egui::Vec2 = egui::vec2(640.0, 360.0);
 const PHONES: [egui::Vec2; 4] = [PIXEL_PORTRAIT, SMALL_PORTRAIT, PIXEL_LANDSCAPE, SMALL_LANDSCAPE];
 const DESKTOP: egui::Vec2 = egui::vec2(1280.0, 900.0);
+/// A OnePlus 8T (2400 x 1080 physical) as the 0.2.37 device test saw it: 3.0 points per pixel.
+const ONEPLUS_LANDSCAPE: egui::Vec2 = egui::vec2(800.0, 360.0);
+/// Every phone size, with the one the device test failed on.
+const TOUCH_PHONES: [egui::Vec2; 5] = [PIXEL_PORTRAIT, SMALL_PORTRAIT, PIXEL_LANDSCAPE, SMALL_LANDSCAPE, ONEPLUS_LANDSCAPE];
+/// What the pause menu scrolls (everything but the buttons that leave it).
+const REST_LABELS: [&str; 6] = ["Peaceful", "Hard", "Controls", "Settings", "Your look", "Switch to Creative"];
 
 /// The compact layout, forced on: on Android it is always on, whatever the height (a Pixel in
 /// portrait is 412 x 915 points), but a Linux test only gets it under 620 points tall.
@@ -51,16 +58,34 @@ struct SettingsRig {
     state: SettingsPanelState,
     gfx: crate::graphics_settings::GraphicsSettings,
     action: SettingsPanelAction,
+    /// Whether any frame reported a changed dial (what the game persists to disk).
+    changed_seen: bool,
     output: egui::FullOutput,
+}
+
+/// A context styled exactly as the phone's is: thumb-sized rows and spacing (the stock
+/// `Context::default()` the first tests used is mouse-sized, and fits where the phone does not).
+fn phone_ctx() -> egui::Context {
+    let ctx = egui::Context::default();
+    crate::egui_integration::configure_style_for(&ctx, true);
+    ctx
 }
 
 impl SettingsRig {
     fn new(size: egui::Vec2, compact: Option<bool>) -> SettingsRig {
-        let ctx = egui::Context::default();
+        SettingsRig::build(egui::Context::default(), size, compact)
+    }
+
+    /// The Settings panel as a phone draws it: the touch style, compact layout.
+    fn phone(size: egui::Vec2) -> SettingsRig {
+        SettingsRig::build(phone_ctx(), size, Some(true))
+    }
+
+    fn build(ctx: egui::Context, size: egui::Vec2, compact: Option<bool>) -> SettingsRig {
         if let Some(on) = compact {
             force_compact(&ctx, on);
         }
-        let mut rig = SettingsRig { ctx, size, state: SettingsPanelState::default(), gfx: Default::default(), action: SettingsPanelAction::None, output: Default::default() };
+        let mut rig = SettingsRig { ctx, size, state: SettingsPanelState::default(), gfx: Default::default(), action: SettingsPanelAction::None, changed_seen: false, output: Default::default() };
         for _ in 0..6 {
             rig.frame(vec![]);
         }
@@ -73,6 +98,24 @@ impl SettingsRig {
         self.output = self.ctx.run(input, |ctx| {
             *action = draw_settings_panel(ctx, state, gfx);
         });
+        if self.action == SettingsPanelAction::Changed {
+            self.changed_seen = true;
+        }
+    }
+
+    /// Play a finger gesture (one entry per frame), then let the panel settle.
+    fn play(&mut self, frames: Vec<Vec<egui::Event>>) {
+        for events in frames {
+            self.frame(events);
+        }
+        for _ in 0..40 {
+            self.frame(vec![]);
+        }
+    }
+
+    /// Where a text sits (its top), to tell whether the panel scrolled.
+    fn top(&self, label: &str) -> f32 {
+        placed(&self.output, label).unwrap_or_else(|| panic!("no {label:?} on screen: {:?}", texts(&self.output))).0.top()
     }
 
     fn on_screen(&self, label: &str) -> bool {
@@ -182,8 +225,16 @@ impl PauseRig {
         PauseRig::with(size, is_trial, true)
     }
 
+    /// The pause menu as a phone draws it: the touch style, compact layout.
+    fn phone(size: egui::Vec2, is_trial: bool) -> PauseRig {
+        PauseRig::build(phone_ctx(), size, is_trial, true)
+    }
+
     fn with(size: egui::Vec2, is_trial: bool, compact: bool) -> PauseRig {
-        let ctx = egui::Context::default();
+        PauseRig::build(egui::Context::default(), size, is_trial, compact)
+    }
+
+    fn build(ctx: egui::Context, size: egui::Vec2, is_trial: bool, compact: bool) -> PauseRig {
         force_compact(&ctx, compact);
         let mut rig = PauseRig { ctx, size, confirm_quit: false, confirm_creative: false, difficulty: "normal".into(), cloud_save: false, is_trial, clicked: -1, output: Default::default() };
         for _ in 0..4 {
@@ -208,9 +259,20 @@ impl PauseRig {
         on_screen(&self.output, self.size, label)
     }
 
+    /// Where a thumb can rest on the scrolling controls: the lowest of them on screen (they
+    /// sit under the buttons that leave on a narrow phone, and beside them on a wide one).
+    fn rest_point(&self) -> egui::Pos2 {
+        REST_LABELS
+            .iter()
+            .filter(|l| self.on_screen(l))
+            .map(|l| placed(&self.output, l).unwrap().0.center())
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .unwrap_or(egui::pos2(self.size.x * 0.5, self.size.y - 20.0))
+    }
+
     fn scroll_to_end(&mut self) {
-        let at = egui::pos2(self.size.x * 0.5, self.size.y - 20.0);
         for _ in 0..40 {
+            let at = self.rest_point();
             self.frame(wheel(at, -400.0));
         }
         self.frame(vec![]);
@@ -219,8 +281,8 @@ impl PauseRig {
     /// Swipe up a little at a time until `label` is on screen (a small scroll area shows one
     /// row or two at once).
     fn reveal(&mut self, label: &str) {
-        let at = egui::pos2(self.size.x * 0.5, self.size.y - 20.0);
         for _ in 0..80 {
+            let at = self.rest_point();
             // Let the scroll settle (egui eases it) before looking.
             for _ in 0..12 {
                 self.frame(vec![]);
@@ -231,6 +293,37 @@ impl PauseRig {
             self.frame(wheel(at, -30.0));
         }
         panic!("{label:?} never scrolled into view at {:?}: {:?}", self.size, texts(&self.output));
+    }
+
+    /// Play a finger gesture (one entry per frame), then let the menu settle (egui flings).
+    fn play(&mut self, frames: Vec<Vec<egui::Event>>) {
+        for events in frames {
+            self.frame(events);
+        }
+        for _ in 0..40 {
+            self.frame(vec![]);
+        }
+    }
+
+    /// Reach `label` the way a thumb does: drag up from the lowest control on screen, over
+    /// whatever button or label is there, until it shows.
+    fn reveal_by_touch(&mut self, label: &str) {
+        for _ in 0..40 {
+            if self.on_screen(label) {
+                return;
+            }
+            let from = self.rest_point();
+            let to = egui::pos2(from.x, (from.y - 60.0).max(4.0));
+            self.play(touch_events::drag(from, to, 8));
+        }
+        panic!("{label:?} never scrolled into view by touch at {:?}: {:?}", self.size, texts(&self.output));
+    }
+
+    /// A finger tap on the middle of `label`.
+    fn touch_tap(&mut self, label: &str) {
+        let at = placed(&self.output, label).unwrap_or_else(|| panic!("no {label:?} on screen: {:?}", texts(&self.output))).0.center();
+        self.clicked = -1;
+        self.play(touch_events::tap(at));
     }
 
     fn tap(&mut self, label: &str) {
@@ -283,10 +376,12 @@ fn the_difficulty_row_is_on_screen_on_every_phone_size() {
         for label in ["Peaceful", "Easy", "Normal", "Hard"] {
             assert!(rig.on_screen(label), "{label:?} is not on the {size:?} screen: {:?}", texts(&rig.output));
         }
-        // ...and the row is centred, not pushed against the screen's left edge.
+        // ...and the row is centred under its own label, not pushed against the screen's left
+        // edge. (Under the label, not under the middle of the screen: a wide, short phone puts
+        // these controls in a column of their own beside the buttons that leave.)
         let x = |label: &str| placed(&rig.output, label).unwrap().0.center().x;
         let middle = (x("Peaceful") + x("Hard")) / 2.0;
-        assert!((middle - size.x / 2.0).abs() < 20.0, "the difficulty row is not centred at {size:?}: its middle is at {middle}");
+        assert!((middle - x("Difficulty")).abs() < 20.0, "the difficulty row is not centred at {size:?}: its middle is at {middle}, its label at {}", x("Difficulty"));
     }
 }
 
@@ -353,6 +448,196 @@ fn a_tall_window_keeps_the_pause_menu_as_it_was() {
     }
     let stash_y = texts(&rig.output).iter().find(|(t, _)| t.contains("Stash")).expect("no Stash button").1.y;
     assert!(y("Difficulty") < stash_y && stash_y < y("Resume"));
+}
+
+// ---- Touch: the phone's own input path ---------------------------------------------------------
+//
+// The tests above scroll with mouse-WHEEL events, in a stock `Context::default()` style, at
+// 640 x 360 and 914 x 411. The 0.2.37 device (an 800 x 360 point screen, thumb-sized style) failed
+// both menus anyway: a phone never sends a wheel, its rows are taller than the stock ones (so the
+// controls the tests found on screen were off it), and a drag on the glass lands on whatever
+// button or slider is under the thumb. These drive the phone's real events (see
+// `touch_events`) through the phone's real style (`phone_ctx`).
+
+#[test]
+fn every_control_of_the_pause_menu_is_reached_by_a_touch_drag_on_every_phone_size() {
+    for size in TOUCH_PHONES {
+        for label in ["Peaceful", "Controls", "Settings", "Your look", "Switch to Creative"] {
+            let mut rig = PauseRig::phone(size, false);
+            for leave in leave_labels() {
+                assert!(rig.on_screen(&leave), "{leave:?} is not on the {size:?} screen before any scrolling: {:?}", texts(&rig.output));
+            }
+            rig.reveal_by_touch(label);
+            assert_eq!(rig.clicked, -1, "dragging to {label:?} at {size:?} also pressed a button");
+            assert!(!rig.confirm_creative, "dragging to {label:?} at {size:?} opened the creative prompt");
+            for leave in leave_labels() {
+                assert!(rig.on_screen(&leave), "{leave:?} left the {size:?} screen when the rest scrolled");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_finger_tap_still_presses_the_pause_buttons() {
+    for size in TOUCH_PHONES {
+        let mut rig = PauseRig::phone(size, false);
+        rig.touch_tap("Save and Quit");
+        assert_eq!(rig.clicked, PAUSE_SAVE_QUIT, "Save and Quit at {size:?}");
+        rig.touch_tap("Resume");
+        assert_eq!(rig.clicked, PAUSE_RESUME, "Resume at {size:?}");
+        rig.reveal_by_touch("Settings");
+        rig.touch_tap("Settings");
+        assert_eq!(rig.clicked, PAUSE_OPEN_SETTINGS, "Settings at {size:?}");
+        rig.reveal_by_touch("Switch to Creative");
+        rig.touch_tap("Switch to Creative");
+        assert!(rig.confirm_creative, "tapping Switch to Creative did not ask at {size:?}");
+    }
+}
+
+#[test]
+fn a_drag_that_starts_on_a_pause_button_scrolls_and_does_not_press_it() {
+    for size in TOUCH_PHONES {
+        let mut rig = PauseRig::phone(size, false);
+        let from = placed(&rig.output, "Hard").unwrap_or_else(|| panic!("no Hard button at {size:?}: {:?}", texts(&rig.output))).0.center();
+        let before = placed(&rig.output, "Hard").unwrap().0.top();
+        rig.play(touch_events::drag(from, from - egui::vec2(0.0, 60.0), 8));
+        assert_eq!(rig.difficulty, "normal", "the drag pressed Hard at {size:?}");
+        assert_eq!(rig.clicked, -1, "the drag pressed a button at {size:?}");
+        // A short phone has more controls than room, so the drag must have moved them.
+        if size.y < 520.0 {
+            let after = placed(&rig.output, "Hard").map(|(r, _)| r.top());
+            assert!(after.is_none_or(|top| top < before - 20.0), "the drag did not scroll the controls at {size:?}: Hard was at {before}, now {after:?}");
+        }
+    }
+}
+
+#[test]
+fn the_pause_menu_does_not_call_a_phone_a_computer() {
+    for size in TOUCH_PHONES {
+        let rig = PauseRig::phone(size, false);
+        let seen = texts(&rig.output);
+        assert!(seen.iter().any(|(t, _)| t.contains("Stash: OFF") && t.contains("this device")), "no Stash line at {size:?}: {seen:?}");
+        assert!(seen.iter().all(|(t, _)| !t.contains("computer")), "a pause line says computer at {size:?}: {seen:?}");
+    }
+    assert!(!crate::worlds_ui::words::KEEP_OFF_HINT.contains("computer"));
+    assert!(!crate::worlds_ui::words::KEEP_ON_HINT.contains("computer"));
+}
+
+fn preset_line(rig: &SettingsRig) -> String {
+    format!("Preset: {}", rig.gfx.preset().label())
+}
+
+/// Bring `label` on screen the quick way (a wheel), so a test can then act on it by touch.
+fn settings_reach(rig: &mut SettingsRig, label: &str) {
+    let at = rig.size.to_pos2() * 0.5;
+    for _ in 0..80 {
+        if rig.on_screen(label) {
+            return;
+        }
+        rig.frame(wheel(at, -30.0));
+        for _ in 0..4 {
+            rig.frame(vec![]);
+        }
+    }
+    panic!("{label:?} never came on screen at {:?}: {:?}", rig.size, texts(&rig.output));
+}
+
+/// Where a thumb lands on a slider's rail: inside the window, near its left edge.
+fn rail_x(rig: &SettingsRig, along: f32) -> f32 {
+    rig.window().left() + 7.0 + along
+}
+
+fn row_y(rig: &SettingsRig, label: &str) -> f32 {
+    placed(&rig.output, label).unwrap_or_else(|| panic!("no {label:?} on screen: {:?}", texts(&rig.output))).0.center().y
+}
+
+#[test]
+fn a_touch_drag_scrolls_settings_even_when_it_starts_on_a_button_or_a_label() {
+    for size in TOUCH_PHONES {
+        for from_label in ["Medium", "Texture pack"] {
+            let mut rig = SettingsRig::phone(size);
+            let before = rig.gfx.clone();
+            let line = preset_line(&rig);
+            let y0 = rig.top(&line);
+            let from = placed(&rig.output, from_label).unwrap_or_else(|| panic!("no {from_label:?} at {size:?}: {:?}", texts(&rig.output))).0.center();
+            rig.play(touch_events::drag(from, from - egui::vec2(0.0, 70.0), 8));
+            let moved = placed(&rig.output, &line).is_none_or(|(r, _)| r.top() < y0 - 20.0);
+            assert!(moved, "a drag from {from_label:?} did not scroll Settings at {size:?}");
+            assert_eq!(rig.gfx, before, "a drag from {from_label:?} changed a setting at {size:?}");
+            assert!(!rig.changed_seen, "a drag from {from_label:?} reported a change at {size:?}");
+        }
+    }
+}
+
+#[test]
+fn a_vertical_drag_that_starts_on_a_slider_scrolls_and_does_not_move_it() {
+    for size in TOUCH_PHONES {
+        let mut rig = SettingsRig::phone(size);
+        settings_reach(&mut rig, "Render distance");
+        let before = rig.gfx.clone();
+        let (x, y) = (rail_x(&rig, 30.0), row_y(&rig, "Render distance"));
+        let y0 = rig.top("Render distance");
+        rig.play(touch_events::drag(egui::pos2(x, y), egui::pos2(x, (y - 70.0).max(4.0)), 8));
+        assert_eq!(rig.gfx.render_distance, before.render_distance, "a vertical drag moved the Render distance slider at {size:?}");
+        assert_eq!(rig.gfx, before, "a vertical drag on a slider changed a setting at {size:?}");
+        assert!(!rig.changed_seen, "a vertical drag on a slider reported a change (the game would save it) at {size:?}");
+        let moved = placed(&rig.output, "Render distance").is_none_or(|(r, _)| r.top() < y0 - 20.0);
+        assert!(moved, "a vertical drag on a slider did not scroll Settings at {size:?}");
+    }
+}
+
+#[test]
+fn a_horizontal_drag_on_a_slider_moves_it_and_does_not_scroll() {
+    for size in TOUCH_PHONES {
+        let mut rig = SettingsRig::phone(size);
+        settings_reach(&mut rig, "Render distance");
+        let before = rig.gfx.render_distance;
+        let (x, y) = (rail_x(&rig, 10.0), row_y(&rig, "Render distance"));
+        let y0 = rig.top("Render distance");
+        rig.play(touch_events::drag(egui::pos2(x, y), egui::pos2(x + 80.0, y), 8));
+        assert!(rig.gfx.render_distance > before, "a horizontal drag did not raise Render distance at {size:?}: {before} -> {}", rig.gfx.render_distance);
+        assert!(rig.changed_seen, "a horizontal drag on a slider was not reported as a change at {size:?}");
+        assert!((rig.top("Render distance") - y0).abs() < 1.0, "a horizontal drag on a slider scrolled Settings at {size:?}");
+    }
+}
+
+#[test]
+fn a_tap_on_a_slider_still_sets_it_and_does_not_scroll() {
+    for size in TOUCH_PHONES {
+        let mut rig = SettingsRig::phone(size);
+        settings_reach(&mut rig, "Render distance");
+        let y = row_y(&rig, "Render distance");
+        let y0 = rig.top("Render distance");
+        rig.play(touch_events::tap(egui::pos2(rail_x(&rig, 8.0), y)));
+        let low = rig.gfx.render_distance;
+        rig.changed_seen = false;
+        rig.play(touch_events::tap(egui::pos2(rail_x(&rig, 90.0), y)));
+        assert!(rig.gfx.render_distance > low, "tapping the end of the rail did not raise Render distance at {size:?}: {low} -> {}", rig.gfx.render_distance);
+        assert!(rig.changed_seen, "a tap on a slider was not reported as a change at {size:?}");
+        assert!((rig.top("Render distance") - y0).abs() < 1.0, "a tap on a slider scrolled Settings at {size:?}");
+    }
+}
+
+#[test]
+fn settings_uses_most_of_a_phone_screen_with_larger_text() {
+    let desktop_text = {
+        let rig = SettingsRig::new(egui::vec2(1280.0, 1400.0), None);
+        let line = preset_line(&rig);
+        let (r, _) = placed(&rig.output, &line).unwrap();
+        r.height()
+    };
+    for size in [PIXEL_LANDSCAPE, SMALL_LANDSCAPE, ONEPLUS_LANDSCAPE] {
+        let rig = SettingsRig::phone(size);
+        let window = rig.window();
+        assert!(window.width() >= 0.75 * size.x, "the Settings window is only {} wide on a {} wide screen", window.width(), size.x);
+        assert!(window.height() >= 0.88 * size.y, "the Settings window is only {} tall on a {} tall screen", window.height(), size.y);
+        assert!(screen_of(size).contains_rect(window), "the Settings window {window:?} is not inside the {size:?} screen");
+        let line = preset_line(&rig);
+        let (text, clip) = placed(&rig.output, &line).unwrap();
+        assert!(clip.height() >= 0.6 * size.y, "the scrolling part of Settings is only {} tall on a {} tall screen", clip.height(), size.y);
+        assert!(text.height() >= 1.15 * desktop_text, "Settings text is not larger on a phone: {} against {desktop_text} on a desktop", text.height());
+        assert!(rig.on_screen("Back"), "Back is not on the {size:?} screen");
+    }
 }
 
 // ---- Escape (Android Back) with Settings open -----------------------------------------------

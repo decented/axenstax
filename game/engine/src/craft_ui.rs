@@ -11,6 +11,41 @@ use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack};
 use crate::window::{self, ClickCtx, ClickResult, Station, WindowClick, WindowMut, WindowSlot};
 
+/// Where the slot painters get a block's icon. The game's [`EguiIntegration`] is the real
+/// source (it needs a GPU device to exist); a headless test passes [`NoIcons`], so the whole
+/// window can be drawn, tapped and measured on the CPU.
+pub trait IconSource {
+    /// The egui texture holding this atlas layer's icon, if it has been uploaded.
+    fn block_texture(&self, layer: u32) -> Option<egui::TextureId>;
+    /// The shield's drawn icon (a board with a rim), painted into `rect`.
+    fn paint_shield(&self, ui: &egui::Ui, rect: egui::Rect);
+}
+
+impl IconSource for EguiIntegration {
+    fn block_texture(&self, layer: u32) -> Option<egui::TextureId> {
+        EguiIntegration::block_texture(self, layer)
+    }
+
+    fn paint_shield(&self, ui: &egui::Ui, rect: egui::Rect) {
+        crate::hud_ui::paint_shield_icon(ui, rect, self);
+    }
+}
+
+/// No icons at all: every block draws as an empty slot. For tests.
+#[cfg(test)]
+pub(crate) struct NoIcons;
+
+#[cfg(test)]
+impl IconSource for NoIcons {
+    fn block_texture(&self, _layer: u32) -> Option<egui::TextureId> {
+        None
+    }
+
+    fn paint_shield(&self, ui: &egui::Ui, rect: egui::Rect) {
+        ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(175, 140, 92));
+    }
+}
+
 /// Theme colours for crafting UI.
 const OVERLAY_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 210);
 const SLOT_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(24, 24, 32, 255);
@@ -924,7 +959,7 @@ pub fn draw_crafting_ui(
     armour_slots: &[Option<ArmourItem>; 4],
     offhand: crate::hud_ui::OffhandBox,
     registry: &BlockRegistry,
-    egui_integration: &EguiIntegration,
+    icons: &dyn IconSource,
 ) -> ClickTarget {
     let mut click_target = ClickTarget::None;
     // #45 P3 — Mouse-Tweaks drag paint. Read the pointer button state once; a
@@ -1011,7 +1046,7 @@ pub fn draw_crafting_ui(
                             let pad_focused = pad_focus == Some(PadSlot::Armour(i));
                             let response = draw_armour_slot(
                                 ui, i, slot.as_ref(),
-                                egui_integration, slot_size, pad_focused,
+                                icons, slot_size, pad_focused,
                             );
                             if pad_focused {
                                 focused_rect = Some(response.rect);
@@ -1034,7 +1069,7 @@ pub fn draw_crafting_ui(
                                 _ => None,
                             };
                             let response = draw_item_slot(
-                                ui, &held, registry, egui_integration, slot_size, false, false, false,
+                                ui, &held, registry, icons, slot_size, false, false, false,
                             );
                             if held.is_none() {
                                 paint_shield_silhouette(ui.painter(), response.rect);
@@ -1058,7 +1093,7 @@ pub fn draw_crafting_ui(
                                 for c in 0..grid_size {
                                     let pad_focused = pad_focus == Some(PadSlot::Grid(r, c));
                                     let response = draw_item_slot(
-                                        ui, &ui_state.grid[r][c], registry, egui_integration, slot_size, false, pad_focused, true,
+                                        ui, &ui_state.grid[r][c], registry, icons, slot_size, false, pad_focused, true,
                                     );
                                     if pad_focused {
                                         focused_rect = Some(response.rect);
@@ -1105,7 +1140,7 @@ pub fn draw_crafting_ui(
                         let has_result = ui_state.result.is_some();
                         let pad_focused = pad_focus == Some(PadSlot::Result);
                         let response = draw_item_slot(
-                            ui, &ui_state.result, registry, egui_integration, slot_size, has_result, pad_focused, false,
+                            ui, &ui_state.result, registry, icons, slot_size, has_result, pad_focused, false,
                         );
                         if pad_focused {
                             focused_rect = Some(response.rect);
@@ -1139,7 +1174,7 @@ pub fn draw_crafting_ui(
                             let stack = inventory.slot(slot_idx);
                             let pad_focused = pad_focus == Some(PadSlot::Inv(slot_idx));
                             let response = draw_item_slot(
-                                ui, &stack.cloned(), registry, egui_integration, slot_size, false, pad_focused, true,
+                                ui, &stack.cloned(), registry, icons, slot_size, false, pad_focused, true,
                             );
                             if inventory.is_locked(slot_idx) {
                                 mark_locked(ui, response.rect);
@@ -1197,7 +1232,7 @@ pub fn draw_crafting_ui(
                         let stack = inventory.hotbar_slot(i);
                         let pad_focused = pad_focus == Some(PadSlot::Inv(i));
                         let response = draw_item_slot(
-                            ui, &stack.cloned(), registry, egui_integration, slot_size, false, pad_focused, true,
+                            ui, &stack.cloned(), registry, icons, slot_size, false, pad_focused, true,
                         );
                         if inventory.is_locked(i) {
                             mark_locked(ui, response.rect);
@@ -1304,7 +1339,7 @@ pub fn draw_crafting_ui(
         && let Some(card) = crate::crafting_catalogue::all_cards().get(gidx) {
             let has_parent = ui_state.pinned_recipe_stack.len() > 1;
             if let Some(guide_action) = draw_placement_guide(
-                ctx, player_index, anchor, card, has_parent, registry, egui_integration,
+                ctx, player_index, anchor, card, has_parent, registry, icons,
             ) {
                 click_target = guide_action;
             }
@@ -1322,7 +1357,7 @@ pub fn draw_crafting_ui(
     // focused slot instead of following the mouse.
     paint_carried_item(ctx, viewport, player_index, ui_state.cursor_item.as_ref(),
         if pad_focus.is_some() { focused_rect.map(|r| r.right_top() + egui::vec2(10.0, 6.0)) } else { None },
-        pad_focus.is_some(), registry, egui_integration);
+        pad_focus.is_some(), registry, icons);
 
     click_target
 }
@@ -1338,7 +1373,7 @@ pub fn paint_carried_item(
     controller_anchor: Option<egui::Pos2>,
     controller_active: bool,
     registry: &BlockRegistry,
-    egui_integration: &EguiIntegration,
+    icons: &dyn IconSource,
 ) {
     let Some(cursor) = cursor else { return };
     let rect = egui::Rect::from_min_size(
@@ -1353,7 +1388,7 @@ pub fn paint_carried_item(
         egui::Order::Tooltip,
         egui::Id::new(("cursor_item", player_index)),
     )).with_clip_rect(rect);
-    paint_item_icon(&painter, icon_rect, cursor, registry, egui_integration);
+    paint_item_icon(&painter, icon_rect, cursor, registry, icons);
 
     // Floating name label next to the cursor — so the player can read
     // what they're carrying without having to drop it onto a slot.
@@ -1401,7 +1436,7 @@ fn draw_armour_slot(
     ui: &mut egui::Ui,
     armour_slot_idx: usize,
     piece: Option<&ArmourItem>,
-    _egui_integration: &EguiIntegration,
+    _icons: &dyn IconSource,
     size: f32,
     pad_focused: bool,
 ) -> egui::Response {
@@ -1526,7 +1561,7 @@ fn draw_placement_guide(
     card: &crate::crafting_catalogue::RecipeCard,
     has_parent: bool,
     registry: &BlockRegistry,
-    egui_integration: &EguiIntegration,
+    icons: &dyn IconSource,
 ) -> Option<ClickTarget> {
     let cell = 30.0_f32;
     let gap = 3.0;
@@ -1592,7 +1627,7 @@ fn draw_placement_guide(
                                     grid_rect.min + egui::vec2(c as f32 * (cell + gap), r as f32 * (cell + gap)),
                                     egui::vec2(cell, cell),
                                 );
-                                paint_mini_cell(ui.painter(), cell_rect, slot, registry, egui_integration);
+                                paint_mini_cell(ui.painter(), cell_rect, slot, registry, icons);
 
                                 let item = match slot {
                                     CraftSlot::Block(b) => Some(Item::Block(b)),
@@ -1637,7 +1672,7 @@ fn draw_placement_guide(
                         ui.label(egui::RichText::new("→").size(20.0).color(LABEL_COLOR));
                         ui.add_space(6.0);
                         let (out_rect, _) = ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::hover());
-                        paint_item_icon(ui.painter(), out_rect, &card.output, registry, egui_integration);
+                        paint_item_icon(ui.painter(), out_rect, &card.output, registry, icons);
                         let out_name = card.output.item.name(registry);
                         let out_id = ui.id().with("guide_output");
                         let out_resp = ui.interact(out_rect, out_id, egui::Sense::click());
@@ -1716,7 +1751,7 @@ fn paint_mini_cell(
     rect: egui::Rect,
     slot: CraftSlot,
     registry: &BlockRegistry,
-    egui_integration: &EguiIntegration,
+    icons: &dyn IconSource,
 ) {
     painter.rect_filled(rect, 3.0, SLOT_BG);
     painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0_f32, SLOT_BORDER), egui::StrokeKind::Inside);
@@ -1726,7 +1761,7 @@ fn paint_mini_cell(
         CraftSlot::Empty => None,
     };
     if let Some(s) = stack {
-        paint_item_icon(painter, rect.shrink(3.0), &s, registry, egui_integration);
+        paint_item_icon(painter, rect.shrink(3.0), &s, registry, icons);
     }
 }
 
@@ -1756,7 +1791,7 @@ fn draw_item_slot(
     ui: &mut egui::Ui,
     stack: &Option<ItemStack>,
     registry: &BlockRegistry,
-    egui_integration: &EguiIntegration,
+    icons: &dyn IconSource,
     size: f32,
     highlight: bool,
     pad_focused: bool,
@@ -1797,7 +1832,7 @@ fn draw_item_slot(
         match &stack.item {
             Item::Block(id) => {
                 let tex_layer = registry.tex_top(*id);
-                if let Some(tex_id) = egui_integration.block_texture(tex_layer) {
+                if let Some(tex_id) = icons.block_texture(tex_layer) {
                     ui.painter().image(
                         tex_id,
                         icon_rect,
@@ -1807,7 +1842,7 @@ fn draw_item_slot(
                 }
             }
             Item::Tool(tool) if tool.tool_type == crate::crafting::ToolType::Shield => {
-                crate::hud_ui::paint_shield_icon(ui, icon_rect, egui_integration);
+                icons.paint_shield(ui, icon_rect);
             }
             Item::Tool(tool) => {
                 let color = stack.item.color(registry);
@@ -1952,12 +1987,12 @@ fn paint_item_icon(
     rect: egui::Rect,
     stack: &ItemStack,
     registry: &BlockRegistry,
-    egui_integration: &EguiIntegration,
+    icons: &dyn IconSource,
 ) {
     match &stack.item {
         Item::Block(id) => {
             let tex_layer = registry.tex_top(*id);
-            if let Some(tex_id) = egui_integration.block_texture(tex_layer) {
+            if let Some(tex_id) = icons.block_texture(tex_layer) {
                 painter.image(
                     tex_id,
                     rect,
@@ -2806,3 +2841,7 @@ mod tests {
         assert_eq!(dirt, 5, "prior grid contents must return to inventory");
     }
 }
+
+#[cfg(test)]
+#[path = "craft_ui_phone_tests.rs"]
+mod phone_tests;
