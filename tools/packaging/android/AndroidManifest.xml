@@ -12,9 +12,9 @@
                               on the launch intent); the text prompt dialog that types
                               a world name, a seed or a chat line (NativeActivity has
                               no text-editor view, so Android ignores a soft-keyboard
-                              request); and onDestroy ends the process once the game
-                              has saved (one winit event loop per process, so every
-                              launch must be a cold start).
+                              request); and onDestroy raises a flag the game polls: the
+                              game saves, then ends its own process (one winit event
+                              loop per process, so every launch must be a cold start).
   launchMode="singleTask"   — one game instance: tapping an axenstax: link while the
                               game runs brings it forward and delivers onNewIntent
                               rather than starting a second copy.
