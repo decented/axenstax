@@ -34,7 +34,10 @@ const OVERLAY_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0
 const TITLE_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 195, 100);
 
 /// Draw the furnace UI. Returns the outcome — caller (game_loop)
-/// clears the player's `open_furnace` field on `Closed`.
+/// clears the player's `open_furnace` field on `Closed`. `inventory_pressed` is
+/// this frame's Inventory press (`InputState::inventory_toggle`, player 0 only):
+/// the inventory key closes the furnace as it opens the inventory, whatever it
+/// is bound to; `keys` names it in the hint.
 pub fn draw_furnace_ui(
     ctx: &egui::Context,
     viewport: &crate::screen::ViewportRect,
@@ -42,6 +45,8 @@ pub fn draw_furnace_ui(
     data: &FurnaceData,
     registry: &BlockRegistry,
     _egui_integration: &EguiIntegration,
+    keys: &crate::keybindings::Bindings,
+    inventory_pressed: bool,
 ) -> FurnaceUiOutcome {
     let mut outcome = FurnaceUiOutcome::InProgress;
 
@@ -119,21 +124,23 @@ pub fn draw_furnace_ui(
 
                 ui.add_space(16.0);
                 ui.label(
-                    egui::RichText::new(
+                    egui::RichText::new(format!(
                         "Click Input to load ore (raw iron / copper / tin). \
                          Click Fuel to load coal / planks / logs. \
                          Click Output to take ingots. \
-                         Shift-click moves a whole stack. Press E or Esc to close.",
-                    )
+                         Shift-click moves a whole stack. Press {} or Esc to close.",
+                        keys.hint(crate::keybindings::Action::Inventory),
+                    ))
                     .size(13.0)
                     .color(egui::Color32::LIGHT_GRAY),
                 );
             });
         });
 
-    // Esc + 'E' close — Spec 29: 'E' closes the furnace UI exactly
-    // like it toggles the inventory, so the kid uses one key.
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::E)) {
+    // Esc + the inventory key close — Spec 29: the inventory key (E unless
+    // rebound) closes the furnace UI exactly like it toggles the inventory,
+    // so the kid uses one key.
+    if inventory_pressed || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         outcome = FurnaceUiOutcome::Closed;
     }
 

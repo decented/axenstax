@@ -769,3 +769,36 @@ fn escape_out_of_the_lobbys_settings_is_spent_for_the_page_under_it() {
         _ => panic!("Escape left the lobby menu"),
     }
 }
+
+/// Settings → Controls on a phone (Spec 05 §1.9): the section opens with a tap, its rows
+/// and its Reset button are reached by touch drags alone, and a drag that starts on a
+/// Change button scrolls the list without arming a capture.
+#[test]
+fn the_controls_list_opens_and_scrolls_by_touch_on_a_phone() {
+    for size in [PIXEL_PORTRAIT, SMALL_LANDSCAPE] {
+        let mut rig = SettingsRig::phone(size);
+        settings_reach(&mut rig, "Controls");
+        let header = placed(&rig.output, "Controls").unwrap().0.center();
+        rig.play(touch_events::tap(header));
+        settings_reach(&mut rig, "Walk forward");
+        let before = rig.gfx.clone();
+        let mid = rig.size.to_pos2() * 0.5;
+        let mut drags = 0;
+        while !rig.on_screen("Reset all to defaults") {
+            drags += 1;
+            assert!(drags < 80, "Reset all never came on screen by dragging at {size:?}: {:?}", texts(&rig.output));
+            // Start on the Change button nearest mid-screen (clear of the fixed title row),
+            // else mid-screen.
+            let from = texts(&rig.output)
+                .into_iter()
+                .filter(|(t, p)| t == "Change" && (p.y - mid.y).abs() < size.y * 0.3)
+                .map(|(_, p)| p)
+                .min_by(|a, b| (a.y - mid.y).abs().total_cmp(&(b.y - mid.y).abs()))
+                .unwrap_or(mid);
+            rig.play(touch_events::drag(from, from - egui::vec2(0.0, 90.0), 8));
+            assert_eq!(rig.state.controls.capturing, None, "a drag from a Change button armed a capture at {size:?}");
+        }
+        assert_eq!(rig.gfx, before, "scrolling the Controls list changed a setting at {size:?}");
+        assert!(rig.on_screen("Back"), "Back left the screen at {size:?}");
+    }
+}

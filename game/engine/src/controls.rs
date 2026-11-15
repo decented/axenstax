@@ -13,12 +13,18 @@
 //! wording out (the game has no feedback channel, and gamepad support is parked
 //! — no parity is claimed).
 //!
+//! Keys follow the live bindings (Settings → Controls, `keybindings.rs`): a row
+//! names the [`Action`]s it documents, shows its static text while they all have
+//! their shipped binding, and builds its text from their live labels once the
+//! player has changed one ([`ControlRow::keys_text`]).
+//!
 //! Platform: [`ControlsLayout::current`] picks the touch table on a touch
 //! device (`touch_input::is_touch_device`, set from `navigator.maxTouchPoints`
 //! on the web and unconditionally on Android) and the keyboard table otherwise.
 //! `TOUCH_PLATFORM` is deliberately NOT used: it is true for every web build,
 //! including a desktop with a mouse.
 
+use crate::keybindings::{Action, Bindings};
 use egui::RichText;
 
 /// Which table to show.
@@ -43,7 +49,7 @@ impl ControlsLayout {
 /// One line of the reference.
 #[derive(Clone, Copy, Debug)]
 pub struct ControlRow {
-    /// What the player presses / touches.
+    /// What the player presses / touches, with the shipped bindings.
     pub keys: &'static str,
     /// What it does.
     pub action: &'static str,
@@ -52,6 +58,50 @@ pub struct ControlRow {
     pub source: &'static str,
     /// Hidden on the web build (e.g. F11 — the browser owns fullscreen).
     pub native_only: bool,
+    /// The remappable actions this row names, in the order `compose` takes
+    /// their labels. Empty for fixed input (Esc, an F key, the mouse's look,
+    /// a touch control).
+    pub actions: &'static [Action],
+    /// Builds the keys text from those actions' live labels.
+    pub compose: fn(&[String]) -> String,
+}
+
+impl ControlRow {
+    /// The keys as the player has them bound: the static text while every
+    /// action is at its default (so the shipped card is unchanged), otherwise
+    /// built from the live labels.
+    pub fn keys_text(&self, bindings: &Bindings) -> String {
+        if self.actions.iter().all(|a| bindings.is_default(*a)) {
+            return self.keys.to_string();
+        }
+        let labels: Vec<String> = self.actions.iter().map(|a| bindings.hint(*a)).collect();
+        (self.compose)(&labels)
+    }
+}
+
+fn first(l: &[String]) -> String {
+    l[0].clone()
+}
+fn spaced(l: &[String]) -> String {
+    l.join(" ")
+}
+fn hold(l: &[String]) -> String {
+    format!("Hold {}", l[0])
+}
+fn held(l: &[String]) -> String {
+    format!("{} (hold)", l[0])
+}
+fn double_tap(l: &[String]) -> String {
+    format!("Double-tap {}", l[0])
+}
+fn sprint_keys(l: &[String]) -> String {
+    format!("Double-tap {}, or hold {}", l[0], l[1])
+}
+fn either(l: &[String]) -> String {
+    format!("{} or {}", l[0], l[1])
+}
+fn hotbar_keys(l: &[String]) -> String {
+    format!("{}, or scroll wheel", l.join(" "))
 }
 
 /// A titled group of rows.
@@ -64,12 +114,35 @@ pub struct ControlSection {
 }
 
 const fn row(keys: &'static str, action: &'static str, source: &'static str) -> ControlRow {
-    ControlRow { keys, action, source, native_only: false }
+    ControlRow { keys, action, source, native_only: false, actions: &[], compose: first }
 }
 
 const fn native_row(keys: &'static str, action: &'static str, source: &'static str) -> ControlRow {
-    ControlRow { keys, action, source, native_only: true }
+    ControlRow { keys, action, source, native_only: true, actions: &[], compose: first }
 }
+
+/// A row naming remappable actions.
+const fn bound(
+    keys: &'static str,
+    action: &'static str,
+    source: &'static str,
+    actions: &'static [Action],
+    compose: fn(&[String]) -> String,
+) -> ControlRow {
+    ControlRow { keys, action, source, native_only: false, actions, compose }
+}
+
+const HOTBAR: &[Action] = &[
+    Action::Hotbar1,
+    Action::Hotbar2,
+    Action::Hotbar3,
+    Action::Hotbar4,
+    Action::Hotbar5,
+    Action::Hotbar6,
+    Action::Hotbar7,
+    Action::Hotbar8,
+    Action::Hotbar9,
+];
 
 /// Mouse + keyboard. Bindings: `input.rs` (`InputState::key_pressed`, the
 /// movement helpers), `lib.rs` (window-event key handling: T / slash, Esc, F3,
@@ -79,28 +152,28 @@ pub const KEYBOARD_SECTIONS: &[ControlSection] = &[
         title: "Moving",
         in_help_sheet: true,
         rows: &[
-            row("W A S D", "Walk", "input.rs InputState::forward/backward/left/right_key"),
+            bound("W A S D", "Walk", "input.rs InputState::forward/backward/left/right_key", &[Action::Forward, Action::Left, Action::Back, Action::Right], spaced),
             row("Mouse", "Look around", "input.rs InputState::mouse_moved"),
-            row("Space", "Jump (swim up in water)", "input.rs InputState::jump; physics.rs swim"),
-            row("Shift", "Sneak: creep to a ledge without falling (dive in water)", "input.rs InputState::sneak; physics.rs swim"),
-            row("Double-tap W, or hold Ctrl", "Sprint", "input.rs key_pressed KeyW double-tap; InputState::sprint"),
-            row("Double-tap Space", "Fly on / off (Creative worlds)", "input.rs key_pressed Space double-tap; physics.rs toggle_flight"),
-            row("Hold C", "Zoom in", "game_loop.rs hold-to-zoom (KeyC)"),
-            row("F5", "Third-person camera", "input.rs key_pressed F5 -> camera_cycle"),
+            bound("Space", "Jump (swim up in water)", "input.rs InputState::jump; physics.rs swim", &[Action::Jump], first),
+            bound("Shift", "Sneak: creep to a ledge without falling (dive in water)", "input.rs InputState::sneak; physics.rs swim", &[Action::Sneak], first),
+            bound("Double-tap W, or hold Ctrl", "Sprint", "input.rs press_action Forward double-tap; InputState::sprint", &[Action::Forward, Action::Sprint], sprint_keys),
+            bound("Double-tap Space", "Fly on / off (Creative worlds)", "input.rs press_action Jump double-tap; physics.rs toggle_flight", &[Action::Jump], double_tap),
+            bound("Hold C", "Zoom in", "game_loop.rs hold-to-zoom (Action::Zoom)", &[Action::Zoom], hold),
+            row("F5", "Third-person camera", "input.rs press_action CameraView (F5, fixed) -> camera_cycle"),
         ],
     },
     ControlSection {
         title: "Building and items",
         in_help_sheet: true,
         rows: &[
-            row("Left click (hold)", "Break blocks: hold until it breaks", "input.rs mouse_button_pressed Left -> break_block"),
-            row("Right click", "Place a block, use what you hold, open things", "input.rs mouse_button_pressed Right -> place_block"),
-            row("Middle click", "Pick the block you're looking at into your hand (in Survival, only if you're carrying it)", "input.rs mouse_button_pressed Middle -> pick_block"),
-            row("1 to 9, or scroll wheel", "Choose the item in your hand", "input.rs key_pressed Digit1..9; lib.rs MouseWheel -> scroll"),
-            row("E", "Open your inventory and crafting", "input.rs key_pressed KeyE -> inventory_toggle"),
-            row("Q", "Drop one of the item in your hand", "input.rs key_pressed KeyQ -> drop_item"),
-            row("F", "Swap the item in your hand with your off-hand (right click uses the off-hand when your main hand has no use)", "input.rs key_pressed KeyF -> swap_hands"),
-            row("B", "Search every item (Creative: click one to take it)", "input.rs key_pressed KeyB -> explorer_toggle"),
+            bound("Left click (hold)", "Break blocks: hold until it breaks", "input.rs press_action Attack -> break_block", &[Action::Attack], held),
+            bound("Right click", "Place a block, use what you hold, open things", "input.rs press_action Use -> place_block", &[Action::Use], first),
+            bound("Middle click", "Pick the block you're looking at into your hand (in Survival, only if you're carrying it)", "input.rs press_action PickBlock -> pick_block", &[Action::PickBlock], first),
+            bound("1 to 9, or scroll wheel", "Choose the item in your hand", "input.rs press_action Hotbar1..9; lib.rs MouseWheel -> scroll", HOTBAR, hotbar_keys),
+            bound("E", "Open your inventory and crafting", "input.rs press_action Inventory -> inventory_toggle", &[Action::Inventory], first),
+            bound("Q", "Drop one of the item in your hand", "input.rs press_action Drop -> drop_item", &[Action::Drop], first),
+            bound("F", "Swap the item in your hand with your off-hand (right click uses the off-hand when your main hand has no use)", "input.rs press_action SwapHands -> swap_hands", &[Action::SwapHands], first),
+            bound("B", "Search every item (Creative: click one to take it)", "input.rs press_action Explorer -> explorer_toggle", &[Action::Explorer], first),
         ],
     },
     ControlSection {
@@ -108,11 +181,11 @@ pub const KEYBOARD_SECTIONS: &[ControlSection] = &[
         in_help_sheet: true,
         rows: &[
             row("Esc", "Pause menu (also closes an open panel)", "lib.rs KeyCode::Escape"),
-            row("H", "This help / your current objective", "input.rs key_pressed KeyH -> help_panel"),
-            row("M", "Full-screen map", "input.rs key_pressed KeyM -> map_toggle"),
-            row("J", "Challenges (Trials)", "input.rs key_pressed KeyJ -> challenge_board_toggle"),
-            row("N", "Call Satoshi over (press again to send him home)", "input.rs key_pressed KeyN -> satoshi_summon"),
-            row("T or /", "Chat and commands (in worlds with commands on)", "lib.rs KeyCode::KeyT / KeyCode::Slash, is_commands_enabled"),
+            bound("H", "This help / your current objective", "input.rs press_action Help -> help_panel", &[Action::Help], first),
+            bound("M", "Full-screen map", "input.rs press_action Map -> map_toggle", &[Action::Map], first),
+            bound("J", "Challenges (Trials)", "input.rs press_action Challenges -> challenge_board_toggle", &[Action::Challenges], first),
+            bound("N", "Call Satoshi over (press again to send him home)", "input.rs press_action Satoshi -> satoshi_summon", &[Action::Satoshi], first),
+            bound("T or /", "Chat and commands (in worlds with commands on)", "lib.rs chat_prefix (Action::Chat / Action::Command), is_commands_enabled", &[Action::Chat, Action::Command], either),
         ],
     },
     ControlSection {
@@ -182,12 +255,13 @@ fn row_visible(r: &ControlRow) -> bool {
 }
 
 /// The H help sheet's free-play body: every help-sheet row as a bullet line
-/// ("keys - action"), plus the pet / sneak notes on the keyboard layout.
-pub fn help_sheet_text(layout: ControlsLayout) -> String {
+/// ("keys - action", the keys as bound), plus the pet / sneak notes on the
+/// keyboard layout.
+pub fn help_sheet_text(layout: ControlsLayout, bindings: &Bindings) -> String {
     let mut out = String::new();
     for section in sections(layout).iter().filter(|s| s.in_help_sheet) {
         for r in section.rows.iter().filter(|r| row_visible(r)) {
-            out.push_str(&format!("\u{2022} {} \u{2014} {}\n", r.keys, r.action));
+            out.push_str(&format!("\u{2022} {} \u{2014} {}\n", r.keys_text(bindings), r.action));
         }
     }
     if layout == ControlsLayout::Keyboard {
@@ -210,10 +284,11 @@ fn intro(layout: ControlsLayout) -> &'static str {
     }
 }
 
-/// Draw the controls card. Returns `true` on the frame the player dismisses it
-/// ("Got it" or Enter). Esc is handled by the main loop's panel-closing chain
-/// (`GameState::close_topmost_ui_panel`), which is why it is not read here.
-pub fn show_controls_card(ctx: &egui::Context, layout: ControlsLayout) -> bool {
+/// Draw the controls card, its keys as bound. Returns `true` on the frame the
+/// player dismisses it ("Got it" or Enter). Esc is handled by the main loop's
+/// panel-closing chain (`GameState::close_topmost_ui_panel`), which is why it
+/// is not read here.
+pub fn show_controls_card(ctx: &egui::Context, layout: ControlsLayout, bindings: &Bindings) -> bool {
     let gold = egui::Color32::from_rgb(255, 210, 130);
     let mut close = false;
     // Keep the card inside small (phone) screens: scroll the table, pin the button.
@@ -240,7 +315,7 @@ pub fn show_controls_card(ctx: &egui::Context, layout: ControlsLayout) -> bool {
                             .spacing([18.0, 4.0])
                             .show(ui, |ui| {
                                 for r in section.rows.iter().filter(|r| row_visible(r)) {
-                                    ui.label(RichText::new(r.keys).strong().monospace());
+                                    ui.label(RichText::new(r.keys_text(bindings)).strong().monospace());
                                     ui.label(r.action);
                                     ui.end_row();
                                 }
@@ -316,7 +391,7 @@ mod tests {
                 texts.push(format!("{} {}", r.keys, r.action).to_lowercase());
             }
             texts.push(intro(layout).to_lowercase());
-            texts.push(help_sheet_text(layout).to_lowercase());
+            texts.push(help_sheet_text(layout, &Bindings::defaults()).to_lowercase());
         }
         for t in &texts {
             for b in banned {
@@ -394,16 +469,64 @@ mod tests {
 
     #[test]
     fn help_sheet_has_the_movement_basics() {
-        let kb = help_sheet_text(ControlsLayout::Keyboard);
+        let kb = help_sheet_text(ControlsLayout::Keyboard, &Bindings::defaults());
         for needle in ["W A S D", "Space", "Shift", "1 to 9", "E", "Q", "T or /", "Esc"] {
             assert!(kb.contains(needle), "keyboard help sheet lacks '{needle}'");
         }
         // The old free-play cheat-sheet lines survive.
         assert!(kb.contains("tamed pet"));
-        let touch = help_sheet_text(ControlsLayout::Touch);
+        let touch = help_sheet_text(ControlsLayout::Touch, &Bindings::defaults());
         assert!(touch.contains("stick"));
         assert!(!touch.contains("W A S D"));
         // Debug / fullscreen stay out of the short sheet.
         assert!(!kb.contains("F3"));
+    }
+
+    /// The card reads the live bindings: with the shipped ones every row is its
+    /// static text (the card is unchanged); a rebound action's row shows the
+    /// new key, and the help sheet with it.
+    #[test]
+    fn the_card_and_help_sheet_follow_the_live_bindings() {
+        use crate::keybindings::Binding;
+        let d = Bindings::defaults();
+        for layout in [ControlsLayout::Keyboard, ControlsLayout::Touch] {
+            for r in all_rows(layout) {
+                assert_eq!(r.keys_text(&d), r.keys, "the shipped card is unchanged");
+            }
+        }
+        let mut b = Bindings::defaults();
+        b.rebind(Action::Drop, Binding::Key(KeyCode::KeyG));
+        b.rebind(Action::Hotbar1, Binding::Key(KeyCode::KeyZ));
+        b.rebind(Action::Forward, Binding::Key(KeyCode::ArrowUp));
+        b.rebind(Action::Attack, Binding::Mouse(winit::event::MouseButton::Back));
+        let rows: Vec<String> = all_rows(ControlsLayout::Keyboard).map(|r| r.keys_text(&b)).collect();
+        assert!(rows.iter().any(|t| t == "G"), "the Drop row shows G: {rows:?}");
+        assert!(!rows.iter().any(|t| t == "Q"), "and no longer Q: {rows:?}");
+        assert!(rows.iter().any(|t| t == "Up A S D"), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "Double-tap Up, or hold Ctrl"), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "Z 2 3 4 5 6 7 8 9, or scroll wheel"), "{rows:?}");
+        assert!(rows.iter().any(|t| t == "Mouse 4 (hold)"), "{rows:?}");
+        let sheet = help_sheet_text(ControlsLayout::Keyboard, &b);
+        assert!(sheet.contains("\u{2022} G \u{2014} Drop"), "{sheet}");
+        // And the row's binding really does what it says on a real InputState.
+        let mut i = InputState::new();
+        i.set_bindings(std::sync::Arc::new(b));
+        i.key_pressed(KeyCode::KeyG);
+        assert!(i.drop_item, "G drops, as the card says");
+    }
+
+    /// Every row that names an action shows that action's binding while it is
+    /// at its default, so the static text is the table's (no row can name a
+    /// key the table doesn't bind).
+    #[test]
+    fn each_rows_static_text_names_its_actions_default_keys() {
+        let d = Bindings::defaults();
+        for r in all_rows(ControlsLayout::Keyboard) {
+            for a in r.actions {
+                let label = d.hint(*a);
+                let named = r.keys.contains(&label) || (a.hotbar_slot().is_some() && r.keys.starts_with("1 to 9"));
+                assert!(named, "row '{}' doesn't name {} ({label})", r.keys, a.id());
+            }
+        }
     }
 }

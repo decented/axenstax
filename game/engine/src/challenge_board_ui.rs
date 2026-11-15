@@ -36,6 +36,7 @@ pub fn show_challenge_board(
     ctx: &egui::Context,
     rows: &[ChallengeRow],
     active: Option<(&str, (u32, u32), u32)>,
+    keys: &crate::keybindings::Bindings,
 ) -> ChallengeBoardResult {
     let mut result = ChallengeBoardResult::default();
     let mut window_open = true;
@@ -48,7 +49,14 @@ pub fn show_challenge_board(
         .show(ctx, |ui| {
             ui.label(RichText::new("Pick a challenge").size(16.0).strong());
             ui.add_space(2.0);
-            ui.label(RichText::new("Press J to close. Progress shows for the active one.").weak().size(11.0));
+            ui.label(
+                RichText::new(format!(
+                    "Press {} to close. Progress shows for the active one.",
+                    keys.hint(crate::keybindings::Action::Challenges)
+                ))
+                .weak()
+                .size(11.0),
+            );
             ui.add_space(8.0);
 
             // Active challenge banner (if any).

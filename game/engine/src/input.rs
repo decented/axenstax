@@ -3,8 +3,11 @@
 //! Tracks which keys are held, mouse movement deltas, mouse button clicks,
 //! and hotbar selection per frame.
 
-use winit::keyboard::KeyCode;
+use crate::keybindings::{Action, Binding, Bindings};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use winit::event::MouseButton;
+use winit::keyboard::KeyCode;
 
 /// True if a DOM overlay wants keyboard focus (the voice-feedback modal, or the
 /// gamestr leaderboard opt-in shown at a scenario's end). The engine suppresses
@@ -35,7 +38,14 @@ pub fn dom_overlay_blocks_input() -> bool {
 }
 
 pub struct InputState {
-    keys_held: ahash::AHashSet<KeyCode>,
+    /// Every key and mouse button down now. Held actions ask whether their
+    /// binding is in here, so a held action can be a key or a mouse button.
+    held: ahash::AHashSet<Binding>,
+    /// The live bindings (Settings → Controls). Every press, release and held
+    /// read goes through them; the defaults are the shipped controls.
+    bindings: Arc<Bindings>,
+    /// The stored overrides `bindings` was built from (see [`InputState::apply_overrides`]).
+    overrides_applied: Option<BTreeMap<String, String>>,
     pub mouse_dx: f64,
     pub mouse_dy: f64,
     pub cursor_captured: bool,
@@ -46,10 +56,12 @@ pub struct InputState {
     last_w_press: Option<web_time::Instant>,
     /// Sprint active (toggled by double-tap W, cleared when W released).
     pub sprinting: bool,
-    /// Mouse button clicks (consumed per frame — true only on press frame).
+    /// Attack / Use presses (consumed per frame — true only on the press
+    /// frame). Named for their default mouse buttons; they follow the Attack
+    /// and Use bindings, a key or any mouse button.
     pub left_click: bool,
     pub right_click: bool,
-    /// Mouse button held state (true while button is down).
+    /// Attack / Use held (true while the binding is down).
     pub left_held: bool,
     pub right_held: bool,
     /// Hotbar slot selection (0-8), None if no change this frame.
@@ -157,7 +169,9 @@ pub struct InputState {
 impl InputState {
     pub fn new() -> Self {
         Self {
-            keys_held: ahash::AHashSet::new(),
+            held: ahash::AHashSet::new(),
+            bindings: Arc::new(Bindings::defaults()),
+            overrides_applied: None,
             mouse_dx: 0.0,
             mouse_dy: 0.0,
             cursor_captured: false,
@@ -208,212 +222,219 @@ impl InputState {
         }
     }
 
+    /// The live bindings.
+    pub fn bindings(&self) -> &Arc<Bindings> {
+        &self.bindings
+    }
+
+    /// Use these bindings from now on (tests; the game goes through
+    /// [`InputState::apply_overrides`]).
+    #[cfg(test)]
+    pub fn set_bindings(&mut self, bindings: Arc<Bindings>) {
+        self.bindings = bindings;
+    }
+
+    /// Rebuild the bindings from the stored overrides
+    /// (`GraphicsSettings::key_bindings`) when they differ from the ones in
+    /// use. Returns what the stored map had that was ignored (for one log
+    /// line) when it rebuilt, `None` when nothing changed.
+    pub fn apply_overrides(&mut self, overrides: &BTreeMap<String, String>) -> Option<Vec<String>> {
+        if self.overrides_applied.as_ref() == Some(overrides) {
+            return None;
+        }
+        let (bindings, ignored) = Bindings::from_overrides(overrides);
+        self.bindings = Arc::new(bindings);
+        self.overrides_applied = Some(overrides.clone());
+        Some(ignored)
+    }
+
+    /// A physical key went down.
     pub fn key_pressed(&mut self, key: KeyCode) {
-        self.keys_held.insert(key);
-
-        // Double-tap space detection for creative flight (Spec 05 Section 1.7).
-        // Window widened 300 → 450 ms (2026-06-16 playtest: Axolittle "to come out
-        // of flying you have to double-tap space really quickly") — easier for a
-        // kid to trigger the toggle without fumbling the timing.
-        if key == KeyCode::Space {
-            let now = web_time::Instant::now();
-            if let Some(last) = self.last_space_press
-                && now.duration_since(last).as_millis() < 450 {
-                    self.toggle_flight = true;
-                }
-            self.last_space_press = Some(now);
-        }
-
-        // Double-tap W to sprint (like Minecraft)
-        if key == KeyCode::KeyW {
-            let now = web_time::Instant::now();
-            if let Some(last) = self.last_w_press
-                && now.duration_since(last).as_millis() < 300 {
-                    self.sprinting = true;
-                }
-            self.last_w_press = Some(now);
-        }
-
-        // Inventory toggle (also Spec 24 Phase 8 ghost-rotate CW — context
-        // overload resolved by `ghost_state.is_some()` in game_loop).
-        if key == KeyCode::KeyE {
-            self.inventory_toggle = true;
-            self.rotate_ghost_cw = true;
-        }
-
-        // Spec 28f — Inventory Explorer overlay toggle. Skin painter (2026-09-06)
-        // — B also walks the shading brushes. Context-overload in the same shape
-        // as E (inventory / ghost-rotate): the Explorer is suppressed while an
-        // avatar paint session is open, so exactly one of the two ever fires.
-        if key == KeyCode::KeyB {
-            self.explorer_toggle = true;
-            self.workshop_tool_cycle = true;
-        }
-
-        // Skin painter (2026-09-06) — F toggles the Fill tool. Consumed only
-        // while an avatar paint session is open; F is free of any other handler
-        // (F5/F6/F8-F12 are function keys, not KeyF).
-        if key == KeyCode::KeyF {
-            self.workshop_fill = true;
-            self.swap_hands = true;
-        }
-
-        // Skin painter (2026-09-06) — L shows/hides the texel grid + the hover
-        // footprint box. Consumed only while an avatar paint session is open;
-        // L has no other handler anywhere in the game.
-        if key == KeyCode::KeyL {
-            self.workshop_grid = true;
-        }
-
-        // Workshop Phase 3 — eyedropper (grab colour off crosshair cell).
-        if key == KeyCode::KeyG {
-            self.workshop_eyedropper = true;
-        }
-
-        // Workshop Phase 3 — cycle edit-symmetry mode. #6 — also flags the
-        // full-screen map toggle; game_loop picks one by context (Workshop vs not).
-        if key == KeyCode::KeyM {
-            self.workshop_cycle_symmetry = true;
-            self.map_toggle = true;
-        }
-
-        // Wave 6 — J toggles the challenge board (feature-coverage Phase 6).
-        if key == KeyCode::KeyJ {
-            self.challenge_board_toggle = true;
-        }
-
-        // Satoshi — N (for Nakamoto) summons the guide to you (he walks over);
-        // press again to send him home. Pull-first co-presence.
-        if key == KeyCode::KeyN {
-            self.satoshi_summon = true;
-        }
-
-        // H toggles the in-game objective / help pop-up (what to do + progress).
-        if key == KeyCode::KeyH {
-            self.help_panel = true;
-        }
-
-        // #19 — Y toggles the Rig Studio.
-        if key == KeyCode::KeyY {
-            self.rig_studio_toggle = true;
-        }
-
-        // Workshop Phase 4 — pin the locked working copy (P).
-        if key == KeyCode::KeyP {
-            self.workshop_pin = true;
-        }
-
-        // Workshop Phase 5 Task 6 — open/close the Wardrobe panel (K).
-        if key == KeyCode::KeyK {
-            self.workshop_gallery = true;
-        }
-
-        // Workshop §6 (2026-06-18) — toggle Paint/Sculpt edit mode (V). Paint
-        // is the safe default; you must press V to enter Sculpt before any
-        // carving can happen, so a textured block can't be chipped by accident.
-        if key == KeyCode::KeyV {
-            self.workshop_toggle_mode = true;
-        }
-
-        // Skin-paint (2026-06-30) — Z undoes the last avatar paint stroke;
-        // X redoes it (Campaign S). Z stays UNCONDITIONAL — Shift is the
-        // fly-descend key, naturally held while painting mid-air, so a
-        // Shift-modified chord would steal undos (review fix). X sits right
-        // next to Z and is free of any existing handler.
-        if key == KeyCode::KeyZ {
-            self.workshop_undo = true;
-        }
-        if key == KeyCode::KeyX {
-            self.workshop_redo = true;
-        }
-
-        // Campaign S — O toggles the skin-paint colour picker (only consumed
-        // while an avatar paint session is open; free otherwise). NOT C —
-        // C is the global hold-to-zoom (#44), which a kid uses for detail
-        // work on the mannequin (review fix).
-        if key == KeyCode::KeyO {
-            self.workshop_picker = true;
-        }
-
-        // Skin paint panel (2026-07-25) — Tab opens the colour wheel + options.
-        // game_loop consumes this ONLY while a skin-paint session is open, so a
-        // future hold-Tab server scoreboard needs no rebinding.
-        if key == KeyCode::Tab {
-            self.workshop_paint_panel = true;
-        }
-        // R separates the mannequin's limbs (8 of 36 faces are otherwise
-        // unreachable — see skin_pose). Avatar paint session only.
-        if key == KeyCode::KeyR {
-            self.workshop_limbs = true;
-        }
-
-        // Third-person camera (Phase 1) — F5 cycles the perspective.
-        if key == KeyCode::F5 {
-            self.camera_cycle = true;
-        }
-
-        // Cinematic Director (Phase 1) — edge keys (game_loop only acts on these
-        // while the Director is active, so they don't disturb normal play).
-        match key {
-            KeyCode::F6 => self.director_toggle = true,
-            KeyCode::F9 => self.director_mode_next = true,
-            KeyCode::F8 => self.director_hud_toggle = true,
-            KeyCode::Enter => self.director_keyframe_drop = true,
-            KeyCode::F12 => self.director_path_play = true,
-            KeyCode::Backspace => self.director_clear_path = true,
-            KeyCode::F10 => self.director_target_next = true,
-            KeyCode::F4 => self.replay_record_toggle = true,
-            _ => {}
-        }
-
-        // Drop one of the held hotbar item (Minecraft Q convention; also
-        // Spec 24 Phase 8 ghost-rotate CCW under the same context overload).
-        if key == KeyCode::KeyQ {
-            self.drop_item = true;
-            self.rotate_ghost_ccw = true;
-        }
-
-        // Number keys for hotbar selection
-        match key {
-            KeyCode::Digit1 => self.hotbar_select = Some(0),
-            KeyCode::Digit2 => self.hotbar_select = Some(1),
-            KeyCode::Digit3 => self.hotbar_select = Some(2),
-            KeyCode::Digit4 => self.hotbar_select = Some(3),
-            KeyCode::Digit5 => self.hotbar_select = Some(4),
-            KeyCode::Digit6 => self.hotbar_select = Some(5),
-            KeyCode::Digit7 => self.hotbar_select = Some(6),
-            KeyCode::Digit8 => self.hotbar_select = Some(7),
-            KeyCode::Digit9 => self.hotbar_select = Some(8),
-            _ => {}
-        }
+        self.press(Binding::Key(key));
     }
 
+    /// A physical key came up.
     pub fn key_released(&mut self, key: KeyCode) {
-        self.keys_held.remove(&key);
-        // Stop sprinting when W is released
-        if key == KeyCode::KeyW {
-            self.sprinting = false;
-        }
+        self.release(Binding::Key(key));
     }
 
+    /// Is this physical key down? (Bindings ask [`InputState::action_held`].)
     pub fn is_held(&self, key: KeyCode) -> bool {
-        self.keys_held.contains(&key)
+        self.held.contains(&Binding::Key(key))
+    }
+
+    /// Is the action's binding down now?
+    pub fn action_held(&self, action: Action) -> bool {
+        self.held.contains(&self.bindings.binding_for(action))
     }
 
     pub fn mouse_button_pressed(&mut self, button: MouseButton) {
-        match button {
-            MouseButton::Left => { self.left_click = true; self.left_held = true; }
-            MouseButton::Right => { self.right_click = true; self.right_held = true; }
-            MouseButton::Middle => self.pick_block = true,
-            _ => {}
+        if let Some(b) = Binding::from_mouse(button) {
+            self.press(b);
         }
     }
 
     pub fn mouse_button_released(&mut self, button: MouseButton) {
-        match button {
-            MouseButton::Left => self.left_held = false,
-            MouseButton::Right => self.right_held = false,
-            _ => {}
+        if let Some(b) = Binding::from_mouse(button) {
+            self.release(b);
+        }
+    }
+
+    /// A key or mouse button went down: every context's action bound to it
+    /// sets its flag; `game_loop` picks the one its context wants (E opens the
+    /// inventory, or turns a plan ghost while one is up).
+    fn press(&mut self, binding: Binding) {
+        self.held.insert(binding);
+        let bindings = Arc::clone(&self.bindings);
+        for action in bindings.actions_for(binding) {
+            self.press_action(action);
+        }
+    }
+
+    fn release(&mut self, binding: Binding) {
+        self.held.remove(&binding);
+        let bindings = Arc::clone(&self.bindings);
+        for action in bindings.actions_for(binding) {
+            match action {
+                // Sprinting stops when Forward is let go.
+                Action::Forward => self.sprinting = false,
+                Action::Attack => self.left_held = false,
+                Action::Use => self.right_held = false,
+                _ => {}
+            }
+        }
+    }
+
+    fn press_action(&mut self, action: Action) {
+        if let Some(slot) = action.hotbar_slot() {
+            self.hotbar_select = Some(slot);
+            return;
+        }
+        match action {
+            // Double-tap Jump toggles creative flight (Spec 05 Section 1.7).
+            // Window widened 300 → 450 ms (2026-06-16 playtest: Axolittle "to come out
+            // of flying you have to double-tap space really quickly") — easier for a
+            // kid to trigger the toggle without fumbling the timing.
+            Action::Jump => {
+                let now = web_time::Instant::now();
+                if let Some(last) = self.last_space_press
+                    && now.duration_since(last).as_millis() < 450 {
+                        self.toggle_flight = true;
+                    }
+                self.last_space_press = Some(now);
+            }
+            // Double-tap Forward to sprint (like Minecraft).
+            Action::Forward => {
+                let now = web_time::Instant::now();
+                if let Some(last) = self.last_w_press
+                    && now.duration_since(last).as_millis() < 300 {
+                        self.sprinting = true;
+                    }
+                self.last_w_press = Some(now);
+            }
+            Action::Attack => {
+                self.left_click = true;
+                self.left_held = true;
+            }
+            Action::Use => {
+                self.right_click = true;
+                self.right_held = true;
+            }
+            Action::PickBlock => self.pick_block = true,
+            // Inventory (E): shares its default key with the plan ghost's
+            // clockwise turn (Spec 24 Phase 8); `ghost_state.is_some()` in
+            // game_loop picks one.
+            Action::Inventory => self.inventory_toggle = true,
+            Action::PlanRotateCw => self.rotate_ghost_cw = true,
+            // Drop one of the held hotbar item (Minecraft Q convention); Q also
+            // turns a plan ghost anticlockwise under the same context overload.
+            Action::Drop => self.drop_item = true,
+            Action::PlanRotateCcw => self.rotate_ghost_ccw = true,
+            // Spec 28f — Inventory Explorer. Shares B with the skin painter's
+            // brush cycle; the Explorer is suppressed while an avatar paint
+            // session is open, so exactly one of the two ever fires.
+            Action::Explorer => self.explorer_toggle = true,
+            Action::PaintTool => self.workshop_tool_cycle = true,
+            // F: swap hands, or the skin painter's Fill (the paint session
+            // consumes Fill; game_loop ignores the swap while one is open).
+            Action::SwapHands => self.swap_hands = true,
+            Action::PaintFill => self.workshop_fill = true,
+            // L: the painter's texel grid + hover footprint.
+            Action::PaintGrid => self.workshop_grid = true,
+            // Workshop Phase 3 — eyedropper (grab colour off crosshair cell).
+            Action::WorkshopPickColour => self.workshop_eyedropper = true,
+            // Workshop Phase 3 — cycle edit-symmetry mode. #6 — M is also the
+            // full-screen map; game_loop picks one by context (Workshop or not).
+            Action::WorkshopMirror => self.workshop_cycle_symmetry = true,
+            Action::Map => self.map_toggle = true,
+            // Wave 6 — the challenge board (feature-coverage Phase 6).
+            Action::Challenges => self.challenge_board_toggle = true,
+            // Satoshi — N (for Nakamoto) summons the guide to you (he walks
+            // over); press again to send him home. Pull-first co-presence.
+            Action::Satoshi => self.satoshi_summon = true,
+            // The in-game objective / help pop-up (what to do + progress).
+            Action::Help => self.help_panel = true,
+            // #19 — the Rig Studio.
+            Action::RigStudio => self.rig_studio_toggle = true,
+            // Workshop Phase 4 — pin the locked working copy.
+            Action::WorkshopPin => self.workshop_pin = true,
+            // Workshop Phase 5 Task 6 — open/close the Wardrobe panel.
+            Action::WorkshopWardrobe => self.workshop_gallery = true,
+            // Workshop §6 (2026-06-18) — toggle Paint/Sculpt edit mode. Paint is
+            // the safe default; Sculpt needs this press first, so a textured
+            // block can't be chipped by accident.
+            Action::WorkshopMode => self.workshop_toggle_mode = true,
+            // Skin-paint — undo / redo the last avatar paint stroke. Undo has
+            // no Shift chord: Shift is the fly-descend key, naturally held
+            // while painting mid-air (review fix).
+            Action::PaintUndo => self.workshop_undo = true,
+            Action::PaintRedo => self.workshop_redo = true,
+            // Campaign S — the skin-paint colour picker (the legacy alias for
+            // the paint panel). Not C — C is the global hold-to-zoom.
+            Action::PaintPicker => self.workshop_picker = true,
+            // The skin paint panel (colour wheel + every option). Consumed
+            // ONLY while a skin-paint session is open.
+            Action::PaintPanel => self.workshop_paint_panel = true,
+            // Separate the mannequin's limbs (8 of 36 faces are otherwise
+            // unreachable — see skin_pose). Avatar paint session only.
+            Action::PaintLimbs => self.workshop_limbs = true,
+            // Third-person camera (Phase 1) — F5 cycles the perspective.
+            Action::CameraView => self.camera_cycle = true,
+            // Cinematic Director (Phase 1) — game_loop only acts on these
+            // while the Director is active, so they don't disturb normal play.
+            Action::DirectorToggle => self.director_toggle = true,
+            Action::DirectorMode => self.director_mode_next = true,
+            Action::DirectorHud => self.director_hud_toggle = true,
+            Action::DirectorKeyframe => self.director_keyframe_drop = true,
+            Action::DirectorPlay => self.director_path_play = true,
+            Action::DirectorClearPath => self.director_clear_path = true,
+            Action::DirectorTarget => self.director_target_next = true,
+            Action::ReplayRecord => self.replay_record_toggle = true,
+            // Held actions are read through `action_held`; chat, Esc, F3, F7
+            // and F11 are handled by `lib.rs` before the press reaches here.
+            Action::Back
+            | Action::Left
+            | Action::Right
+            | Action::Sneak
+            | Action::Sprint
+            | Action::Zoom
+            | Action::FreeLook
+            | Action::PaintLine
+            | Action::Chat
+            | Action::Command
+            | Action::Pause
+            | Action::DebugOverlay
+            | Action::SpawnOverlay
+            | Action::Fullscreen => {}
+            Action::Hotbar1
+            | Action::Hotbar2
+            | Action::Hotbar3
+            | Action::Hotbar4
+            | Action::Hotbar5
+            | Action::Hotbar6
+            | Action::Hotbar7
+            | Action::Hotbar8
+            | Action::Hotbar9 => {}
         }
     }
 
@@ -474,12 +495,12 @@ impl InputState {
     /// Drop every held / continuous input. Called when the window loses focus:
     /// the OS (and the browser, on web) stops delivering key-up and pointer
     /// events while backgrounded, so without this a held movement key stays
-    /// latched in `keys_held` — plus the sprint latch and mouse-button held
+    /// latched in `held` — plus the sprint latch and mouse-button held
     /// state — and the avatar keeps walking when you tab back in. Per-frame edge
     /// flags (left_click, hotbar_select, …) are left alone: they're consumed
     /// each frame and can't be spuriously set while the window is unfocused.
     pub fn release_all_inputs(&mut self) {
-        self.keys_held.clear();
+        self.held.clear();
         self.sprinting = false;
         self.left_held = false;
         self.right_held = false;
@@ -487,42 +508,45 @@ impl InputState {
         self.mouse_dy = 0.0;
     }
 
-    // Convenience methods for movement directions
+    // Convenience methods for movement directions (the bound keys, held).
     pub fn forward(&self) -> bool {
-        self.is_held(KeyCode::KeyW)
+        self.action_held(Action::Forward)
     }
 
     pub fn backward(&self) -> bool {
-        self.is_held(KeyCode::KeyS)
+        self.action_held(Action::Back)
     }
 
     pub fn left(&self) -> bool {
-        self.is_held(KeyCode::KeyA)
+        self.action_held(Action::Left)
     }
 
     pub fn right_key(&self) -> bool {
-        self.is_held(KeyCode::KeyD)
+        self.action_held(Action::Right)
     }
 
     pub fn jump(&self) -> bool {
-        self.is_held(KeyCode::Space)
+        self.action_held(Action::Jump)
     }
 
     pub fn sneak(&self) -> bool {
-        self.is_held(KeyCode::ShiftLeft)
+        self.action_held(Action::Sneak)
     }
 
-    /// Either Shift held — the skin painter's straight-line modifier
-    /// (Shift+click rules a line from the last painted texel). Separate from
-    /// [`InputState::sneak`] so the two meanings can diverge: sneak is a
-    /// gameplay verb that a gamepad/touch pad can also assert, this is
-    /// specifically "the keyboard modifier key is down".
+    /// The skin painter's straight-line modifier (Shift+click rules a line
+    /// from the last painted texel): the Workshop's "Straight line" binding
+    /// held. While that is Left Shift (the default), Right Shift works too, as
+    /// it always has. Separate from [`InputState::sneak`] so the two meanings
+    /// can diverge: sneak is a gameplay verb that a gamepad/touch pad can also
+    /// assert, this is specifically the painter's keyboard modifier.
     pub fn shift_held(&self) -> bool {
-        self.is_held(KeyCode::ShiftLeft) || self.is_held(KeyCode::ShiftRight)
+        self.action_held(Action::PaintLine)
+            || (self.bindings.binding_for(Action::PaintLine) == Binding::Key(KeyCode::ShiftLeft)
+                && self.is_held(KeyCode::ShiftRight))
     }
 
     pub fn sprint(&self) -> bool {
-        self.sprinting || self.is_held(KeyCode::ControlLeft)
+        self.sprinting || self.action_held(Action::Sprint)
     }
 
     /// Produce a PlayerIntent from the current keyboard/mouse state.
@@ -745,5 +769,131 @@ mod tests {
         assert!(!input.right_held, "right button held state cleared");
         assert_eq!(input.mouse_dx, 0.0, "accumulated look-delta discarded");
         assert_eq!(input.mouse_dy, 0.0, "accumulated look-delta discarded");
+    }
+
+    // ── Remapping (Settings → Controls, Spec 05 §1.9) ──────────────────────
+
+    use crate::keybindings::{Action, Binding, Bindings, Rebind};
+
+    /// An InputState whose bindings have `action` moved to `to`.
+    fn remapped(action: Action, to: Binding) -> InputState {
+        let mut b = Bindings::defaults();
+        assert!(matches!(b.rebind(action, to), Rebind::Bound | Rebind::Swapped { .. }));
+        let mut input = InputState::new();
+        input.set_bindings(std::sync::Arc::new(b));
+        input
+    }
+
+    #[test]
+    fn a_remapped_hotbar_key_selects_its_slot_and_the_old_key_does_not() {
+        let mut input = remapped(Action::Hotbar1, Binding::Key(KeyCode::KeyZ));
+        input.key_pressed(KeyCode::KeyZ);
+        assert_eq!(input.hotbar_select, Some(0), "Z now selects the first slot");
+        input.end_frame();
+        input.key_pressed(KeyCode::Digit1);
+        assert_eq!(input.hotbar_select, None, "1 no longer does");
+        input.key_pressed(KeyCode::Digit2);
+        assert_eq!(input.hotbar_select, Some(1), "the other slots keep their keys");
+        // A hotbar slot can be a mouse button too.
+        let mut input = remapped(Action::Hotbar1, Binding::Mouse(MouseButton::Back));
+        input.mouse_button_pressed(MouseButton::Back);
+        assert_eq!(input.hotbar_select, Some(0), "Mouse 4 selects the first slot");
+    }
+
+    #[test]
+    fn remapped_forward_moves_the_player() {
+        let mut input = remapped(Action::Forward, Binding::Key(KeyCode::ArrowUp));
+        input.key_pressed(KeyCode::KeyW);
+        assert!(!input.forward(), "W no longer walks");
+        assert_eq!(input.to_intent().move_forward, 0.0);
+        input.key_released(KeyCode::KeyW);
+        input.key_pressed(KeyCode::ArrowUp);
+        assert!(input.forward(), "Up walks");
+        let intent = input.to_intent();
+        assert_eq!(intent.move_forward, 1.0);
+        // The body really walks: a stone floor, a second of the held key.
+        let mut world = crate::world::World::new();
+        let registry = crate::block::BlockRegistry::new();
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_block(x, 63, z, crate::block::STONE);
+            }
+        }
+        let cam = crate::camera::Camera::new(glam::Vec3::new(0.0, 64.0, 0.0), 1.0);
+        let mut body = crate::physics::Player::new(glam::Vec3::new(0.0, 64.0, 0.0));
+        for _ in 0..20 {
+            body.tick(&intent, &cam, &world, &registry, crate::play_mode::PlayMode::Survival);
+        }
+        assert!(body.pos.z < -1.0, "held Up walks forward (-Z at yaw 0): {:?}", body.pos);
+        // Double-tap sprint follows the new key, and letting it go stops it.
+        let mut input = remapped(Action::Forward, Binding::Key(KeyCode::ArrowUp));
+        input.key_pressed(KeyCode::ArrowUp);
+        input.key_released(KeyCode::ArrowUp);
+        input.key_pressed(KeyCode::ArrowUp);
+        assert!(input.sprinting, "double-tap Up sprints");
+        input.key_released(KeyCode::ArrowUp);
+        assert!(!input.sprinting);
+    }
+
+    #[test]
+    fn a_mouse_button_can_attack_a_key_can_use_and_any_action_takes_a_button() {
+        let mut input = remapped(Action::Attack, Binding::Mouse(MouseButton::Back));
+        input.mouse_button_pressed(MouseButton::Left);
+        assert!(!input.to_intent().break_block, "left click no longer attacks");
+        input.mouse_button_released(MouseButton::Left);
+        input.mouse_button_pressed(MouseButton::Back);
+        assert!(input.left_click && input.to_intent().break_block, "Mouse 4 attacks");
+        input.mouse_button_released(MouseButton::Back);
+        assert!(!input.to_intent().break_block, "letting go stops the hold");
+
+        let mut input = remapped(Action::Use, Binding::Key(KeyCode::KeyU));
+        input.key_pressed(KeyCode::KeyU);
+        assert!(input.right_click && input.to_intent().place_block, "U uses");
+        input.key_released(KeyCode::KeyU);
+        assert!(!input.right_held);
+
+        let mut input = remapped(Action::Inventory, Binding::Mouse(MouseButton::Forward));
+        input.mouse_button_pressed(MouseButton::Forward);
+        assert!(input.inventory_toggle, "Mouse 5 opens the inventory");
+    }
+
+    #[test]
+    fn held_reads_and_focus_loss_follow_the_bindings() {
+        let mut input = remapped(Action::Sneak, Binding::Mouse(MouseButton::Back));
+        input.mouse_button_pressed(MouseButton::Back);
+        assert!(input.sneak() && input.action_held(Action::Sneak));
+        input.release_all_inputs();
+        assert!(!input.sneak(), "focus loss drops a held mouse binding too");
+
+        let mut input = remapped(Action::Zoom, Binding::Key(KeyCode::KeyV));
+        input.key_pressed(KeyCode::KeyC);
+        assert!(!input.action_held(Action::Zoom), "C no longer zooms");
+        input.key_pressed(KeyCode::KeyV);
+        assert!(input.action_held(Action::Zoom), "V zooms");
+    }
+
+    #[test]
+    fn a_remap_in_one_context_leaves_the_other_contexts_alone() {
+        // Drop moves to G: Q still turns a plan ghost anticlockwise, and G still
+        // picks a Workshop colour as well as dropping.
+        let mut input = remapped(Action::Drop, Binding::Key(KeyCode::KeyG));
+        input.key_pressed(KeyCode::KeyQ);
+        assert!(!input.drop_item && input.rotate_ghost_ccw);
+        input.end_frame();
+        input.key_pressed(KeyCode::KeyG);
+        assert!(input.drop_item && input.workshop_eyedropper && !input.rotate_ghost_ccw);
+    }
+
+    #[test]
+    fn stored_overrides_rebuild_the_bindings_once() {
+        let mut input = InputState::new();
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("drop".to_string(), "KeyG".to_string());
+        map.insert("no_such_control".to_string(), "KeyP".to_string());
+        let ignored = input.apply_overrides(&map).expect("a new map rebuilds");
+        assert_eq!(ignored.len(), 1, "the unknown id is reported: {ignored:?}");
+        assert!(input.apply_overrides(&map).is_none(), "the same map again does nothing");
+        input.key_pressed(KeyCode::KeyG);
+        assert!(input.drop_item);
     }
 }

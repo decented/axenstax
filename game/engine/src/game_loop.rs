@@ -1955,6 +1955,15 @@ impl super::GameState {
         self.graphics.save();
     }
 
+    /// Settings → Controls (Spec 05 §1.9): rebuild the live key bindings when
+    /// the stored overrides differ from the ones in use (a capture, Reset all),
+    /// logging once what a bad file had that was ignored.
+    pub(crate) fn sync_key_bindings(&mut self) {
+        if let Some(ignored) = self.input.apply_overrides(&self.graphics.key_bindings) {
+            crate::keybindings::log_ignored(&ignored);
+        }
+    }
+
     /// Exhibits — per-world art lifecycle. On first
     /// entry to a world that has authored exhibits it builds every quad and kicks
     /// off the image loads; each frame it drains any async-decoded images (WASM)
@@ -3646,7 +3655,10 @@ impl super::GameState {
             .as_ref()
             .is_some_and(|s| s.def().kind == crate::scenario::ScenarioKind::Challenge);
         let toast_msg = if is_challenge {
-            format!("🎯 Trial: {name} — press H for what to do")
+            format!(
+                "🎯 Trial: {name} — press {} for what to do",
+                self.input.bindings().hint(crate::keybindings::Action::Help)
+            )
         } else {
             format!("Experience started: {name}")
         };
@@ -7222,12 +7234,14 @@ impl super::GameState {
         // modal, so this never blocks the toggle from working in normal play.
         if self.input.satoshi_summon && !self.p0_ui_modal_open() {
             let msg = match crate::satoshi::toggle_summon(&mut self.ecs) {
-                Some(true) => "Satoshi is on his way.",
-                Some(false) => "Satoshi heads back home.",
-                None => "Satoshi isn't in this world — press H for the objective.",
+                Some(true) => "Satoshi is on his way.".to_string(),
+                Some(false) => "Satoshi heads back home.".to_string(),
+                None => format!(
+                    "Satoshi isn't in this world — press {} for the objective.",
+                    self.input.bindings().hint(crate::keybindings::Action::Help)
+                ),
             };
-            self.toast =
-                Some((msg.to_string(), Instant::now() + std::time::Duration::from_secs(3)));
+            self.toast = Some((msg, Instant::now() + std::time::Duration::from_secs(3)));
         }
 
         // H toggles the in-game objective / help pop-up — "what do I do + how far
@@ -7394,7 +7408,7 @@ impl super::GameState {
             slot.camera.recenter_speed = self.graphics.auto_centre_speed;
             slot.camera.recenter_delay = self.graphics.auto_centre_delay;
             if self.graphics.third_person_freelook {
-                let steering = i == 0 && self.input.is_held(winit::keyboard::KeyCode::AltLeft);
+                let steering = i == 0 && self.input.action_held(crate::keybindings::Action::FreeLook);
                 let speed = glam::Vec2::new(slot.player.velocity.x, slot.player.velocity.z).length();
                 slot.camera.tick_auto_recenter(steering, speed, tick_dt);
             }
@@ -8034,12 +8048,12 @@ impl super::GameState {
     /// Cinematic Director (Phase 1) — slot 0 only, once per frame. Handles the F6
     /// toggle (seamless enter from the current view / exit), the edge keys
     /// (mode/hud/keyframe/play/clear/target), and the per-frame fly update. Reads
-    /// held WASD/Space/Shift + the raw mouse delta directly (the modal gate zeroes
-    /// the body intent, not `keys_held`/`mouse_dx`), so the avatar stays frozen
+    /// the held movement, jump, sneak and sprint bindings + the raw mouse delta
+    /// directly (the modal gate zeroes the body intent, not the held keys or
+    /// `mouse_dx`), so the avatar stays frozen
     /// while the detached camera flies. Never mutates `slot.camera`.
     #[cfg(not(target_arch = "wasm32"))]
     fn tick_director(&mut self) {
-        use winit::keyboard::KeyCode;
         if self.input.director_toggle {
             if self.director.active {
                 self.director.active = false;
@@ -8096,10 +8110,10 @@ impl super::GameState {
         let inp = crate::director::DirectorInputs {
             look_dx: self.input.mouse_dx as f32 * sens,
             look_dy: self.input.mouse_dy as f32 * sens,
-            fwd: axis(self.input.is_held(KeyCode::KeyW), self.input.is_held(KeyCode::KeyS)),
-            right: axis(self.input.is_held(KeyCode::KeyD), self.input.is_held(KeyCode::KeyA)),
-            up: axis(self.input.is_held(KeyCode::Space), self.input.is_held(KeyCode::ShiftLeft)),
-            sprint: self.input.is_held(KeyCode::ControlLeft),
+            fwd: axis(self.input.forward(), self.input.backward()),
+            right: axis(self.input.right_key(), self.input.left()),
+            up: axis(self.input.jump(), self.input.sneak()),
+            sprint: self.input.action_held(crate::keybindings::Action::Sprint),
         };
         let targets: Vec<crate::director::TargetSnapshot> = self
             .players
@@ -8475,6 +8489,9 @@ impl super::GameState {
     pub(crate) fn update_and_render(&mut self) {
         // Touch: hide the buttons and drop held fingers while dead / in a menu.
         self.sync_touch_gate();
+        // Settings → Controls: a capture or Reset all changed the stored
+        // bindings (a no-op compare otherwise).
+        self.sync_key_bindings();
         // Native: reconcile cursor grab to game state every frame so the OS
         // cursor is hidden during play and only returns for menus/inventory
         // (no more "click to re-grab" after a focus blip). No-op unless Playing.
@@ -8882,8 +8899,9 @@ impl super::GameState {
                                 self.reapply_overrides();
                                 self.wardrobe_dirty = true;
                                 self.wardrobe_user_acted = true;
+                                let wardrobe = self.input.bindings().hint(crate::keybindings::Action::WorkshopWardrobe);
                                 self.chat.push_log(crate::commands::ChatLine::system(
-                                    "Adopted into your Wardrobe — press K and Set active to wear it.",
+                                    format!("Adopted into your Wardrobe — press {wardrobe} and Set active to wear it."),
                                     tick,
                                 ));
                             }
@@ -11561,7 +11579,7 @@ impl super::GameState {
             if pidx == 0 {
                 #[allow(unused_mut)]
                 let mut zoom = self.input.cursor_captured
-                    && self.input.is_held(winit::keyboard::KeyCode::KeyC);
+                    && self.input.action_held(crate::keybindings::Action::Zoom);
                 if crate::touch_input::TOUCH_PLATFORM {
                     zoom |= self.touch.zoom_held;
                 }
@@ -11584,7 +11602,7 @@ impl super::GameState {
                 let cam = &mut self.players[0].camera;
                 let free_looking = self.graphics.third_person_freelook
                     && cam.mode.is_third_person()
-                    && self.input.is_held(winit::keyboard::KeyCode::AltLeft);
+                    && self.input.action_held(crate::keybindings::Action::FreeLook);
                 if free_looking {
                     let fl = sensitivity * self.graphics.freelook_sensitivity;
                     // Mirror `rotate`'s sign convention (yaw/pitch -= delta*sens).
@@ -19941,6 +19959,8 @@ impl super::GameState {
                         &data,
                         &self.registry,
                         &self.renderer.egui,
+                        self.input.bindings(),
+                        pidx == 0 && self.input.inventory_toggle,
                     );
                     match outcome {
                         crate::furnace_ui::FurnaceUiOutcome::Closed => {
@@ -21473,6 +21493,7 @@ impl super::GameState {
                             &self.renderer.egui.ctx,
                             &screen.viewport,
                             pidx,
+                            self.input.bindings(),
                         );
                         // The paint panel (Tab) — colour wheel, all 16 dyes, the
                         // eraser and every option, so nothing needs memorising
@@ -21486,6 +21507,7 @@ impl super::GameState {
                                     &screen.viewport,
                                     session,
                                     &self.registry,
+                                    self.input.bindings(),
                                 );
                             }
                             if act.close {
@@ -21501,6 +21523,7 @@ impl super::GameState {
                             &screen.viewport,
                             pidx,
                             self.world.workshop.edit_mode(),
+                            self.input.bindings(),
                         );
                     }
                 }
@@ -21603,6 +21626,7 @@ impl super::GameState {
                             "Free play \u{2014} controls".to_string(),
                             crate::controls::help_sheet_text(
                                 crate::controls::ControlsLayout::current(),
+                                self.input.bindings(),
                             ),
                             String::new(),
                         )
@@ -21613,6 +21637,7 @@ impl super::GameState {
                         &title,
                         &how_to,
                         &progress,
+                        self.input.bindings(),
                     );
                 }
                 // Satoshi's spoken intro card — non-blocking, self-dismissing a few
@@ -21633,6 +21658,7 @@ impl super::GameState {
                             &screen.viewport,
                             title,
                             intro,
+                            self.input.bindings(),
                         );
                     }
                 }
@@ -21817,6 +21843,7 @@ impl super::GameState {
                         &self.renderer.egui.ctx,
                         &screen.viewport,
                         pidx,
+                        self.input.bindings(),
                     );
                 }
             }
@@ -21923,6 +21950,7 @@ impl super::GameState {
                 &self.renderer.egui.ctx,
                 &rows,
                 active,
+                self.input.bindings(),
             );
             if let Some(name) = result.start {
                 self.challenge_board_open = false;
@@ -21945,7 +21973,7 @@ impl super::GameState {
         // button. One table feeds this card and the H help sheet.
         if self.controls_card_open {
             let layout = crate::controls::ControlsLayout::current();
-            if crate::controls::show_controls_card(&self.renderer.egui.ctx, layout) {
+            if crate::controls::show_controls_card(&self.renderer.egui.ctx, layout, self.input.bindings()) {
                 self.dismiss_controls_card();
                 if !self.p0_ui_modal_open() {
                     self.capture_cursor();
@@ -21966,6 +21994,7 @@ impl super::GameState {
                 &self.rig_studio,
                 &self.registry,
                 held_name.as_deref(),
+                self.input.bindings(),
             );
             if let Some(kind) = result.select {
                 self.rig_studio.set_skeleton(kind);
@@ -24733,7 +24762,7 @@ impl super::GameState {
         self.players[i].camera.recenter_speed = self.graphics.auto_centre_speed;
         self.players[i].camera.recenter_delay = self.graphics.auto_centre_delay;
         if self.graphics.third_person_freelook {
-            let steering = i == 0 && self.input.is_held(winit::keyboard::KeyCode::AltLeft);
+            let steering = i == 0 && self.input.action_held(crate::keybindings::Action::FreeLook);
             // Rider velocity is zeroed while mounted, so the orbit eases home.
             self.players[i].camera.tick_auto_recenter(steering, 0.0, tick_dt);
         }

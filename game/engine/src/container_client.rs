@@ -109,6 +109,8 @@ impl crate::GameState {
                     data,
                     &self.registry,
                     &self.renderer.egui,
+                    self.input.bindings(),
+                    pidx == 0 && self.input.inventory_toggle,
                 ) {
                     crate::furnace_ui::FurnaceUiOutcome::Closed => closed = true,
                     crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode } => {

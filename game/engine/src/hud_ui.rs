@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use crate::block::BlockRegistry;
+use crate::keybindings::{Action, Bindings};
 use crate::egui_integration::EguiIntegration;
 use crate::inventory::Inventory;
 use crate::item::Item;
@@ -149,8 +150,30 @@ pub fn draw_plan_hint(ctx: &egui::Context, viewport: &ViewportRect, player_index
         });
 }
 
+/// The ghost placer's one line, its keys as bound.
+pub fn ghost_controls_text(keys: &Bindings) -> String {
+    format!(
+        "{}: build here  ·  {}/{}: rotate  ·  {}: cancel",
+        sentence_case(&keys.hint(Action::Attack)),
+        keys.hint(Action::PlanRotateCcw),
+        keys.hint(Action::PlanRotateCw),
+        sentence_case(&keys.hint(Action::Use)),
+    )
+}
+
+/// "Left click" reads "Left-click" at the start of a hint line, as it always
+/// has; any other label is left as it is.
+fn sentence_case(label: &str) -> String {
+    match label {
+        "Left click" => "Left-click".to_string(),
+        "Right click" => "Right-click".to_string(),
+        "Middle click" => "Middle-click".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// TB-10 — persistent ghost-placement controls (replaces the 4-second toast).
-pub fn draw_ghost_controls(ctx: &egui::Context, viewport: &ViewportRect, player_index: usize) {
+pub fn draw_ghost_controls(ctx: &egui::Context, viewport: &ViewportRect, player_index: usize, keys: &Bindings) {
     let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let origin = egui::pos2(
         vp.x + vp.width / 2.0 - 180.0,
@@ -165,7 +188,7 @@ pub fn draw_ghost_controls(ctx: &egui::Context, viewport: &ViewportRect, player_
                 .fill(egui::Color32::from_rgba_premultiplied(12, 12, 16, 210))
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new("Left-click: build here  ·  Q/E: rotate  ·  Right-click: cancel")
+                        egui::RichText::new(ghost_controls_text(keys))
                             .size(14.0)
                             .color(egui::Color32::LIGHT_GRAY),
                     );
@@ -1616,12 +1639,17 @@ pub fn draw_workshop_edit_hint(
     viewport: &ViewportRect,
     player_index: usize,
     mode: crate::workshop::EditMode,
+    keys: &Bindings,
 ) {
     // §6 (2026-06-18) — lead with the current mode so the kid always knows
     // whether a click paints or carves, and how to switch.
     let hint = format!(
-        "{} mode   ·   V switch   ·   P Pin   ·   M Mirror   ·   G Pick colour",
-        mode.label()
+        "{} mode   ·   {} switch   ·   {} Pin   ·   {} Mirror   ·   {} Pick colour",
+        mode.label(),
+        keys.hint(Action::WorkshopMode),
+        keys.hint(Action::WorkshopPin),
+        keys.hint(Action::WorkshopMirror),
+        keys.hint(Action::WorkshopPickColour),
     );
     let approx_text_w = hint.len() as f32 * 7.5;
     let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
@@ -1653,11 +1681,18 @@ pub fn draw_workshop_avatar_edit_hint(
     ctx: &egui::Context,
     viewport: &ViewportRect,
     player_index: usize,
+    keys: &Bindings,
 ) {
     // One short line, not nine keys: everything else lives in the Tab panel,
     // where each control sits beside its own letter shortcut.
-    let hint =
-        "Left-click paints   ·   B tool   ·   F fill   ·   Tab = colours & options   ·   P pin";
+    let hint = format!(
+        "{} paints   ·   {} tool   ·   {} fill   ·   {} = colours & options   ·   {} pin",
+        sentence_case(&keys.hint(Action::Attack)),
+        keys.hint(Action::PaintTool),
+        keys.hint(Action::PaintFill),
+        keys.hint(Action::PaintPanel),
+        keys.hint(Action::WorkshopPin),
+    );
     let approx_text_w = hint.len() as f32 * 7.5;
     let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let name_y = hud_stack(vp, hud_scale(vp.width)).name_y;
@@ -1670,7 +1705,7 @@ pub fn draw_workshop_avatar_edit_hint(
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(hint)
+                    egui::RichText::new(&hint)
                         .color(egui::Color32::from_rgba_premultiplied(200, 200, 210, 180))
                         .size(13.0),
                 );
@@ -1697,6 +1732,7 @@ pub fn draw_skin_paint_panel(
     viewport: &ViewportRect,
     session: &mut crate::SkinPaintSession,
     registry: &crate::block::BlockRegistry,
+    keys: &Bindings,
 ) -> SkinPanelResult {
     let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let mut out = SkinPanelResult::default();
@@ -1817,6 +1853,8 @@ pub fn draw_skin_paint_panel(
                 // once and the eraser stops being a mode hiding beside a brush.
                 {
                     use crate::skin_paint::PaintTool;
+                    let brush_label = format!("Brush  {}", keys.hint(Action::PaintTool));
+                    let fill_label = format!("Fill  {}", keys.hint(Action::PaintFill));
                     let mut tool_button = |ui: &mut egui::Ui, t: PaintTool, label: &str| {
                         if ui.selectable_label(session.tool == t, label).clicked() {
                             session.tool = t;
@@ -1824,8 +1862,8 @@ pub fn draw_skin_paint_panel(
                     };
                     ui.horizontal(|ui| {
                         ui.label("Tool");
-                        tool_button(ui, PaintTool::Brush, "Brush  B");
-                        tool_button(ui, PaintTool::Fill, "Fill  F");
+                        tool_button(ui, PaintTool::Brush, &brush_label);
+                        tool_button(ui, PaintTool::Fill, &fill_label);
                         tool_button(ui, PaintTool::Eraser, "Eraser");
                     });
                     ui.horizontal(|ui| {
@@ -1838,13 +1876,15 @@ pub fn draw_skin_paint_panel(
                 ui.label(
                     egui::RichText::new(match session.tool {
                         crate::skin_paint::PaintTool::Fill => {
-                            "Floods the whole side you aim at."
+                            "Floods the whole side you aim at.".to_string()
                         }
-                        crate::skin_paint::PaintTool::Eraser => "Rubs it out.",
-                        crate::skin_paint::PaintTool::Lighten => "Makes it paler, a step a click.",
-                        crate::skin_paint::PaintTool::Darken => "Deepens the shade, a step a click.",
-                        crate::skin_paint::PaintTool::Noise => "Speckles the shade for texture.",
-                        crate::skin_paint::PaintTool::Brush => "B cycles the shading brushes.",
+                        crate::skin_paint::PaintTool::Eraser => "Rubs it out.".to_string(),
+                        crate::skin_paint::PaintTool::Lighten => "Makes it paler, a step a click.".to_string(),
+                        crate::skin_paint::PaintTool::Darken => "Deepens the shade, a step a click.".to_string(),
+                        crate::skin_paint::PaintTool::Noise => "Speckles the shade for texture.".to_string(),
+                        crate::skin_paint::PaintTool::Brush => {
+                            format!("{} cycles the shading brushes.", keys.hint(Action::PaintTool))
+                        }
                     })
                     .size(11.0)
                     .color(dim),
@@ -1870,7 +1910,7 @@ pub fn draw_skin_paint_panel(
                     if ui.selectable_label(!session.clothes_on, "off").clicked() {
                         session.clothes_on = false;
                     }
-                    ui.label(egui::RichText::new("V").weak());
+                    ui.label(egui::RichText::new(keys.hint(Action::WorkshopMode)).weak());
                 });
                 ui.label(
                     egui::RichText::new(if session.clothes_on {
@@ -1889,7 +1929,7 @@ pub fn draw_skin_paint_panel(
                     if ui.selectable_label(session.mirror, "on").clicked() {
                         session.mirror = true;
                     }
-                    ui.label(egui::RichText::new("M").weak());
+                    ui.label(egui::RichText::new(keys.hint(Action::WorkshopMirror)).weak());
                 });
                 ui.horizontal(|ui| {
                     ui.label("Size");
@@ -1910,7 +1950,7 @@ pub fn draw_skin_paint_panel(
                     if ui.selectable_label(session.limbs_apart, "apart").clicked() {
                         session.limbs_apart = true;
                     }
-                    ui.label(egui::RichText::new("R").weak());
+                    ui.label(egui::RichText::new(keys.hint(Action::PaintLimbs)).weak());
                 });
                 if !session.limbs_apart {
                     ui.label(
@@ -1961,31 +2001,35 @@ pub fn draw_skin_paint_panel(
                         session.grid.on = false;
                         session.grid.invalidate();
                     }
-                    ui.label(egui::RichText::new("L").weak());
+                    ui.label(egui::RichText::new(keys.hint(Action::PaintGrid)).weak());
                 });
                 ui.separator();
                 ui.label(
-                    egui::RichText::new("Shift+click = straight line   ·   C = zoom")
+                    egui::RichText::new(format!(
+                        "{}+click = straight line   ·   {} = zoom",
+                        keys.hint(Action::PaintLine),
+                        keys.hint(Action::Zoom),
+                    ))
                         .size(11.0)
                         .color(dim),
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("Undo  Z").clicked() {
+                    if ui.button(format!("Undo  {}", keys.hint(Action::PaintUndo))).clicked() {
                         out.undo = true;
                     }
-                    if ui.button("Redo  X").clicked() {
+                    if ui.button(format!("Redo  {}", keys.hint(Action::PaintRedo))).clicked() {
                         out.redo = true;
                     }
                 });
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .button(egui::RichText::new("Pin — wear it   P").strong())
+                        .button(egui::RichText::new(format!("Pin — wear it   {}", keys.hint(Action::WorkshopPin))).strong())
                         .clicked()
                     {
                         out.pin = true;
                     }
-                    if ui.button("Close  Tab").clicked() {
+                    if ui.button(format!("Close  {}", keys.hint(Action::PaintPanel))).clicked() {
                         out.close = true;
                     }
                 });
@@ -2346,6 +2390,7 @@ pub fn draw_objective_panel(
     title: &str,
     how_to: &str,
     progress: &str,
+    keys: &Bindings,
 ) {
     let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let w = 460.0_f32;
@@ -2383,7 +2428,7 @@ pub fn draw_objective_panel(
                     }
                     ui.add_space(10.0);
                     ui.label(
-                        egui::RichText::new("Press H to close")
+                        egui::RichText::new(format!("Press {} to close", keys.hint(Action::Help)))
                             .size(12.0)
                             .color(egui::Color32::from_gray(170)),
                     );
@@ -2395,7 +2440,7 @@ pub fn draw_objective_panel(
 /// the screen when a trial starts (his `intro` from `scenario::trial_satoshi`).
 /// Non-blocking and self-dismissing: a warm "Satoshi:" speech bubble that lets
 /// the kid hear the guide before they glance at the steps (H). Player 0 only.
-pub fn draw_satoshi_brief(ctx: &egui::Context, viewport: &ViewportRect, title: &str, intro: &str) {
+pub fn draw_satoshi_brief(ctx: &egui::Context, viewport: &ViewportRect, title: &str, intro: &str, keys: &Bindings) {
     let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
     let w = 520.0_f32;
     let origin = egui::pos2(
@@ -2432,7 +2477,7 @@ pub fn draw_satoshi_brief(ctx: &egui::Context, viewport: &ViewportRect, title: &
                             );
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new("Press H any time for the steps")
+                                egui::RichText::new(format!("Press {} any time for the steps", keys.hint(Action::Help)))
                                     .size(12.0)
                                     .italics()
                                     .color(egui::Color32::from_gray(165)),
@@ -3429,9 +3474,23 @@ mod phone_placement_tests {
     }
 
     #[test]
+    fn the_ghost_line_names_the_keys_as_bound() {
+        use crate::keybindings::Binding;
+        use winit::keyboard::KeyCode;
+        let mut keys = Bindings::defaults();
+        assert_eq!(
+            ghost_controls_text(&keys),
+            "Left-click: build here  ·  Q/E: rotate  ·  Right-click: cancel",
+            "the shipped line is unchanged"
+        );
+        keys.rebind(Action::PlanRotateCcw, Binding::Key(KeyCode::KeyZ));
+        assert_eq!(ghost_controls_text(&keys), "Left-click: build here  ·  Z/E: rotate  ·  Right-click: cancel");
+    }
+
+    #[test]
     fn the_objective_panel_is_inside_a_phone_screen_and_centred() {
         let rect = placed(phone_viewport(), egui::Id::new("objective_panel"), |ctx, vp| {
-            draw_objective_panel(ctx, vp, "Grey Quarry", "Break the stone", "0 / 3");
+            draw_objective_panel(ctx, vp, "Grey Quarry", "Break the stone", "0 / 3", &Bindings::defaults());
         });
         assert_centred_across(rect, egui::Rangef::new(0.0, SCREEN.x), 460.0, "the objective panel");
         assert!(rect.top() >= 0.0 && rect.bottom() <= SCREEN.y, "the objective panel {rect:?} is off the screen");
@@ -3452,7 +3511,7 @@ mod phone_placement_tests {
         // points 600..1200.
         let right_half = ViewportRect { x: 1800, y: 0, width: 1800, height: 1080 };
         let rect = placed_on(egui::vec2(1200.0, 360.0), right_half, egui::Id::new("objective_panel"), |ctx, vp| {
-            draw_objective_panel(ctx, vp, "Grey Quarry", "Break the stone", "0 / 3");
+            draw_objective_panel(ctx, vp, "Grey Quarry", "Break the stone", "0 / 3", &Bindings::defaults());
         });
         assert_centred_across(rect, egui::Rangef::new(600.0, 1200.0), 460.0, "the objective panel");
     }

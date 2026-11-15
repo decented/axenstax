@@ -52,6 +52,10 @@ mod strict_admission;
 mod audio;
 mod thunder;
 mod controls;
+// Settings → Controls: the one table of what every key and mouse button does,
+// and its Settings list (Spec 05 §1.9).
+mod keybindings;
+mod keybindings_ui;
 mod biome;
 mod bloom;
 mod block;
@@ -740,13 +744,27 @@ pub(crate) fn escape_closes_settings(mode: &mut GameMode, panel: &mut crate::men
             // The page under Settings must not also step back on this press.
             menu.escape_spent = true;
             panel.open = false;
+            panel.controls.cancel();
             true
         }
         GameMode::Paused { .. } if panel.open => {
             panel.open = false;
+            panel.controls.cancel();
             true
         }
         _ => false,
+    }
+}
+
+/// The physical key a key event is, for bindings and the Controls capture.
+/// Android's Back button carries no physical code (winit reports it only as the
+/// logical `BrowserBack`), so it is folded onto Escape here; any other
+/// unidentified key is not ours to interpret.
+fn physical_key_code(physical_key: PhysicalKey, logical_key: &Key) -> Option<KeyCode> {
+    match physical_key {
+        PhysicalKey::Code(code) => Some(code),
+        _ if *logical_key == Key::Named(NamedKey::BrowserBack) => Some(KeyCode::Escape),
+        _ => None,
     }
 }
 
@@ -2122,7 +2140,7 @@ impl GameState {
         #[cfg(target_arch = "wasm32")]
         Self::set_status("Starting game...");
 
-        let input = InputState::new();
+        let mut input = InputState::new();
         let mut audio = crate::audio::AudioEngine::new();
         // Graphics settings for this device. A first run (nothing persisted yet,
         // real window only) starts on the preset the adapter and platform call
@@ -2149,6 +2167,10 @@ impl GameState {
             };
             crate::graphics_settings::GraphicsSettings::load_or_first_run(first_run)
         };
+        // Settings → Controls: the player's key bindings (Spec 05 §1.9).
+        if let Some(ignored) = input.apply_overrides(&graphics.key_bindings) {
+            crate::keybindings::log_ignored(&ignored);
+        }
         // Persisted master volume + mute (per-device, native and web).
         {
             audio.set_master(graphics.master_volume, graphics.audio_muted);
@@ -2764,6 +2786,37 @@ impl ApplicationHandler for App {
             return;
         };
 
+        // Settings → Controls is waiting for a key (Spec 05 §1.9): the next
+        // key or mouse press is the new binding and nothing else sees it, not
+        // egui (Enter must not re-press the focused Change button; Esc cancels
+        // the capture instead of closing Settings) and not the game. A key
+        // repeat is eaten without acting. Touch is never captured.
+        let press = match &event {
+            WindowEvent::KeyboardInput {
+                event: KeyEvent { physical_key, logical_key, state: ElementState::Pressed, repeat, .. },
+                ..
+            } => Some(if *repeat {
+                None
+            } else {
+                physical_key_code(*physical_key, logical_key).map(crate::keybindings_ui::CapturePress::Key)
+            }),
+            WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+                Some(Some(crate::keybindings_ui::CapturePress::Mouse(*button)))
+            }
+            _ => None,
+        };
+        if let Some(press) = press
+            && state.settings_panel.controls.capture_active(state.renderer.egui.ctx.cumulative_pass_nr())
+        {
+            if let Some(press) = press
+                && state.settings_panel.controls.take_press(&mut state.graphics, press).changed
+            {
+                state.graphics.save();
+                state.sync_key_bindings();
+            }
+            return;
+        }
+
         // Pass events to egui first. (Window events only arrive with a real
         // window, so the headless arm of the gate is unreachable in practice.)
         // While the cursor is captured for 3D play, pointer events are withheld
@@ -2912,11 +2965,9 @@ impl ApplicationHandler for App {
                 //
                 // Desktop/web: an unidentified key fell through this arm before
                 // and returns here now — nothing follows the match, so same thing.
-                let key = match physical_key {
-                    PhysicalKey::Code(code) => code,
-                    _ if *logical_key == Key::Named(NamedKey::BrowserBack) => KeyCode::Escape,
+                let Some(key) = physical_key_code(physical_key, logical_key) else {
                     // Any other unidentified key is not ours to interpret.
-                    _ => return,
+                    return;
                 };
                 // Suppress all engine key handling while a DOM overlay (the
                 // voice-feedback modal) has focus. feedback.js handles F6,
@@ -2935,12 +2986,7 @@ impl ApplicationHandler for App {
                 // stuck — the player walks forward after chat closes
                 // without W being held. Releases never trigger gameplay
                 // actions on their own; they only un-set held state.
-                if state.chat.open {
-                    if matches!(key_state, ElementState::Released) {
-                        state.input.key_released(key);
-                    }
-                    return;
-                }
+                //
                 // If an egui widget already consumed this key, it has
                 // keyboard focus — the inventory-explorer search box being
                 // the prime case. Don't ALSO run it as gameplay input, or
@@ -2949,15 +2995,18 @@ impl ApplicationHandler for App {
                 // 2026-05-30 playtest keyboard-trap bug). Same stuck-key
                 // caveat as the chat guard above: always let releases
                 // through so a movement key held when a widget grabbed
-                // focus doesn't latch on.
-                if egui_consumed {
+                // focus doesn't latch on. (`keybindings::route_key`.)
+                if crate::keybindings::route_key(state.chat.open, egui_consumed)
+                    == crate::keybindings::KeyRoute::ReleaseOnly
+                {
                     if matches!(key_state, ElementState::Released) {
                         state.input.key_released(key);
                     }
                     return;
                 }
-                // T or / opens the chat overlay during play. Slash pre-fills
-                // the input so the user can keep typing the command.
+                // Chat (T) or Command (/) opens the chat overlay during play,
+                // as bound (`keybindings::chat_prefix`). Command pre-fills the
+                // slash so the user can keep typing the command.
                 // Gated by `is_commands_enabled` — set per-world via the menu's
                 // Create dialog. Worlds created with Commands: OFF can't open
                 // chat at all (no /give, no /time, no /tp).
@@ -2966,15 +3015,13 @@ impl ApplicationHandler for App {
                     && matches!(state.mode, GameMode::Playing)
                     && state.is_commands_enabled
                     && !state.players.first().map(|p| p.crafting_ui.open).unwrap_or(false)
+                    && let Some(prefix) = crate::keybindings::chat_prefix(
+                        state.input.bindings(),
+                        crate::keybindings::Binding::Key(key),
+                    )
                 {
-                    if key == KeyCode::KeyT {
-                        state.chat.open_with_prefix("");
-                        return;
-                    }
-                    if key == KeyCode::Slash {
-                        state.chat.open_with_prefix("/");
-                        return;
-                    }
+                    state.chat.open_with_prefix(prefix);
+                    return;
                 }
                 match key_state {
                 ElementState::Pressed if !repeat => {
@@ -3240,6 +3287,13 @@ impl ApplicationHandler for App {
                                 // pick runs in the per-player raycast block, which
                                 // has the eye + look ray.
                                 state.collect_requested = true;
+                            } else if let Some(prefix) = crate::keybindings::Binding::from_mouse(button)
+                                .filter(|_| state.is_commands_enabled)
+                                .and_then(|b| crate::keybindings::chat_prefix(state.input.bindings(), b))
+                            {
+                                // Chat or Command bound to a mouse button
+                                // opens chat as its key would.
+                                state.chat.open_with_prefix(prefix);
                             } else {
                                 state.input.mouse_button_pressed(button);
                             }

@@ -93,6 +93,7 @@ pub fn show_rig_studio(
     state: &RigStudioState,
     registry: &BlockRegistry,
     held_name: Option<&str>,
+    keys: &crate::keybindings::Bindings,
 ) -> RigStudioResult {
     let mut result = RigStudioResult::default();
     let mut window_open = true;
@@ -105,7 +106,10 @@ pub fn show_rig_studio(
         .show(ctx, |ui| {
             ui.label(RichText::new("Build an animated creature").size(16.0).strong());
             ui.label(
-                RichText::new("Pick a skeleton, assign a block to each part, then Spawn. Press Y to close.")
+                RichText::new(format!(
+                    "Pick a skeleton, assign a block to each part, then Spawn. Press {} to close.",
+                    keys.hint(crate::keybindings::Action::RigStudio)
+                ))
                     .weak()
                     .size(11.0),
             );
