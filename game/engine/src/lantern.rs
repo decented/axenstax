@@ -169,6 +169,11 @@ pub fn held_mesh(registry: &BlockRegistry) -> Vec<Vertex> {
     .clone()
 }
 
+/// How far the top bar of the held model (the grip of its bail) sits above the
+/// mesh's own middle: the hanging pose puts this at the fist
+/// (`hold_pose::HoldPose::Hanging`). 12.5 sixteenths is the bar's middle.
+pub const HANDLE_HEIGHT: f32 = (12.5 / 16.0 - MESH_CENTRE.y) * HELD_SCALE;
+
 /// The dropped lantern's mesh: the hand's model at [`DROP_SCALE`], centred on itself
 /// (`item_model::ItemLook::Lantern`; the caller spins and lifts it).
 pub fn drop_mesh(registry: &BlockRegistry) -> Vec<Vertex> {

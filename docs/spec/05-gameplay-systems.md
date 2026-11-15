@@ -1359,7 +1359,8 @@ second by hand.
 - **Look (Spec 03 §5.10).** A small sub-voxel model (a dark iron frame, a grey cap, a warm yellow core between four
   corner posts, and a bail), painted from existing texture layers only: the web build's array is exactly full at 512
   layers. In a hand and on the ground it is drawn as that small model, not as a flat sprite or a cube; a slot shows a drawn
-  lantern icon, and a framed one is the small cube.
+  lantern icon, and a framed one is the small cube. Carried, it hangs by its handle from a slightly raised hand
+  (Spec 03, `hold_pose`).
 
 **Carried light (presentation only).** A light held in either hand lights the world round its holder, for every player
 who can see it.

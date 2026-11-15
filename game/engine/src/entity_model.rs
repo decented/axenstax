@@ -1699,6 +1699,16 @@ pub fn build_player_avatar_vertices_travelling(
         {
             arm_override = Some(crate::shield_pose::GUARD_ARM_ANGLE);
         }
+        // A hanging item lifts its hand's forearm a little, on top of whatever the arm
+        // is doing (the walk cycle, the airborne lift, an attack swing), so the held
+        // item still rides the arm's own angle in every pose (`part_angle` below).
+        if i == LEFT_ARM_INDEX || i == RIGHT_ARM_INDEX {
+            let wire = if i == RIGHT_ARM_INDEX { main_wire } else { off_wire };
+            let lift = crate::hold_pose::hold_pose(crate::item_model::HeldItem::from_wire(wire)).arm_raise();
+            if lift != 0.0 {
+                arm_override = Some(arm_override.unwrap_or(walk_swing) + lift);
+            }
+        }
         let pose = PartPose { walk_swing, head_pitch: ps.pitch, arm_override, ..Default::default() };
         if let Some(slot) = part_angle.get_mut(i) {
             *slot = arm_override.unwrap_or(walk_swing);
@@ -1753,10 +1763,11 @@ pub fn build_player_avatar_vertices_travelling(
         let arm_pivot = arm.pivot;
         let x_rot = part_angle[side.arm_index()];
         let mut item_verts = crate::item_model::held_item_mesh(held, registry, side);
+        let pose = crate::hold_pose::hold_pose(held);
         // Off-hand release (slice 5) — a shield is placed by its own pose (worn on
         // the outside of the forearm, or lifted in front of the raised arm), not
         // hung from the hand anchor.
-        if held.tool == Some(crate::crafting::ToolType::Shield) {
+        if pose == crate::hold_pose::HoldPose::Shield {
             let raised = guard_side == Some(side);
             let m = crate::shield_pose::avatar_transform(arm.origin, arm.size, arm.pivot, side, raised);
             crate::shield_pose::transform_vertices(&mut item_verts, &m);
@@ -1771,6 +1782,18 @@ pub fn build_player_avatar_vertices_travelling(
             }
             for v in &mut item_verts {
                 let p = rotate_model_yaw(Vec3::from(v.position), (sin_y, cos_y));
+                v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
+            }
+            held_verts.extend(item_verts);
+            continue;
+        }
+        // A hanging item (the hand lantern): the hand carries it through the arm's own
+        // angle, but the item stays upright with its handle at the fist and its body
+        // hanging below, like a lantern held by its bail.
+        if let crate::hold_pose::HoldPose::Hanging { handle } = pose {
+            let fist = rot_x_about(hand_anchor, arm_pivot, x_rot) - Vec3::new(0.0, handle, 0.0);
+            for v in &mut item_verts {
+                let p = rotate_model_yaw(Vec3::from(v.position) + fist, (sin_y, cos_y));
                 v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
             }
             held_verts.extend(item_verts);

@@ -1625,6 +1625,15 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   every other block its `tex_top` layer as before. The hotbar, the inventory window and its carried-item painter all go
   through `hud_icons::paint_block_icon`. An audit of every block's `tex_top` found no other block whose icon layer is
   one plain colour.
+- **How a held item is carried (`hold_pose.rs`, pt1115).** One hook, `hold_pose(HeldItem) -> HoldPose`
+  (`Default`, `Shield`, `Hanging { handle }`), is asked by the third-person avatar (`entity_model`) and the first-person
+  hands (`viewmodel`); it is keyed off the held item already on the avatar wire, so no packet, state field or save
+  changes. The shield keeps its own poses (§5.10 "The shield"). The hand lantern is `Hanging` (handle height
+  `lantern::HANDLE_HEIGHT`, 0.21): third person, its forearm lifts `HANGING_ARM_RAISE` (0.5 rad) on top of whatever
+  the arm does (idle, walk, jump, swing), the hand carries it through that angle like any held item, but the item
+  stays upright with its top bar at the fist and the body hanging below. First person, the item hangs from the fist
+  (no lean) and the whole hand is raised `HANGING_FIST_RAISE_NDC` (0.30 of the half-view height) so the body is in view
+  instead of off the bottom edge. A later hanging item (a pail, a bell) joins by returning `Hanging` with its own handle.
 - **The avatar's two hands.** `entity_model::build_player_avatar_vertices_with`
   holds the main-hand item (`held_*`) at the right arm's hand anchor and the
   off-hand item (`off_*`) at the left arm's (index 2), each through the same

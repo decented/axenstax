@@ -51,6 +51,7 @@ use glam::{Mat4, Vec3};
 
 use crate::block::BlockRegistry;
 use crate::entity_model::{self, PartPose};
+use crate::hold_pose::{hold_pose, HoldPose};
 use crate::item_model::{self, HeldItem};
 use crate::mesh::Vertex;
 use crate::protocol::ItemRef;
@@ -212,8 +213,6 @@ pub fn arm_transform(aspect: f32, side: HandSide, bob: f32, swing: f32) -> Mat4 
 fn item_lift(held: ItemRef, registry: &BlockRegistry) -> f32 {
     match held {
         ItemRef::Tool(_) => 0.2,
-        // The hand lantern stands up out of the fist so its glowing core clears the arm.
-        ItemRef::Block(id) if id == crate::block::LANTERN => 0.32,
         other if item_model::held_is_sprite(other, registry) => 0.2,
         _ => 0.15,
     }
@@ -228,6 +227,11 @@ fn item_lift(held: ItemRef, registry: &BlockRegistry) -> f32 {
 fn held_item_placement(held: ItemRef, registry: &BlockRegistry, side: HandSide) -> Mat4 {
     let hand_anchor = Vec3::new(0.0, -arm_half_length(), 0.0);
     let upright = arm_rotation(side).inverse();
+    // A hanging item (the hand lantern) hangs from the fist by its handle: upright,
+    // no lean, the grip at the hand end (`hold_pose`).
+    if let HoldPose::Hanging { handle } = hold_pose(held.into()) {
+        return Mat4::from_translation(hand_anchor) * upright * Mat4::from_translation(Vec3::new(0.0, -handle, 0.0));
+    }
     let lean = Mat4::from_rotation_z(side.sign() * ITEM_LEAN_DEG.to_radians());
     Mat4::from_translation(hand_anchor)
         * upright
@@ -360,8 +364,18 @@ fn build_hand(
 
     // Off-hand release (slice 5) — a raised shield and the arm that holds it come
     // in toward the middle of the view, clear of the crosshair.
-    if guard > 0.0 && held.tool == Some(crate::crafting::ToolType::Shield) {
+    let pose = hold_pose(held);
+    if guard > 0.0 && pose == HoldPose::Shield {
         crate::shield_pose::raise_first_person(&mut arm_verts, &mut held_verts, side, aspect, guard);
+    }
+    // A hanging item's hand is raised up the view so its body hangs in view, not off
+    // the bottom edge.
+    if pose.fist_raise_ndc() != 0.0 {
+        let half_height = (VIEWMODEL_FOV_Y.to_radians() * 0.5).tan() * slot_depth(aspect);
+        let lift = pose.fist_raise_ndc() * half_height;
+        for v in arm_verts.iter_mut().chain(held_verts.iter_mut()) {
+            v.position[1] += lift;
+        }
     }
 
     (arm_verts, held_verts)
