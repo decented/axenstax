@@ -353,6 +353,55 @@ mod lobby {
     }
 
     #[test]
+    fn a_link_that_replaces_join_game_with_the_same_address_drops_the_old_answer() {
+        // Join Game holds address A; the player opens its prompt and types B. While
+        // the dialog is up, the same link A is opened from outside, and replaces Join
+        // Game with a new Join Game that holds A: same screen kind, same text.
+        let link = "axenstax://play.example.com:8080";
+        let mut menu = MenuState::new();
+        menu.dialog = MenuDialog::JoinDirect { address: link.to_string() };
+        let mut b = PromptBroker::new(Fake::new());
+        b.enter_screen(prompt_screen(&menu));
+        b.field(JOIN_GAME_FIELD, join_game_address(&mut menu), true);
+        assert!(b.is_open());
+
+        tap_link(&mut menu, link);
+        assert_eq!(join_game_address(&mut menu), link, "the new Join Game holds the offered address");
+        b.enter_screen(prompt_screen(&menu));
+        b.backend.next = PromptPoll::Answered(Some("B".into()));
+        b.field(JOIN_GAME_FIELD, join_game_address(&mut menu), false);
+        assert_eq!(join_game_address(&mut menu), link, "the old answer is dropped, A stays");
+        assert!(!b.is_open(), "the closed dialog still frees the broker");
+
+        // The new dialog asks for a prompt of its own and gets that answer.
+        b.field(JOIN_GAME_FIELD, join_game_address(&mut menu), true);
+        b.backend.next = PromptPoll::Answered(Some("C".into()));
+        b.field(JOIN_GAME_FIELD, join_game_address(&mut menu), false);
+        assert_eq!(join_game_address(&mut menu), "C");
+    }
+
+    #[test]
+    fn an_unchanged_lobby_screen_redrawn_every_frame_keeps_its_prompt() {
+        let mut menu = MenuState::new();
+        menu.dialog = MenuDialog::JoinDirect { address: "play.example.com".to_string() };
+        let mut b = PromptBroker::new(Fake::new());
+        b.enter_screen(prompt_screen(&menu));
+        b.field(JOIN_GAME_FIELD, join_game_address(&mut menu), true);
+        for _ in 0..200 {
+            // The dialog is rebuilt from its own fields every frame, as the menu does.
+            let address = join_game_address(&mut menu).clone();
+            menu.dialog = MenuDialog::JoinDirect { address };
+            b.enter_screen(prompt_screen(&menu));
+            b.field(JOIN_GAME_FIELD, join_game_address(&mut menu), false);
+            assert!(b.is_open(), "still the same prompt");
+        }
+        b.backend.next = PromptPoll::Answered(Some("ABCD-1234".into()));
+        b.enter_screen(prompt_screen(&menu));
+        b.field(JOIN_GAME_FIELD, join_game_address(&mut menu), false);
+        assert_eq!(join_game_address(&mut menu), "ABCD-1234", "and the answer is delivered");
+    }
+
+    #[test]
     fn edit_world_never_gets_the_name_typed_for_create() {
         let mut menu = MenuState::new();
         menu.dialog = new_create_dialog();

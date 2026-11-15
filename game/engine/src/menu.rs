@@ -300,7 +300,8 @@ pub fn lobby_escape(menu: &mut MenuState) -> LobbyEscape {
 
 /// Which lobby screen is on show, as the text prompt's owner
 /// (`text_prompt::enter_screen`): the Settings panel, else an open dialog's kind,
-/// else the page. A dialog's contents (what is typed in it) are not part of it.
+/// else the page. A dialog's contents (what is typed in it) are not part of it, but
+/// an external replacement of the dialog is (`text_prompt::dialog_epoch`).
 pub(crate) fn prompt_screen(state: &MenuState) -> u64 {
     use crate::text_prompt::screen_id;
     if state.show_settings {
@@ -308,7 +309,11 @@ pub(crate) fn prompt_screen(state: &MenuState) -> u64 {
     } else if matches!(state.dialog, MenuDialog::None) {
         screen_id(("lobby page", state.page as u8))
     } else {
-        screen_id(("lobby dialog", std::mem::discriminant(&state.dialog)))
+        screen_id((
+            "lobby dialog",
+            std::mem::discriminant(&state.dialog),
+            crate::text_prompt::dialog_epoch(),
+        ))
     }
 }
 

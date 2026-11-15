@@ -194,10 +194,12 @@ impl LaunchLinks {
         match route(&text) {
             Some(LaunchRoute::Keep) => MenuAction::JoinGame(text),
             Some(LaunchRoute::FriendInvite) => {
+                crate::text_prompt::note_dialog_replaced();
                 *dialog = MenuDialog::AddFriend { input: text, error: None };
                 MenuAction::None
             }
             Some(LaunchRoute::Server) => {
+                crate::text_prompt::note_dialog_replaced();
                 *dialog = MenuDialog::JoinDirect { address: text };
                 MenuAction::None
             }

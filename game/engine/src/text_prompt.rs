@@ -33,9 +33,11 @@
 //!    or the world (the game loop's touch Chat block) says which screen is on show
 //!    ([`enter_screen`]). Another screen is another owner: an answer for the old one,
 //!    held or still to come, is dropped, even when a screen of the same kind opens
-//!    again. And a menu field takes an answer only while it still holds the text its
-//!    prompt opened with, so a link that replaces Join Game with a new Join Game
-//!    keeps its address.
+//!    again. A screen replaced by another of the same kind, which only the lobby's
+//!    external link handler does, is told by [`note_dialog_replaced`]: it changes the
+//!    screen's name, so the old answer is dropped even when the new dialog holds the
+//!    very same text. And a menu field takes an answer only while it still holds the
+//!    text its prompt opened with.
 //!
 //! The broker is a plain struct over a pluggable [`PromptBackend`]. Tests build
 //! their own instance; the process-wide one behind the free functions is never
@@ -122,6 +124,26 @@ pub fn screen_id(screen: impl std::hash::Hash) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     screen.hash(&mut hasher);
     hasher.finish()
+}
+
+thread_local! {
+    /// How many times a lobby dialog was opened or replaced from outside the menu's own
+    /// frame (an external link). Part of the lobby's screen name (`menu::prompt_screen`).
+    static DIALOG_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A dialog was opened or replaced by something other than the player's own taps and
+/// typing (`LaunchLinks::offer`), possibly by one of the same kind with the same text.
+/// The next frame names a new screen, so a prompt the old dialog asked for is dropped.
+/// Never call it for an ordinary per-frame redraw or a field edit.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the link handler is native-only
+pub fn note_dialog_replaced() {
+    DIALOG_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
+}
+
+/// The count [`note_dialog_replaced`] keeps; the lobby hashes it into its screen name.
+pub fn dialog_epoch() -> u64 {
+    DIALOG_EPOCH.with(std::cell::Cell::get)
 }
 
 /// What a backend says when asked about the prompt it is showing.

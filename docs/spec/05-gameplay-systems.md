@@ -3257,9 +3257,12 @@ Current world folder name stored in `Mutex<Option<String>>` static. Cursor captu
   Paused: the world, with or without the skin panel) names the screen on show
   (`text_prompt::enter_screen`); a different screen is a new owner, and an answer for
   the old one, held or still to come, is dropped, even if a screen of the same kind
-  opens again. A menu field also takes an answer only while it still holds the text
-  its prompt opened with, so a link that replaces Join Game with a new Join Game keeps
-  its address. Kinds: Name (capitalised words: "World name", "Rename skin"), Chat (no
+  opens again. A dialog replaced from outside by one of the same kind (an external
+  link replacing Join Game with a new Join Game that holds the same address) is also a
+  new screen: `LaunchLinks::offer` calls `text_prompt::note_dialog_replaced`, and
+  `prompt_screen` hashes that count, so the old answer is dropped. Ordinary per-frame
+  redraws and field edits never bump it. A menu field also takes an answer only while
+  it still holds the text its prompt opened with. Kinds: Name (capitalised words: "World name", "Rename skin"), Chat (no
   suggestions or autocorrect, so `/give torch` survives), Plain (seed, room code,
   npub). **Caps** (`text_prompt::field_max_chars`, by caption; Android's
   `LengthFilter`, the web prompt has none): names 128 ("World name": the handover
