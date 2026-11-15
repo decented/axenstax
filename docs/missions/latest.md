@@ -5,6 +5,7 @@ This is the test guide for the current build. A tester, or a chat assistant co-h
 Everything in this file was checked against the game's code for build 0.2.39. If the game and this guide disagree, that is worth reporting.
 
 - **Build:** 0.2.39 (desktop app, Linux)
+- **Phone app (Android):** 0.2.40. If the tester plays on a phone, start with "Phone app 0.2.40" below.
 - **This session:** first the "Ask first" questions, then the re-checks (Mission 0), then the new missions 5 to 8 (off-hand, shield, lantern, tool shapes), then any of the other missions "On your own"
 - **Coming next:** missions at a village, and missions with a friend
 
@@ -18,6 +19,24 @@ Thank you for the answers about the lost inventory. We still don't know what emp
 
 1. **If your things ever disappear again, stop and tell us straight away**, before doing anything else. Could you fly (Creative) at that moment? Was any message or red screen on screen? What was near you?
 2. **Do you ever play with a game controller** (an Xbox or PlayStation pad), or always with the keyboard and mouse (or touch on a phone)? Just the answer is enough; nothing to test. It tells us whether a controller-only bug needs fixing soon.
+
+---
+
+## Phone app 0.2.40 (re-check these on the phone)
+
+These fix what went wrong the last time the game was tried on a phone. Hold the phone sideways.
+
+1. **Typing works.** Tap the name box when you make a world (or the seed box), or tap the Chat button in a world. A dark box opens with the phone's keyboard. Type, then tap **OK** or the keyboard's Done key. **Cancel** or the phone's Back button leaves the text as it was. Before, no keyboard ever appeared, so a world couldn't be named and chat couldn't be used.
+2. **The app opens again after you leave it.** Go back to the world list, close the app with Back, then open it again. It should start normally. Before, it stuck on a blank splash screen until the app was force-stopped. Pressing Home and coming back should still return you to where you were.
+3. **Tapping a hotbar slot selects it.**
+4. **Holding Jump in water swims you up**, as holding Space does on a computer.
+5. **The inventory fits on the screen.** Every slot and button shows at once, with no scrolling: crafting, the 27 bag slots, the hotbar row, armour and the off-hand.
+6. **Every button in the pause menu can be reached.** On a short, wide screen the buttons that leave the world sit in one column and the rest in a column beside it that you can drag up and down.
+7. **Settings fills the screen.** Dragging up or down scrolls the list; only a sideways drag moves a slider.
+8. **The touch buttons hide while you are dead or a menu is open**, so they never cover Respawn.
+9. **The inventory button and the "free" count** no longer sit on top of the hotbar or the Break and Place buttons.
+
+If any of these fails, note the phone's make and model with the report.
 
 ---
 
