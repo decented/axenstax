@@ -68,7 +68,10 @@ fn give_completes_item_names_best_match_first() {
     assert!(c.candidates.iter().all(|n| n.contains("tor")), "{:?}", c.candidates);
     // A trailing space completes the next, empty, word: everything.
     let all = at(&reg, OpLevel::Op, "/give ");
-    assert_eq!(all.candidates.len(), crate::commands::builtins::give::item_names().len());
+    // Every item name, plus the `<tier>_armour` names for whole sets.
+    let offered = crate::commands::builtins::give::item_names().len()
+        + crate::commands::builtins::give::armour_set_names().len();
+    assert_eq!(all.candidates.len(), offered);
     assert_eq!(all.replace_from, 6);
     // The count is free text: no candidates, so the usage line is the hint.
     let count = at(&reg, OpLevel::Op, "/give torch ");

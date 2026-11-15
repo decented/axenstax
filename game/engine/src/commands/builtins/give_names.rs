@@ -6,13 +6,14 @@
 //! Every table row is `(names, value)`. The FIRST name is the canonical one
 //! (what completion offers); the rest are aliases that keep working when
 //! typed. `resolve_item` tries blocks, then tools, then bow-type tools, then
-//! materials, then the two plan keywords; within a table the first matching row
+//! materials, then armour (`<tier>_<slot>`), then the two plan keywords; within a table the first matching row
 //! wins. The test module `give_golden_tests` pins every accepted name and what
 //! it resolves to.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
+use crate::armour::{ArmourMaterial, ArmourSlot};
 use crate::block::{self, BlockId};
 use crate::crafting::{Tool, ToolMaterial, ToolType};
 use crate::item::{Item, MaterialId as M};
@@ -421,6 +422,118 @@ pub(super) fn bow_by_name(key: &str) -> Option<(ToolType, ToolMaterial)> {
     lookup(BOW_NAMES, key)
 }
 
+// ---- Armour ---------------------------------------------------------------------------------
+
+/// Armour tiers, by every word a player may type for them. The first name is canonical. `satoshi`
+/// is only a typing alias for the top tier's real name (the gem and the armour are Satori); it is
+/// never offered or shown.
+static ARMOUR_MATERIALS: &[(&[&str], ArmourMaterial)] = &[
+    (&["leather"], ArmourMaterial::Leather),
+    (&["iron"], ArmourMaterial::Iron),
+    (&["chainmail", "chain"], ArmourMaterial::Chainmail),
+    (&["diamond"], ArmourMaterial::Diamond),
+    (&["satori", "satoshi"], ArmourMaterial::Satori),
+    (&["rubber"], ArmourMaterial::Rubber),
+];
+
+/// Armour slots, by every word a player may type for them. The first name is canonical.
+static ARMOUR_SLOTS: &[(&[&str], ArmourSlot)] = &[
+    (&["helmet", "helm"], ArmourSlot::Helmet),
+    (&["chestplate", "chest"], ArmourSlot::Chestplate),
+    (&["leggings", "legs"], ArmourSlot::Leggings),
+    (&["boots", "boot"], ArmourSlot::Boots),
+];
+
+/// The words that turn a tier into its whole set (`satori armour`).
+static ARMOUR_SET_WORDS: &[&str] = &["armour", "armor"];
+
+/// What an armour name asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArmourWant {
+    /// One piece (`satori_helmet`, `helmet_satori`, `iron boots`).
+    Piece(ArmourSlot, ArmourMaterial),
+    /// Every piece that exists of a tier (`satori_armour`, `iron_armor`).
+    Set(ArmourMaterial),
+}
+
+/// Parse an already-normalised key (lower case, words joined by `_`) as armour: a tier word and a
+/// slot word, in either order, or a tier word and `armour`/`armor`. This is the one armour-name
+/// parser: `/give`, Tab completion, kits and Trials (`ItemKind::from_name`) all go through it.
+pub(crate) fn armour_by_name(key: &str) -> Option<ArmourWant> {
+    let (a, b) = key.split_once('_')?;
+    let material = |w: &str| lookup(ARMOUR_MATERIALS, w);
+    let slot = |w: &str| lookup(ARMOUR_SLOTS, w);
+    match (material(a), slot(b), slot(a), material(b)) {
+        (Some(m), Some(s), _, _) | (_, _, Some(s), Some(m)) => Some(ArmourWant::Piece(s, m)),
+        _ => {
+            let set = |w: &str| ARMOUR_SET_WORDS.contains(&w);
+            match (material(a), set(b), set(a), material(b)) {
+                (Some(m), true, _, _) | (_, _, true, Some(m)) => Some(ArmourWant::Set(m)),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Every piece of a tier that exists as an item, in slot order.
+pub(crate) fn armour_set(material: ArmourMaterial) -> Vec<(ArmourSlot, ArmourMaterial)> {
+    crate::armour::all_armour_combos().into_iter().filter(|(_, m)| *m == material).collect()
+}
+
+/// The canonical `<tier>_<slot>` name of a piece (what Tab completion offers).
+fn armour_name(slot: ArmourSlot, material: ArmourMaterial) -> String {
+    let tier = ARMOUR_MATERIALS.iter().find(|(_, m)| *m == material).map_or("armour", |(n, _)| n[0]);
+    let part = ARMOUR_SLOTS.iter().find(|(_, s)| *s == slot).map_or("piece", |(n, _)| n[0]);
+    format!("{tier}_{part}")
+}
+
+/// The canonical `<tier>_armour` names Tab offers for whole sets, one per tier that has any piece.
+pub fn armour_set_names() -> Vec<String> {
+    ARMOUR_MATERIALS
+        .iter()
+        .filter(|(_, m)| !armour_set(*m).is_empty())
+        .map(|(names, _)| format!("{}_armour", names[0]))
+        .collect()
+}
+
+/// Whether `key` is one or two keystrokes from a real name: a slip in typing a name, not a
+/// different word. `/give` uses it to tell `satori helmt` (a mistyped helmet) from
+/// `stone many` (the stone is right, and "many" was meant as the count); `closest_name`'s
+/// wider limit would match `stone_many` to `stone_axe`.
+pub(crate) fn is_near_typo(key: &str) -> bool {
+    let sets = armour_set_names();
+    item_names().iter().chain(sets.iter()).any(|n| edit_distance(key, n) <= 2)
+}
+
+/// The suggested name nearest to a mistyped key, if any is near enough to be a likely slip.
+pub(crate) fn closest_name(key: &str) -> Option<String> {
+    let limit = (key.len() / 3).clamp(1, 3);
+    let sets = armour_set_names();
+    item_names()
+        .iter()
+        .chain(sets.iter())
+        .map(|n| (edit_distance(key, n), n))
+        .filter(|(d, _)| *d <= limit)
+        .min_by_key(|(d, n)| (*d, n.len()))
+        .map(|(_, n)| n.clone())
+}
+
+/// Levenshtein distance over bytes (names are ASCII).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b = b.as_bytes();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.bytes().enumerate() {
+        let mut diag = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let up = row[j + 1];
+            row[j + 1] = (diag + usize::from(ca != *cb)).min(row[j] + 1).min(up + 1);
+            diag = up;
+        }
+    }
+    row[b.len()]
+}
+
 // ---- The suggestion list ----------------------------------------------------------------
 
 /// Names that work when typed but are deliberately not offered by Tab.
@@ -472,6 +585,10 @@ fn build_catalogue() -> Vec<(String, Item)> {
     }
     for (names, material) in MATERIAL_NAMES {
         offer(names, Item::Material(*material));
+    }
+    for (slot, material) in crate::armour::all_armour_combos() {
+        let name = armour_name(slot, material);
+        offer(&[name.as_str()], Item::Armour(crate::armour::ArmourItem::new(slot, material)));
     }
     offer(&["debug_plan"], Item::Plan(crate::plan::PlanData::debug_3x3_stone()));
     offer(&["hut_plan"], Item::Plan(crate::plan::PlanData::small_hut()));
