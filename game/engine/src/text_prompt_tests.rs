@@ -502,3 +502,50 @@ fn opening_a_prompt_never_cuts_what_the_field_already_holds() {
     b.field("World name", &mut short, true);
     assert_eq!(b.backend.caps[1], NAME_MAX_CHARS, "otherwise the field's own cap");
 }
+
+/// What a field holds after `pasted` goes through its prompt: Android's `LengthFilter`
+/// keeps at most the cap's worth of UTF-16 units.
+fn through_the_prompt(field_caption: &str, pasted: &str) -> String {
+    let mut b = PromptBroker::new(Fake::new());
+    let mut field = String::new();
+    b.field(field_caption, &mut field, true);
+    let cap = *b.backend.caps.last().expect("a prompt was shown");
+    let kept: Vec<u16> = pasted.encode_utf16().take(cap).collect();
+    b.backend.next = PromptPoll::Answered(Some(String::from_utf16(&kept).unwrap()));
+    b.field(field_caption, &mut field, false);
+    field
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_400_character_message_with_a_keep_invite_survives_the_prompt_whole() {
+    use crate::keeps::{JoinRoute, LINK_PREFIX, route_join};
+    let link = fray_keep::format_invite_link(LINK_PREFIX, &[0xab; 32], &[0x01; 32]);
+    assert_eq!(link.len(), 145);
+    let intro = "x".repeat(399);
+    let message = format!("{intro} {link}");
+    assert_eq!(message.chars().count(), 400 + 145);
+    let field = through_the_prompt(crate::worlds_ui::words::ROOM_CODE, &message);
+    assert_eq!(field, message, "nothing cut");
+    assert!(
+        matches!(route_join(&field, true, |_| false), JoinRoute::Confirm(_)),
+        "the join box finds the invite inside the message"
+    );
+}
+
+#[test]
+fn a_600_character_wss_address_survives_the_prompt_whole() {
+    let url = format!("wss://play.example.com/{}", "a".repeat(600 - "wss://play.example.com/".len()));
+    assert_eq!(url.chars().count(), 600);
+    for caption in ["Room code", "Server address"] {
+        assert_eq!(through_the_prompt(caption, &url), url, "{caption}");
+    }
+}
+
+#[test]
+fn every_join_text_field_shares_the_one_4096_cap() {
+    assert_eq!(TEXT_MAX_CHARS, 4096);
+    assert_eq!(field_max_chars("Room code"), 4096);
+    assert_eq!(field_max_chars("Server address"), 4096);
+    assert_eq!(field_max_chars("World name"), NAME_MAX_CHARS, "name fields keep their short cap");
+}

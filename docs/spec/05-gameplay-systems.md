@@ -3267,10 +3267,11 @@ Current world folder name stored in `Mutex<Option<String>>` static. Cursor captu
   npub). **Caps** (`text_prompt::field_max_chars`, by caption; Android's
   `LengthFilter`, the web prompt has none): names 128 ("World name": the handover
   wire's world-name limit; "Rename skin" the same), "Minecraft username" 16 (the
-  Mojang rule `mc_import::validate_username` checks), and 512 for everything else
-  (room code, server address, Keep link, npub, seed, the delete confirmation): a Keep
-  link is 145 characters and may sit inside a pasted message, an address with a
-  `#op=npub1…` pin runs to about 340, and the join parser has no fixed longest. A
+  Mojang rule `mc_import::validate_username` checks), and one shared 4096
+  (`TEXT_MAX_CHARS`) for everything else (room code, server address, Keep link, npub,
+  seed, the delete confirmation): a Keep link is 145 characters and may sit inside a
+  pasted message of several hundred, a `wss://` address may carry a long path, and the
+  join parser has no fixed longest, so real join text is never cut. A
   prompt's cap is never below what its field already holds, so OK on an untouched
   prefill cannot cut it. Chat is capped at `comms::MAX_CHAT_TEXT_LEN`. **Web:** `window.prompt()` at request time; the caller polls right after
   asking, so the answer lands on the tap's own frame, unchanged from before.
