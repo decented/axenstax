@@ -2,6 +2,25 @@
 
 Every key and button in Axe'n'Stax. Keyboard + mouse is the primary control scheme. Gamepad and touch are supported for the core actions (move, look, break, place, hotbar, inventory, pause, camera), but they do not have every keyboard action (see the notes under each section).
 
+The keys below are the defaults. You can change almost all of them: see **[Changing the keys](#changing-the-keys)**.
+
+## Changing the keys
+
+Open **Settings** (from the home screen, or **Esc** then **Settings** in a world) and open the **Controls** section. Every control is listed, grouped by where it works: **Playing**, **Building a plan**, **Workshop painter** and **Director camera**.
+
+1. Press **Change** next to the control you want to move.
+2. The row says **Press a key or mouse button (Esc to cancel)**. Press the key or mouse button you want. That press does nothing else: it only sets the control.
+3. The row shows the new key. It is saved straight away, on this device.
+
+- **Any control can use a mouse button**, including the side buttons (**Mouse 4** and **Mouse 5**). Break/attack, use/place and pick block can be moved onto a key, too.
+- **Already in use?** If the key you press is used by another control in the same group, the two swap, and a line tells you, for example "Drop moved to G". The same key can still do one thing while you play and another in the Workshop painter, just as **E** opens your inventory and also turns a building plan.
+- **Esc and F1 to F12 can't be changed.** They are marked *fixed*, so there is always a way back out of every screen. The scroll wheel always changes your hotbar slot.
+- **Reset all to defaults** puts every key back. It asks first; press **Reset** with the mouse to confirm (Enter just cancels).
+- Keys go by **position** on the keyboard. The list names them as they are printed on a US keyboard, so on another layout the letter shown may be printed differently on your key: it is still the key you pressed.
+- The controls card, the **H** help and the hints on screen show your keys once you change them.
+- A panel opened with a mouse button closes with **Esc** (or its own key).
+- Gamepad and touch controls aren't changed by this screen.
+
 ## Movement
 
 | Input | Action |
@@ -149,3 +168,4 @@ A fixed on-screen layout, not gesture-based:
 - **Q** drops one item — if your inventory is full and you really don't want one stack of cobblestone, Q-spamming clears it fast.
 - **B** opens the **Inventory Explorer** — type a few letters and the list filters as you type. Useful when you're trying to remember what something is called or what you've collected so far.
 - **Esc** is the universal "back". When in doubt, press Esc.
+- Hands keep slipping onto the wrong key? Move it: **Settings → Controls** (see **[Changing the keys](#changing-the-keys)**).
