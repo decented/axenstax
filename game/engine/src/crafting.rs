@@ -559,6 +559,115 @@ pub fn is_logish_slot(slot: CraftSlot) -> bool {
     }
 }
 
+/// What laying `grid` takes from a bag: one entry per distinct item.
+pub fn grid_needs(grid: &[[CraftSlot; 3]; 3]) -> Vec<(Item, u32)> {
+    let mut needs: Vec<(Item, u32)> = Vec::new();
+    for slot in grid.iter().flatten() {
+        let item = match *slot {
+            CraftSlot::Block(b) => Item::Block(b),
+            CraftSlot::Material(m) => Item::Material(m),
+            CraftSlot::Empty => continue,
+        };
+        if let Some(entry) = needs.iter_mut().find(|(it, _)| *it == item) {
+            entry.1 += 1;
+        } else {
+            needs.push((item, 1));
+        }
+    }
+    needs
+}
+
+fn bag_count(inv: &crate::inventory::Inventory, item: &Item) -> u32 {
+    inv.slots_iter().flatten().filter(|s| s.item == *item).map(|s| u32::from(s.count)).sum()
+}
+
+fn bag_affords(inv: &crate::inventory::Inventory, needs: &[(Item, u32)]) -> bool {
+    needs.iter().all(|(item, count)| bag_count(inv, item) >= *count)
+}
+
+/// The grid that "Fill from bag" lays for a card's `example`, and the grid
+/// "can I craft this" asks about: `None` when the bag can't afford it.
+///
+/// The exact example comes first. A card names oak concretely (`OAK_PLANKS`,
+/// `OAK_LOG`; the campfire card's "any log" shows an oak log), but the matcher
+/// reads any planks and any log as oak where the tree doesn't matter
+/// ([`match_recipe`]), and mining now drops each tree's own log. So when the
+/// bag can't pay for the example, try substitutions, in `ALL_WOOD_SPECIES`
+/// order (oak first): every `OAK_PLANKS` cell becomes one species' planks, or
+/// (the last choice) planks taken species by species from what the bag holds,
+/// so a bag of mixed planks pays too; every `OAK_LOG` cell becomes one
+/// species' log block or one of the three log materials. A substitute is taken
+/// only if the bag affords it AND [`match_recipe`] gives the same output item
+/// and count as the example, so a tree-specific card (an Oak Fence Post) never
+/// quietly makes another species' item. Pure in the example and the bag, so a
+/// joiner's client and the server's window choose the same grid (no wire
+/// change).
+pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot; 3]; 3]) -> Option<[[CraftSlot; 3]; 3]> {
+    if bag_affords(inv, &grid_needs(example)) {
+        return Some(*example);
+    }
+    let count_of = |b: BlockId| example.iter().flatten().filter(|s| **s == CraftSlot::Block(b)).count();
+    let (has_planks, has_logs) = (count_of(block::OAK_PLANKS) > 0, count_of(block::OAK_LOG) > 0);
+    if !has_planks && !has_logs {
+        return None;
+    }
+    let want = match_recipe(example)?;
+    // `None` = planks taken species by species from the bag.
+    let plank_modes: Vec<Option<block::WoodSpecies>> = if has_planks {
+        block::ALL_WOOD_SPECIES.iter().map(|s| Some(*s)).chain([None]).collect()
+    } else {
+        vec![Some(block::WoodSpecies::Oak)]
+    };
+    let log_choices: Vec<CraftSlot> = if has_logs {
+        block::ALL_WOOD_SPECIES
+            .iter()
+            .map(|s| CraftSlot::Block(block::log_block_for(*s)))
+            .chain([MaterialId::GreenLog, MaterialId::SeasonedLog, MaterialId::KilnDriedLog].map(CraftSlot::Material))
+            .collect()
+    } else {
+        vec![CraftSlot::Block(block::OAK_LOG)]
+    };
+    let stock: Vec<(BlockId, u32)> = block::ALL_WOOD_SPECIES
+        .iter()
+        .map(|s| {
+            let b = block::planks_block_for(*s);
+            (b, bag_count(inv, &Item::Block(b)))
+        })
+        .collect();
+    for mode in plank_modes {
+        for log in &log_choices {
+            // The planks each OAK_PLANKS cell takes, in row-major order.
+            let mut taken = stock.clone();
+            let mut grid = *example;
+            for cell in grid.iter_mut().flatten() {
+                match *cell {
+                    CraftSlot::Block(block::OAK_PLANKS) => {
+                        *cell = match mode {
+                            Some(s) => CraftSlot::Block(block::planks_block_for(s)),
+                            None => match taken.iter_mut().find(|(_, n)| *n > 0) {
+                                Some((b, n)) => {
+                                    *n -= 1;
+                                    CraftSlot::Block(*b)
+                                }
+                                None => *cell,
+                            },
+                        }
+                    }
+                    CraftSlot::Block(block::OAK_LOG) => *cell = *log,
+                    _ => {}
+                }
+            }
+            if grid == *example || !bag_affords(inv, &grid_needs(&grid)) {
+                continue;
+            }
+            if match_recipe(&grid).is_some_and(|got| got.item == want.item && got.count == want.count) {
+                return Some(grid);
+            }
+        }
+    }
+    None
+}
+
 /// Whether a single grid slot holds "any paper" for recipe purposes.
 /// Mirrors [`is_logish_slot`] — recipes that want any paper tier match
 /// this without caring about the specific material. v1 covers just
@@ -728,7 +837,38 @@ pub fn is_paperish_slot(slot: CraftSlot) -> bool {
     matches!(slot, CraftSlot::Material(MaterialId::PapyrusSheet))
 }
 
+/// The grid with every species' planks read as `OAK_PLANKS` and every species'
+/// log block as `OAK_LOG`; `None` when that changes nothing.
+fn wood_normalised(grid: &[[CraftSlot; 3]; 3]) -> Option<[[CraftSlot; 3]; 3]> {
+    let mut out = *grid;
+    for cell in out.iter_mut().flatten() {
+        if let CraftSlot::Block(b) = *cell {
+            if block::is_any_planks(b) {
+                *cell = CraftSlot::Block(block::OAK_PLANKS);
+            } else if block::is_any_log_block(b) {
+                *cell = CraftSlot::Block(block::OAK_LOG);
+            }
+        }
+    }
+    (out != *grid).then_some(out)
+}
+
+/// Match a 3x3 crafting grid against the recipes: the recipe a grid makes.
+///
+/// **One wood rule** (2026-11-15; Spec 05). The grid is matched exactly first,
+/// so a tree-specific recipe wins (birch planks make a birch fence post, a
+/// birch log its own planks). If nothing matches, it is matched again with
+/// every species' planks read as oak planks and every species' log block as
+/// an oak log, and that match is the result: wherever the tree doesn't matter
+/// (tools, a table, sticks, a chest, a door...) any planks and any log work,
+/// mixed species included, as Minecraft's "any planks" do. The three log
+/// materials keep their own rules (`is_logish_slot`).
 pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
+    match_recipe_exact(grid).or_else(|| match_recipe_exact(&wood_normalised(grid)?))
+}
+
+/// Everything below the wood rule: the exact-grid recipe table.
+fn match_recipe_exact(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
     // Find the bounding box of non-empty slots
     let (min_r, max_r, min_c, max_c) = grid_bounds(grid);
     if min_r > max_r { return None; } // Empty grid
@@ -4456,20 +4596,18 @@ mod tests {
     }
 
     #[test]
-    fn fence_post_recipe_rejects_mixed_species_planks() {
-        // Mixed-species column should NOT match — all 4 plank slots
-        // must be the same species. Otherwise a future "mixed" recipe
-        // could fire by accident.
+    fn fence_post_recipe_reads_a_mixed_species_column_as_oak() {
+        // A mixed-species column matches no species' own fence post, so the
+        // wood rule reads it as oak planks: an OAK fence post, never a
+        // birch one by accident.
         let mut g = empty_grid();
         let oak = CraftSlot::Block(block::OAK_PLANKS);
         let birch = CraftSlot::Block(block::BIRCH_PLANKS);
         let s = CraftSlot::Material(MaterialId::Stick);
         g[0][0] = oak;   g[0][1] = s; g[0][2] = birch;
         g[1][0] = birch; g[1][1] = s; g[1][2] = oak;
-        assert!(
-            match_recipe(&g).is_none(),
-            "mixed-species plank column must not yield a fence post"
-        );
+        let out = match_recipe(&g).expect("the wood rule reads mixed planks as oak");
+        assert_eq!((out.item, out.count), (Item::Block(block::OAK_FENCE_POST), 3));
     }
 
     #[test]

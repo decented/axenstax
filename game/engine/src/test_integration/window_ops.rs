@@ -616,6 +616,51 @@ fn a_scripted_inventory_session_keeps_the_servers_window_in_lockstep() {
     assert_eq!((t.window_refused, t.window_noop), (0, 0), "no click of this session is refused");
 }
 
+/// "Fill from bag" substitutes the wood species by one shared rule, so a
+/// joiner carrying only birch planks fills the Crafting Table card on its
+/// client and on the server's window alike, and the result is a table.
+#[test]
+fn a_joiner_fills_the_crafting_table_card_from_birch_planks_on_both_sides() {
+    let mut rig = Rig::dedicated("birch-autofill");
+    rig.give(0, Item::Block(block::BIRCH_PLANKS), 4);
+    let table = rig.place_table(-2);
+    rig.open_table(table);
+    rig.flush();
+    rig.tick();
+    assert!(rig.step("autofill", WindowClick::Autofill { example: example("Crafting Table") }).ok());
+    let laid = rig.sp().craft_grid.iter().flatten().flatten().map(|s| s.item.clone()).collect::<Vec<_>>();
+    assert_eq!(laid.len(), 4, "the server's grid holds four");
+    assert!(laid.iter().all(|i| *i == Item::Block(block::BIRCH_PLANKS)), "birch planks on the server's window");
+    let crafted = rig.step("the result click", WindowClick::Result);
+    assert!(matches!(crafted, ClickResult::Crafted(ref s) if s.item == Item::Block(block::CRAFTING_TABLE)));
+    assert_eq!(rig.tally().window_mismatch, 0);
+    assert_eq!(rig.tally().window_refused, 0);
+}
+
+/// A joiner carrying only birch planks and sticks crafts a wooden pickaxe at
+/// a table: "Fill from bag" and the result click agree on both sides, and the
+/// tool is wood-tier.
+#[test]
+fn a_joiner_crafts_a_wooden_pickaxe_from_birch_planks_on_the_servers_window() {
+    let mut rig = Rig::dedicated("birch-pickaxe");
+    rig.give(0, Item::Block(block::BIRCH_PLANKS), 3);
+    rig.give(1, Item::Material(MaterialId::Stick), 2);
+    let table = rig.place_table(-2);
+    rig.open_table(table);
+    rig.flush();
+    rig.tick();
+    assert!(rig.step("autofill", WindowClick::Autofill { example: example("Wooden Pickaxe") }).ok());
+    let laid = rig.sp().craft_grid.iter().flatten().flatten().filter(|s| s.item == Item::Block(block::BIRCH_PLANKS)).count();
+    assert_eq!(laid, 3, "birch planks on the server's grid");
+    let crafted = rig.step("the result click", WindowClick::Result);
+    assert!(
+        matches!(crafted, ClickResult::Crafted(ref s) if matches!(&s.item, Item::Tool(t) if t.tool_type == ToolType::Pickaxe && t.material == ToolMaterial::Wood)),
+        "a wood-tier pickaxe"
+    );
+    assert_eq!(rig.tally().window_mismatch, 0);
+    assert_eq!(rig.tally().window_refused, 0);
+}
+
 /// Refusal parity — a table result click with the table out of reach (the
 /// joiner walked away), or gone (broken), is refused on both sides by the
 /// same rule, and neither window changes.

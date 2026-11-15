@@ -265,7 +265,7 @@ pub fn use_campfire(
         }
         if crate::campfire::is_smoky_fuel(fuel_material, fuel_block) {
             let bump = match (fuel_material, fuel_block) {
-                (_, Some(block::OAK_LEAVES)) => crate::campfire::SMOKE_TICKS_PER_LEAF,
+                (_, Some(b)) if block::is_any_leaves(b) => crate::campfire::SMOKE_TICKS_PER_LEAF,
                 (Some(MaterialId::GreenLog), _) => crate::campfire::SMOKE_TICKS_PER_GREEN_LOG,
                 (_, Some(b)) if block::is_any_log_block(b) => crate::campfire::SMOKE_TICKS_PER_GREEN_LOG,
                 _ => 0,

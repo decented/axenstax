@@ -1568,8 +1568,14 @@ pub fn craftable_now(inv: &Inventory) -> Vec<&'static RecipeCard> {
 }
 
 /// Can the player afford this one card right now? Honours fuzzy sets.
+///
+/// Agrees with "Fill from bag" and the live matcher: a card's `OAK_PLANKS` and
+/// `OAK_LOG` ingredients are also paid by any species' planks and logs
+/// wherever that still makes the card's own output (`crafting::affordable_grid`;
+/// a tree-specific card such as an Oak Fence Post is not).
 pub fn can_craft(inv: &Inventory, card: &RecipeCard) -> bool {
     card.ingredients.iter().all(|ing| available(inv, ing) >= ing.count as u32)
+        || crate::crafting::affordable_grid(inv, &card.example_grid).is_some()
 }
 
 /// Global catalogue index of the FIRST card that produces `item` (same block
@@ -1812,5 +1818,153 @@ mod tests {
             recipe_index_for_output(&Item::Block(block::COBBLESTONE)).is_none(),
             "cobblestone has no crafting recipe"
         );
+    }
+
+    // ── The wood rule: any planks / any log wherever the tree doesn't matter ──
+
+    /// `grid` with its oak planks and oak logs swapped for `species`' own.
+    fn with_species(grid: &[[CraftSlot; 3]; 3], s: block::WoodSpecies) -> [[CraftSlot; 3]; 3] {
+        let mut out = *grid;
+        for cell in out.iter_mut().flatten() {
+            match *cell {
+                CraftSlot::Block(block::OAK_PLANKS) => *cell = CraftSlot::Block(block::planks_block_for(s)),
+                CraftSlot::Block(block::OAK_LOG) => *cell = CraftSlot::Block(block::log_block_for(s)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn card_named(name: &str) -> &'static RecipeCard {
+        all_cards().iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no card {name}"))
+    }
+
+    /// A bag holding ONLY one species' planks, logs and sticks.
+    fn only_species_bag(s: block::WoodSpecies) -> Inventory {
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_block(block::planks_block_for(s), 64)));
+        inv.set_slot(1, Some(ItemStack::new_block(block::log_block_for(s), 8)));
+        inv.set_slot(2, Some(ItemStack::new_material(MaterialId::Stick, 32)));
+        inv
+    }
+
+    #[test]
+    fn every_species_planks_craft_wood_tools_a_chest_a_door_and_a_table() {
+        for s in block::ALL_WOOD_SPECIES {
+            for (name, tool) in [
+                ("Wooden Pickaxe", Some(ToolType::Pickaxe)),
+                ("Wooden Axe", Some(ToolType::Axe)),
+                ("Wooden Sword", Some(ToolType::Sword)),
+                ("Wooden Shovel", Some(ToolType::Shovel)),
+                ("Wooden Hoe", Some(ToolType::Hoe)),
+                ("Chest", None),
+                ("Oak Door", None),
+                ("Crafting Table", None),
+            ] {
+                let card = card_named(name);
+                let grid = with_species(&card.example_grid, *s);
+                let got = match_recipe(&grid).unwrap_or_else(|| panic!("{s:?} planks make nothing for {name}"));
+                match tool {
+                    Some(t) => assert!(
+                        matches!(got.item, Item::Tool(g) if g.tool_type == t && g.material == ToolMaterial::Wood),
+                        "{s:?} {name} is a wood-tier {t:?}, got {:?}",
+                        got.item
+                    ),
+                    // A door is tree-specific: a species' own planks make
+                    // that species' door, so only its count is the card's.
+                    None if name == "Oak Door" => {}
+                    None => assert_eq!(got.item, card.output.item, "{s:?} {name}"),
+                }
+                assert_eq!(got.count, card.output.count, "{s:?} {name}");
+                if name == "Oak Door" {
+                    continue;
+                }
+                // The recipe book and Fill from bag agree with the matcher.
+                let bag = only_species_bag(*s);
+                assert!(can_craft(&bag, card), "{s:?}: can_craft {name}");
+                let laid = crate::crafting::affordable_grid(&bag, &card.example_grid)
+                    .unwrap_or_else(|| panic!("{s:?}: autofill {name}"));
+                assert_eq!(match_recipe(&laid).map(|o| o.item), Some(card.output.item.clone()), "{s:?} {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_species_planks_craft_and_pay() {
+        let (b, sp) = (block::BIRCH_PLANKS, block::SPRUCE_PLANKS);
+        let grid = [
+            [CraftSlot::Block(b), CraftSlot::Block(sp), CraftSlot::Empty],
+            [CraftSlot::Block(sp), CraftSlot::Block(b), CraftSlot::Empty],
+            [CraftSlot::Empty; 3],
+        ];
+        assert_eq!(match_recipe(&grid).map(|o| o.item), Some(Item::Block(block::CRAFTING_TABLE)));
+        // A bag of two birch and two spruce planks pays for the table card.
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_block(b, 2)));
+        inv.set_slot(1, Some(ItemStack::new_block(sp, 2)));
+        assert!(can_craft(&inv, card_named("Crafting Table")));
+        let laid = crate::crafting::affordable_grid(&inv, &card_named("Crafting Table").example_grid).unwrap();
+        assert_eq!(match_recipe(&laid).map(|o| o.item), Some(Item::Block(block::CRAFTING_TABLE)));
+        // ... but three planks are not four.
+        inv.set_slot(1, Some(ItemStack::new_block(sp, 1)));
+        assert!(!can_craft(&inv, card_named("Crafting Table")));
+    }
+
+    #[test]
+    fn tree_specific_recipes_still_give_the_trees_own_item() {
+        // Birch planks make a birch fence post, not an oak one.
+        let post = with_species(&card_named("Fence Post").example_grid, block::WoodSpecies::Birch);
+        assert_eq!(match_recipe(&post).map(|o| o.item), Some(Item::Block(block::BIRCH_FENCE_POST)));
+        // A birch log makes birch planks; a legacy Green Log still makes oak.
+        let log = [[CraftSlot::Block(block::BIRCH_LOG), CraftSlot::Empty, CraftSlot::Empty], [CraftSlot::Empty; 3], [CraftSlot::Empty; 3]];
+        assert_eq!(match_recipe(&log).map(|o| o.item), Some(Item::Block(block::BIRCH_PLANKS)));
+        let green = [[CraftSlot::Material(MaterialId::GreenLog), CraftSlot::Empty, CraftSlot::Empty], [CraftSlot::Empty; 3], [CraftSlot::Empty; 3]];
+        assert_eq!(match_recipe(&green).map(|o| o.item), Some(Item::Block(block::OAK_PLANKS)));
+        // So an oak card is never laid with another tree's planks when that
+        // would make the other tree's item: the Oak Fence Post card is refused
+        // for a bag of birch planks, and "can I craft" says no.
+        let bag = only_species_bag(block::WoodSpecies::Birch);
+        assert!(!can_craft(&bag, card_named("Fence Post")));
+        assert!(crate::crafting::affordable_grid(&bag, &card_named("Fence Post").example_grid).is_none());
+        // The campfire takes any log, wherever the card names one.
+        assert!(can_craft(&bag, card_named("Campfire")));
+    }
+
+    /// Nothing may silently stop crafting: every card whose example uses oak
+    /// planks or an oak log still crafts with birch in their place, and gives
+    /// the card's own item unless a birch-specific recipe exists for it.
+    #[test]
+    fn birch_in_place_of_oak_never_silently_stops_a_recipe() {
+        let birch_recipe_exists = |item: &Item| {
+            all_cards().iter().any(|c| {
+                c.output.item == *item
+                    && c.example_grid.iter().flatten().any(|s| {
+                        matches!(*s, CraftSlot::Block(b) if b == block::BIRCH_PLANKS || b == block::BIRCH_LOG)
+                    })
+            })
+        };
+        let mut checked = 0;
+        for card in all_cards() {
+            let uses_oak = card
+                .example_grid
+                .iter()
+                .flatten()
+                .any(|s| matches!(*s, CraftSlot::Block(block::OAK_PLANKS | block::OAK_LOG)));
+            if !uses_oak {
+                continue;
+            }
+            checked += 1;
+            let grid = with_species(&card.example_grid, block::WoodSpecies::Birch);
+            let got = match_recipe(&grid).unwrap_or_else(|| panic!("{}: birch in place of oak crafts nothing", card.name));
+            if got.item != card.output.item || got.count != card.output.count {
+                assert!(
+                    birch_recipe_exists(&got.item),
+                    "{}: birch makes {:?}, which is not a birch-specific recipe",
+                    card.name,
+                    got.item
+                );
+            }
+        }
+        assert!(checked > 30, "the sweep covered {checked} cards");
     }
 }
