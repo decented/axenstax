@@ -18,7 +18,7 @@ Open **Settings** (from the home screen, or **Esc** then **Settings** in a world
 - **Reset all to defaults** puts every key back. It asks first; press **Reset** with the mouse to confirm (Enter just cancels).
 - Keys go by **position** on the keyboard. The list names them as they are printed on a US keyboard, so on another layout the letter shown may be printed differently on your key: it is still the key you pressed.
 - The controls card, the **H** help and the hints on screen show your keys once you change them.
-- A panel opened with a mouse button closes with the same button (click on empty space, not on a button or slot), or with **Esc**.
+- A panel opened with a side button (**Mouse 4** or **Mouse 5**) closes with the same button, wherever the pointer is. A toggle on the left, right or middle button closes its panel from empty space only (not from a button or slot). **Esc** always works.
 - Gamepad and touch controls aren't changed by this screen.
 
 ## Movement

@@ -3265,21 +3265,23 @@ impl ApplicationHandler for App {
                             // egui already got this event via on_window_event above
                         }
                         GameMode::Playing => {
-                            if egui_consumed {
-                                // egui handled this click (e.g., crafting UI button)
-                            } else if crate::keybindings::Binding::from_mouse(button).is_some_and(|b| {
+                            if crate::keybindings::Binding::from_mouse(button).is_some_and(|b| {
                                 crate::keybindings::mouse_toggle_closes_panel(
                                     state.input.bindings(),
                                     b,
                                     state.open_toggle_panels(),
                                     state.renderer.egui.ctx.text_edit_focused(),
+                                    egui_consumed,
                                 )
                             }) {
                                 // A mouse button bound to a panel's toggle closes that panel
-                                // while it is open (the cursor is free then, so the press
-                                // would never reach `InputState` below). egui took the click
-                                // above if the pointer was over a widget.
+                                // while it is open: the cursor is free then, so the press
+                                // would never reach `InputState` below. Mouse 4 and 5 count
+                                // even though egui "consumed" the press (the pointer is over
+                                // the panel's window); no widget reads them.
                                 state.input.mouse_button_pressed(button);
+                            } else if egui_consumed {
+                                // egui handled this click (e.g., crafting UI button)
                             } else if state.players[0].crafting_ui.open {
                                 // Crafting UI is open but click wasn't on an egui widget
                                 // (click outside = no action, egui handles slot clicks)

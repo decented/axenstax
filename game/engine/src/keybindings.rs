@@ -792,15 +792,29 @@ pub struct OpenPanels {
 
 /// A mouse button bound to a panel's toggle, pressed while that panel is open, closes it.
 /// A mouse press only reaches `InputState` while the cursor is captured for play, and an
-/// open panel frees the cursor, so `lib.rs` asks this for the press egui did not take (the
-/// pointer is not over a widget that takes the click). A focused text field keeps it.
+/// open panel frees the cursor, so `lib.rs` asks this before the usual click handling. A
+/// focused text field keeps the press.
+///
+/// `egui_took_press` is egui-winit's "consumed" for the press, which is true whenever the
+/// pointer is over ANY egui window (the freed cursor always is, over the panel it just
+/// opened), not only over a widget. The side buttons (Mouse 4 and 5) are read by no widget
+/// (egui's `clicked()` is the primary button only and the engine uses no `clicked_by` for
+/// them), so they close the panel wherever the pointer is. Left, Right and Middle may be a
+/// widget's click, so egui keeps those.
 pub fn mouse_toggle_closes_panel(
     bindings: &Bindings,
     binding: Binding,
     open: OpenPanels,
     text_edit_focused: bool,
+    egui_took_press: bool,
 ) -> bool {
-    if text_edit_focused || !matches!(binding, Binding::Mouse(_)) {
+    let Binding::Mouse(button) = binding else {
+        return false;
+    };
+    if text_edit_focused {
+        return false;
+    }
+    if egui_took_press && !matches!(button, MouseButton::Back | MouseButton::Forward) {
         return false;
     }
     match bindings.action_for(Context::Gameplay, binding) {
@@ -1107,14 +1121,22 @@ mod tests {
         let fwd = Binding::Mouse(MouseButton::Forward);
         let back = Binding::Mouse(MouseButton::Back);
         let inv = OpenPanels { inventory: true, ..Default::default() };
-        assert!(mouse_toggle_closes_panel(&b, fwd, inv, false), "Mouse 5 closes the open inventory");
-        assert!(!mouse_toggle_closes_panel(&b, back, inv, false), "Map is not open");
-        assert!(mouse_toggle_closes_panel(&b, back, OpenPanels { map: true, ..Default::default() }, false));
-        assert!(!mouse_toggle_closes_panel(&b, fwd, inv, true), "a focused text field keeps it");
-        assert!(!mouse_toggle_closes_panel(&b, fwd, OpenPanels::default(), false), "nothing open");
+        assert!(mouse_toggle_closes_panel(&b, fwd, inv, false, false), "Mouse 5 closes the open inventory");
+        assert!(!mouse_toggle_closes_panel(&b, back, inv, false, false), "Map is not open");
+        assert!(mouse_toggle_closes_panel(&b, back, OpenPanels { map: true, ..Default::default() }, false, false));
+        assert!(!mouse_toggle_closes_panel(&b, fwd, inv, true, false), "a focused text field keeps it");
+        assert!(!mouse_toggle_closes_panel(&b, fwd, OpenPanels::default(), false, false), "nothing open");
         // A key binding is not a mouse press; Attack on its click is no toggle.
-        assert!(!mouse_toggle_closes_panel(&b, Binding::Key(KeyCode::KeyE), inv, false));
-        assert!(!mouse_toggle_closes_panel(&b, Binding::Mouse(MouseButton::Left), inv, false));
+        assert!(!mouse_toggle_closes_panel(&b, Binding::Key(KeyCode::KeyE), inv, false, false));
+        assert!(!mouse_toggle_closes_panel(&b, Binding::Mouse(MouseButton::Left), inv, false, false));
+        // The freed cursor sits over the panel, so egui "took" every press: the side
+        // buttons (no widget reads them) still close it; the other three stay egui's.
+        assert!(mouse_toggle_closes_panel(&b, fwd, inv, false, true), "Mouse 5 over the open window");
+        let mut c = Bindings::defaults();
+        c.rebind(Action::Inventory, Binding::Mouse(MouseButton::Middle));
+        let mid = Binding::Mouse(MouseButton::Middle);
+        assert!(mouse_toggle_closes_panel(&c, mid, inv, false, false));
+        assert!(!mouse_toggle_closes_panel(&c, mid, inv, false, true), "a widget may take a middle click");
     }
 
     #[test]
