@@ -637,6 +637,30 @@ fn a_joiner_fills_the_crafting_table_card_from_birch_planks_on_both_sides() {
     assert_eq!(rig.tally().window_refused, 0);
 }
 
+/// A joiner carrying only birch planks and sticks crafts a wooden pickaxe at
+/// a table: "Fill from bag" and the result click agree on both sides, and the
+/// tool is wood-tier.
+#[test]
+fn a_joiner_crafts_a_wooden_pickaxe_from_birch_planks_on_the_servers_window() {
+    let mut rig = Rig::dedicated("birch-pickaxe");
+    rig.give(0, Item::Block(block::BIRCH_PLANKS), 3);
+    rig.give(1, Item::Material(MaterialId::Stick), 2);
+    let table = rig.place_table(-2);
+    rig.open_table(table);
+    rig.flush();
+    rig.tick();
+    assert!(rig.step("autofill", WindowClick::Autofill { example: example("Wooden Pickaxe") }).ok());
+    let laid = rig.sp().craft_grid.iter().flatten().flatten().filter(|s| s.item == Item::Block(block::BIRCH_PLANKS)).count();
+    assert_eq!(laid, 3, "birch planks on the server's grid");
+    let crafted = rig.step("the result click", WindowClick::Result);
+    assert!(
+        matches!(crafted, ClickResult::Crafted(ref s) if matches!(&s.item, Item::Tool(t) if t.tool_type == ToolType::Pickaxe && t.material == ToolMaterial::Wood)),
+        "a wood-tier pickaxe"
+    );
+    assert_eq!(rig.tally().window_mismatch, 0);
+    assert_eq!(rig.tally().window_refused, 0);
+}
+
 /// Refusal parity — a table result click with the table out of reach (the
 /// joiner walked away), or gone (broken), is refused on both sides by the
 /// same rule, and neither window changes.
