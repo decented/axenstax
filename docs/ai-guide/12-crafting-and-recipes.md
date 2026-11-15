@@ -129,8 +129,8 @@ The fuel ladder is shared. Burn time (longer = better fuel):
 | Oak Leaves | ~1 s (fastest kindling) |
 | Stick | ~2 s |
 | Planks | ~12 s |
-| Green Log | ~30 s |
-| Oak Log / Seasoned Log | ~60 s |
+| Log (any tree; fresh wood, smoky) | ~30 s |
+| Seasoned Log | ~60 s |
 | Kiln-Dried Log | ~120 s |
 | **Coal** | **~240 s (best common fuel)** |
 

@@ -90,7 +90,7 @@ The **Composter** ages organic waste. Right-click it with a compostable item to 
 > **Accuracy flag:** unlike Minecraft, the composter here does **not** produce bonemeal. Its outputs are **Compost** and **Saltpetre**. Bonemeal comes from a **Bone** (see §4).
 
 ### Drying Rack — seasons logs into fuel/material
-The **Drying Rack** matures **Green Logs** into **Seasoned Logs** over ~5 real minutes per slot (8 slots). It only makes progress when there's **air directly above it** (place it outdoors or under an open window — a buried rack just stalls, with no loss). Mining a rack with logs in it spills them back as Green Logs (the seasoning is lost). *(Alpha seasons Oak only.)*
+The **Drying Rack** matures fresh **logs** (any tree's log) into **Seasoned Logs** over ~5 real minutes per slot (8 slots). It only makes progress when there's **air directly above it** (place it outdoors or under an open window — a buried rack just stalls, with no loss). Mining a rack with logs in it spills them back as oak logs (the seasoning is lost). *(Alpha seasons Oak only.)*
 
 ### Salt Lick — livestock husbandry (a block you place near animals)
 A **Salt Lick** placed near livestock (**Cow, Sheep, Horse, Pig, Goat**, within 8 blocks) makes them heal faster, drift toward it, and drop one extra of their main product when killed inside its range. It does nothing for carnivores or exotic animals. This is animal-keeping, not crop-farming, but it lives in the farming toolkit.

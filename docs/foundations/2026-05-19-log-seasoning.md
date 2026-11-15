@@ -1,5 +1,7 @@
 # Log Seasoning — three-tier wood economy + Drying Rack workstation
 
+> **Superseded in part, 2026-11-15.** Logs keep their tree type: mining any species' log now drops that species' log block, and every log block counts as fresh (green) wood (rack, fuel, recipes); `GreenLog` is a legacy stack only and nothing drops it. A log block burns as green wood (30 s, smoky), replacing the old 60 s oak-log arm. Every log breaks in oak's 4.5 s by hand. The log materials draw as a tinted log icon. The three-tier ladder (green, seasoned, kiln-dried) and the Drying Rack stand. See Spec 05 §2 "Logs keep their tree type".
+
 **Status:** READY TO BUILD as of 2026-05-19. Phases 2-8 are autonomous; Phase 9 = Axolittle playtest gate.
 **Branch:** `feat/log-seasoning` off `main`.
 **Trigger:** 2026-05-19 chat — Axolittle floated "season your logs for the furnace and campfires." Designed up from a one-liner into a full deep-economy lane: green wood burns poorly + smokes, seasoned wood burns clean, kiln-dried (future) burns premium. New block-entity workstation (Drying Rack) closes the loop.
