@@ -4953,6 +4953,8 @@ pub struct SettingsPanelState {
     pub governor_note: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
     pub relays: crate::relays_ui::RelaysUiState,
+    /// Settings → Controls: the capture and Reset all state (`keybindings_ui`).
+    pub controls: crate::keybindings_ui::KeyBindingsUi,
 }
 
 /// The plain version line shown at the foot of Settings, e.g. `AxeNStax v0.2.28`.
@@ -4992,10 +4994,9 @@ pub fn draw_settings_panel(
         MINIMAP_ZOOM_MIN, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, THUNDER_VOLUME_MAX, THUNDER_VOLUME_MIN, CHAT_TEXT_SCALE_MAX,
         CHAT_TEXT_SCALE_MIN, CHAT_TEXT_SCALE_STEP,
     };
-    // The relay manager (its only use of `state`) is native-only.
-    #[cfg(target_arch = "wasm32")]
-    let _ = &state;
     let mut action = SettingsPanelAction::None;
+    // The slider labels below name the zoom and free-look keys as bound.
+    let keys = crate::keybindings::Bindings::from_overrides(&gfx.key_bindings).0;
     let mut changed = false;
     let mut pack_changed = false;
 
@@ -5162,7 +5163,7 @@ pub fn draw_settings_panel(
             // #44 — hold-to-zoom (C) field of view. Its own narrow range, below
             // the personal-FOV floor.
             if touch_slider(ui, &mut gfx.zoom_fov, |v| egui::Slider::new(v, ZOOM_FOV_MIN..=ZOOM_FOV_MAX).fixed_decimals(0)
-                        .text("Zoom field of view (hold C)"))
+                        .text(format!("Zoom field of view (hold {})", keys.hint(crate::keybindings::Action::Zoom))))
             {
                 changed = true;
             }
@@ -5393,7 +5394,10 @@ pub fn draw_settings_panel(
                 changed = true;
             }
             if ui
-                .checkbox(&mut gfx.third_person_freelook, "Free-look (hold Alt to look around)")
+                .checkbox(
+                    &mut gfx.third_person_freelook,
+                    format!("Free-look (hold {} to look around)", keys.hint(crate::keybindings::Action::FreeLook)),
+                )
                 .changed()
             {
                 changed = true;
@@ -5414,6 +5418,14 @@ pub fn draw_settings_panel(
                 {
                     changed = true;
                 }
+            }
+
+            // Controls (Spec 05 §1.9): every key and mouse button, rebindable.
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            if crate::keybindings_ui::draw(ui, &mut state.controls, gfx, ts) {
+                changed = true;
             }
 
             // Online play by contact (spec §6). Native only — there is no online
@@ -5491,6 +5503,9 @@ pub fn draw_settings_panel(
 
     if changed {
         gfx.clamp();
+    }
+    if action == SettingsPanelAction::Back {
+        state.controls.cancel();
     }
     // Back (set inside the closure) always wins; otherwise a texture-pack change
     // takes precedence over a graphics-dial change (it needs the atlas rebuild).
