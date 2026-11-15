@@ -1841,6 +1841,19 @@ fn draw_item_slot(
                     egui::Color32::WHITE,
                 );
             }
+            // The log materials draw as a log (the oak log icon, tinted by
+            // stage), not a flat swatch.
+            Item::Material(m) if crate::item::log_material_icon(*m).is_some() => {
+                let (log, tint) = crate::item::log_material_icon(*m).expect("checked by the guard");
+                if let Some(tex_id) = icons.block_texture(registry.tex_top(log)) {
+                    ui.painter().image(
+                        tex_id,
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        log_tint_color(tint),
+                    );
+                }
+            }
             Item::Material(_) => {
                 let color = stack.item.color(registry);
                 let mat_color = egui::Color32::from_rgb(
@@ -1946,6 +1959,15 @@ fn draw_item_slot(
     }
 }
 
+/// The multiplier colour of a log material's icon tint ([`crate::item::log_material_icon`]).
+fn log_tint_color(tint: [f32; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(
+        (tint[0] * 255.0) as u8,
+        (tint[1] * 255.0) as u8,
+        (tint[2] * 255.0) as u8,
+    )
+}
+
 /// Paint the cursor-following item icon directly via a `Painter`, with no
 /// containing widget so clicks fall through to the slot beneath.
 fn paint_item_icon(
@@ -1964,6 +1986,17 @@ fn paint_item_icon(
                     rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
+                );
+            }
+        }
+        Item::Material(m) if crate::item::log_material_icon(*m).is_some() => {
+            let (log, tint) = crate::item::log_material_icon(*m).expect("checked by the guard");
+            if let Some(tex_id) = icons.block_texture(registry.tex_top(log)) {
+                painter.image(
+                    tex_id,
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    log_tint_color(tint),
                 );
             }
         }

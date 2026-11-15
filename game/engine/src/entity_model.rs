@@ -2035,10 +2035,9 @@ pub fn material_texture(id: crate::item::MaterialId) -> u32 {
         M::BakedPotato => crate::block::TEX_ITEM_BAKED_POTATO,
         M::BakedCarrot => crate::block::TEX_ITEM_BAKED_CARROT,
         // Wave 29 — log seasoning. All three log materials share the oak-log
-        // side texture; the per-material `Item::color` tint provides the
-        // green-cast / amber / charred visual differentiation. Dedicated
-        // textures can land as a Phase 9 polish task if Axolittle wants
-        // sharper visual distinction at item-drop range.
+        // side texture. The dropped / held cube takes no tint (it is built
+        // from layers alone), so the three look alike here; only the 2D
+        // icons carry a per-stage tint (`item::log_material_icon`).
         M::GreenLog | M::SeasonedLog | M::KilnDriedLog => crate::block::TEX_OAK_LOG_SIDE,
         // Spec 23 — Papyrus Reed + Sheet (Foundation A of Build Schematics).
         M::PapyrusReed => crate::block::TEX_ITEM_PAPYRUS_REED,
