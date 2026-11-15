@@ -314,7 +314,11 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         // Every log (any species, the tapped rubber log too) takes oak's
         // owner-tuned 4.5 s by hand; one rule, not one entry per species.
         id if block::is_any_log_block(id) => 4.5,   // Axolittle: 4.5s
-        block::OAK_PLANKS | block::CRAFTING_TABLE => 2.0,
+        // Every species' planks and leaves break like oak's (2026-11-15): they
+        // fell to the 1.0 s default, so a birch floor broke twice as fast as oak.
+        id if block::is_any_planks(id) => 2.0,
+        id if block::is_any_leaves(id) => 0.2,
+        block::CRAFTING_TABLE => 2.0,
         // Living world S3 — a table is boards; the Commons Stone is cobblestone.
         block::FEAST_TABLE | block::FEAST_MARKER | block::COMMONS_STONE | block::SITE_BOARD => 2.0,
         // Living world Tier 2 S6 — a shelf is boards and a chest.
@@ -323,7 +327,6 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         block::WATER_WHEEL | block::WATER_WHEEL_TURNING => 2.0,
         // Wind wave §2.2 — the Windmill is canvas on planks; same rung.
         block::WINDMILL | block::WINDMILL_TURNING => 2.0,
-        block::OAK_LEAVES => 0.2,
         block::SANDSTONE => 0.8,
         block::SNOW => 0.2,
         // Ore blocks (MC ~3s with bare hands, fast with proper pickaxe).
@@ -400,7 +403,8 @@ pub fn best_tool_for(block_id: BlockId) -> Option<ToolType> {
         id if block::is_pure_deepslate_family(id) => Some(ToolType::Pickaxe),
         block::DIRT | block::GRASS | block::WORN_PATH | block::SAND | block::GRAVEL | block::SNOW => Some(ToolType::Shovel),
         id if block::is_any_log_block(id) => Some(ToolType::Axe),
-        block::OAK_PLANKS | block::CRAFTING_TABLE
+        id if block::is_any_planks(id) => Some(ToolType::Axe),
+        block::CRAFTING_TABLE
         | block::FEAST_TABLE | block::FEAST_MARKER | block::COMMONS_SHELF | block::SITE_BOARD => Some(ToolType::Axe),
         // Building variants: woods want an axe, stones a pickaxe.
         id => crate::building_variants::best_tool(id),
@@ -5214,6 +5218,23 @@ mod tests {
             break_time_ticks(block::BIRCH_LOG, Some(&axe)) < break_time_ticks(block::BIRCH_LOG, None),
             "an axe speeds up a birch log"
         );
+    }
+
+    #[test]
+    fn every_species_planks_and_leaves_break_like_oaks() {
+        let axe = Tool::new(ToolType::Axe, ToolMaterial::Iron);
+        for s in block::ALL_WOOD_SPECIES {
+            let planks = block::planks_block_for(*s);
+            let leaves = block::leaves_block_for(*s);
+            assert_eq!(block_hardness(planks), block_hardness(block::OAK_PLANKS), "{s:?} planks by hand");
+            assert_eq!(best_tool_for(planks), Some(ToolType::Axe), "{s:?} planks want an axe");
+            assert_eq!(
+                break_time_ticks(planks, Some(&axe)),
+                break_time_ticks(block::OAK_PLANKS, Some(&axe)),
+                "{s:?} planks with an axe"
+            );
+            assert_eq!(block_hardness(leaves), block_hardness(block::OAK_LEAVES), "{s:?} leaves by hand");
+        }
     }
 
     #[test]
