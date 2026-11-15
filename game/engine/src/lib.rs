@@ -2996,7 +2996,18 @@ impl ApplicationHandler for App {
                 // caveat as the chat guard above: always let releases
                 // through so a movement key held when a widget grabbed
                 // focus doesn't latch on. (`keybindings::route_key`.)
-                if crate::keybindings::route_key(state.chat.open, egui_consumed)
+                // A furnace closes on the Inventory key even while a slot button holds
+                // the keyboard (egui consumed the key): only a text field keeps it.
+                let workstation_close = matches!(key_state, ElementState::Pressed)
+                    && egui_consumed
+                    && matches!(state.mode, GameMode::Playing)
+                    && crate::keybindings::workstation_close_passes(
+                        state.input.bindings(),
+                        crate::keybindings::Binding::Key(key),
+                        state.players.first().is_some_and(|p| p.open_furnace.is_some()),
+                        state.renderer.egui.ctx.text_edit_focused(),
+                    );
+                if crate::keybindings::route_key(state.chat.open, egui_consumed && !workstation_close)
                     == crate::keybindings::KeyRoute::ReleaseOnly
                 {
                     if matches!(key_state, ElementState::Released) {
@@ -3256,6 +3267,19 @@ impl ApplicationHandler for App {
                         GameMode::Playing => {
                             if egui_consumed {
                                 // egui handled this click (e.g., crafting UI button)
+                            } else if crate::keybindings::Binding::from_mouse(button).is_some_and(|b| {
+                                crate::keybindings::mouse_toggle_closes_panel(
+                                    state.input.bindings(),
+                                    b,
+                                    state.open_toggle_panels(),
+                                    state.renderer.egui.ctx.text_edit_focused(),
+                                )
+                            }) {
+                                // A mouse button bound to a panel's toggle closes that panel
+                                // while it is open (the cursor is free then, so the press
+                                // would never reach `InputState` below). egui took the click
+                                // above if the pointer was over a widget.
+                                state.input.mouse_button_pressed(button);
                             } else if state.players[0].crafting_ui.open {
                                 // Crafting UI is open but click wasn't on an egui widget
                                 // (click outside = no action, egui handles slot clicks)

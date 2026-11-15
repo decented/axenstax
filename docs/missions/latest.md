@@ -103,7 +103,6 @@ These answer the last playtest. Mission 0 below walks through them.
 - `/kill` does nothing in Creative (nothing can hurt you there), even though it says "You died.".
 - Playing with a friend: when the friend gets their things back from a grave, their off-hand item goes into their bag, not their off-hand.
 - A lantern in an item frame still shows as a small yellow cube.
-- A control changed to a mouse button can open a panel (for example the inventory) but not close it again; use the key or Esc to close it.
 - A few trial and loading-screen tips still name the default keys ("press E", "press 1") even after you change them.
 - The world is split into columns 16 by 16 blocks wide. A sealed room built across the edge of one of those columns can stay lit like daytime inside at night, even with no torch.
 - A Satoshi house that was already built over the sea stays there.

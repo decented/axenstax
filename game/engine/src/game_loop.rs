@@ -8260,6 +8260,20 @@ impl super::GameState {
         }
     }
 
+    /// The panels a Gameplay toggle action opens and closes, as open now for player 0
+    /// (`keybindings::mouse_toggle_closes_panel`).
+    pub(crate) fn open_toggle_panels(&self) -> crate::keybindings::OpenPanels {
+        let p0 = self.players.first();
+        crate::keybindings::OpenPanels {
+            inventory: p0.is_some_and(|p| p.crafting_ui.open || p.open_furnace.is_some()),
+            explorer: p0.is_some_and(|p| p.explorer_state.is_some()),
+            map: self.map_screen.open,
+            challenges: self.challenge_board_open,
+            rig_studio: self.rig_studio_open,
+            help: self.show_objective,
+        }
+    }
+
     /// True when a UI surface owns player 0's input — chat, the full-screen map,
     /// or any of player 0's modal panels (crafting/inventory, chest, furnace,
     /// vendor, dialogue, inspect/capture/plaque, explorer, Workshop, Wardrobe).

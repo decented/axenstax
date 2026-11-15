@@ -763,6 +763,57 @@ pub fn route_key(chat_open: bool, text_focus: bool) -> KeyRoute {
     }
 }
 
+/// A workstation window (the furnace) closes on the Inventory binding as it opens the
+/// inventory, even when egui has consumed the key because a slot button holds the keyboard
+/// focus (Tab, the arrows). Only a focused text field keeps the key. `lib.rs` asks this
+/// before dropping a consumed press.
+pub fn workstation_close_passes(
+    bindings: &Bindings,
+    binding: Binding,
+    workstation_open: bool,
+    text_edit_focused: bool,
+) -> bool {
+    workstation_open
+        && !text_edit_focused
+        && bindings.action_for(Context::Gameplay, binding) == Some(Action::Inventory)
+}
+
+/// Which toggled panels are open now (the ones a Gameplay toggle action opens and closes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OpenPanels {
+    /// The inventory / crafting window, or a furnace (Inventory closes it).
+    pub inventory: bool,
+    pub explorer: bool,
+    pub map: bool,
+    pub challenges: bool,
+    pub rig_studio: bool,
+    pub help: bool,
+}
+
+/// A mouse button bound to a panel's toggle, pressed while that panel is open, closes it.
+/// A mouse press only reaches `InputState` while the cursor is captured for play, and an
+/// open panel frees the cursor, so `lib.rs` asks this for the press egui did not take (the
+/// pointer is not over a widget that takes the click). A focused text field keeps it.
+pub fn mouse_toggle_closes_panel(
+    bindings: &Bindings,
+    binding: Binding,
+    open: OpenPanels,
+    text_edit_focused: bool,
+) -> bool {
+    if text_edit_focused || !matches!(binding, Binding::Mouse(_)) {
+        return false;
+    }
+    match bindings.action_for(Context::Gameplay, binding) {
+        Some(Action::Inventory) => open.inventory,
+        Some(Action::Explorer) => open.explorer,
+        Some(Action::Map) => open.map,
+        Some(Action::Challenges) => open.challenges,
+        Some(Action::RigStudio) => open.rig_studio,
+        Some(Action::Help) => open.help,
+        _ => false,
+    }
+}
+
 /// The chat line a press opens with, if it is bound to Chat (`""`) or
 /// Command (`"/"`) during play. `lib.rs` asks this for keys and mouse buttons.
 pub fn chat_prefix(bindings: &Bindings, binding: Binding) -> Option<&'static str> {
@@ -1017,6 +1068,53 @@ mod tests {
         assert!(fired.contains(&Action::PlanRotateCcw));
         let fired = b.actions_firing(q, ActiveContexts { workshop: true, ..Default::default() });
         assert!(fired.contains(&Action::Drop), "a Workshop world without a paint session does not own Grid");
+    }
+
+    #[test]
+    fn the_inventory_key_closes_a_furnace_unless_a_text_field_has_the_keyboard() {
+        let b = Bindings::defaults();
+        let e = Binding::Key(KeyCode::KeyE);
+        assert!(workstation_close_passes(&b, e, true, false), "E, a slot button focused");
+        assert!(!workstation_close_passes(&b, e, true, true), "a text field keeps the key");
+        assert!(!workstation_close_passes(&b, e, false, false), "no workstation open");
+        assert!(!workstation_close_passes(&b, Binding::Key(KeyCode::KeyQ), true, false), "another key");
+        // Follows a rebound key.
+        let mut b = Bindings::defaults();
+        b.rebind(Action::Inventory, Binding::Key(KeyCode::KeyI));
+        assert!(workstation_close_passes(&b, Binding::Key(KeyCode::KeyI), true, false));
+        assert!(!workstation_close_passes(&b, e, true, false));
+    }
+
+    #[test]
+    fn a_focused_slot_button_is_not_a_text_field_to_egui() {
+        // The scenario behind the check: Tab onto a button makes egui want the keyboard
+        // (so its `consumed` is true) while no text edit holds it.
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.button("slot").request_focus();
+            });
+        }
+        assert!(ctx.egui_wants_keyboard_input(), "a focused button takes the keyboard from the game");
+        assert!(!ctx.text_edit_focused(), "but it is not a text field");
+    }
+
+    #[test]
+    fn a_mouse_button_bound_to_a_toggle_closes_its_open_panel() {
+        let mut b = Bindings::defaults();
+        b.rebind(Action::Inventory, Binding::Mouse(MouseButton::Forward));
+        b.rebind(Action::Map, Binding::Mouse(MouseButton::Back));
+        let fwd = Binding::Mouse(MouseButton::Forward);
+        let back = Binding::Mouse(MouseButton::Back);
+        let inv = OpenPanels { inventory: true, ..Default::default() };
+        assert!(mouse_toggle_closes_panel(&b, fwd, inv, false), "Mouse 5 closes the open inventory");
+        assert!(!mouse_toggle_closes_panel(&b, back, inv, false), "Map is not open");
+        assert!(mouse_toggle_closes_panel(&b, back, OpenPanels { map: true, ..Default::default() }, false));
+        assert!(!mouse_toggle_closes_panel(&b, fwd, inv, true), "a focused text field keeps it");
+        assert!(!mouse_toggle_closes_panel(&b, fwd, OpenPanels::default(), false), "nothing open");
+        // A key binding is not a mouse press; Attack on its click is no toggle.
+        assert!(!mouse_toggle_closes_panel(&b, Binding::Key(KeyCode::KeyE), inv, false));
+        assert!(!mouse_toggle_closes_panel(&b, Binding::Mouse(MouseButton::Left), inv, false));
     }
 
     #[test]
