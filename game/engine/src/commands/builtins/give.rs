@@ -102,12 +102,18 @@ pub(crate) fn resolve_items(name: &str, count: u8) -> Result<Vec<ItemStack>, Str
     }
 }
 
+/// A count word: a whole number with an optional leading `+`, as `parse::<u32>()` takes it.
+fn is_count_word(word: &str) -> bool {
+    let digits = word.strip_prefix('+').unwrap_or(word);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// The item words and the optional count of `/give` arguments. The count is only a trailing
-/// whole number after at least one item word (`oak planks 64`, `satori helmet 2`); every other
+/// whole number (`5` or `+5`) after at least one item word (`oak planks 64`, `satori helmet 2`); every other
 /// word belongs to the item name, so a name may be several words.
 fn split_args(args: &[String]) -> (String, Option<&str>) {
     match args.split_last() {
-        Some((last, words)) if !words.is_empty() && last.bytes().all(|b| b.is_ascii_digit()) => {
+        Some((last, words)) if !words.is_empty() && is_count_word(last) => {
             (words.join("_"), Some(last.as_str()))
         }
         _ => (args.join("_"), None),
@@ -133,7 +139,7 @@ impl Command for GiveCommand {
         if args_before.is_empty() {
             return matching(names, partial);
         }
-        if args_before.iter().any(|w| w.bytes().all(|b| b.is_ascii_digit())) {
+        if args_before.iter().any(|w| is_count_word(w)) {
             return Vec::new();
         }
         let prefix = format!("{}_", args_before.join("_").to_lowercase().replace('-', "_"));
@@ -409,6 +415,22 @@ mod tests {
                 .unwrap_or(false)
         });
         assert!(has_tool, "tool not added to inventory");
+    }
+
+    #[test]
+    fn a_plus_sign_count_gives_that_many() {
+        let (r, players, _) = run(&["stone", "+5"]);
+        assert_eq!(r, CommandResult::Success);
+        assert_eq!(players[0].inventory.slot(0).unwrap().count, 5);
+        let (r, players, _) = run(&["oak", "planks", "+3"]);
+        assert_eq!(r, CommandResult::Success);
+        assert_eq!(players[0].inventory.slot(0).unwrap().count, 3);
+    }
+
+    #[test]
+    fn a_bare_plus_or_minus_is_not_a_count() {
+        assert!(is_count_word("+5") && is_count_word("5"));
+        assert!(!is_count_word("+") && !is_count_word("") && !is_count_word("-5") && !is_count_word("5x"));
     }
 
     #[test]
