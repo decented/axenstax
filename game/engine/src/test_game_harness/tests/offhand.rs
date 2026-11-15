@@ -96,7 +96,7 @@ fn game_harness_offhand_a_block_in_hand_places_from_the_main_hand_and_food_eats_
 
 #[test]
 #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
-fn game_harness_offhand_f_swaps_the_hands_and_death_keeps_the_off_hand() {
+fn game_harness_offhand_f_swaps_the_hands_and_death_buries_the_off_hand() {
     isolate_saves();
     let mut hg = HeadlessGame::boot_into_world("harness-offhand-swap");
     fresh(&mut hg, PlayMode::Survival);
@@ -110,13 +110,25 @@ fn game_harness_offhand_f_swaps_the_hands_and_death_keeps_the_off_hand() {
     press_f(&mut hg);
     assert_eq!(hg.state.players[0].inventory.slot(0), Some(&ItemStack::new_block(block::STONE, 9)));
 
-    // Death: the bag goes to a grave, the off-hand stays on the body.
+    // Death: held things drop. The bag and the off-hand go to the grave; armour stays on.
+    hg.state.players[0].armour_slots[0] = Some(crate::armour::ArmourItem::new(
+        crate::armour::ArmourSlot::Helmet,
+        crate::armour::ArmourMaterial::Iron,
+    ));
     hg.state.players[0].combat.take_damage(1000.0);
     assert!(hg.state.players[0].combat.dead);
     hg.ticks(3);
     let p = &hg.state.players[0];
     assert!(p.inventory.slot(3).is_none(), "the inventory left the body");
-    assert_eq!(p.offhand, Some(ItemStack::new_block(block::TORCH, 5)), "the off-hand did not");
+    assert!(p.offhand.is_none(), "the off-hand went with it");
+    assert!(p.armour_slots[0].is_some(), "the armour stayed on");
+    let at = p.last_grave.expect("a grave was placed");
+    let grave = hg.state.world.grave_at((at[0], at[1], at[2])).expect("the grave holds things");
+    assert_eq!(
+        grave.slots[crate::grave::GRAVE_OFFHAND_SLOT],
+        Some(ItemStack::new_block(block::TORCH, 5)),
+        "the torches are in the grave"
+    );
 }
 
 fn shield_item() -> ItemStack {

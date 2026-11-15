@@ -7937,12 +7937,12 @@ impl super::GameState {
                     // inventory survives death untouched — no grave, no scatter.
                 } else {
                     let death_pos = self.players[i].player.pos;
-                    // Snapshot all 36 slots index-aligned (slot i → grave slot i)
-                    // and clear the inventory.
-                    let (snapshot, kept) = crate::death::split_window(&self.players[i].inventory, false);
-                    let snapshot: Vec<_> = snapshot.into();
+                    // Snapshot the 36 slots index-aligned (slot i → grave slot i)
+                    // and the off-hand item (the last grave slot), and clear
+                    // them: held things drop, worn things (armour) stay.
+                    let slot = &mut self.players[i];
+                    let snapshot = crate::death::bury(&mut slot.inventory, &mut slot.offhand, false);
                     let any = snapshot.iter().any(Option::is_some);
-                    for (at, stack) in kept.into_iter().enumerate() { self.players[i].inventory.set_slot(at, stack); }
                     if any {
                         let bx = death_pos.x.floor() as i32;
                         let by = death_pos.y.floor() as i32;
@@ -15591,7 +15591,8 @@ impl super::GameState {
                         // for another grab once the player makes room.
                         let pos_key = (pos[0], pos[1], pos[2]);
                         let emptied = if let Some(mut grave) = self.world.grave_at(pos_key).cloned() {
-                            let done = grave.restore_to_inventory(&mut self.players[pidx].inventory);
+                            let p = &mut self.players[pidx];
+                            let done = grave.restore_to_player(&mut p.inventory, &mut p.offhand);
                             self.world.insert_grave(pos_key, grave);
                             done
                         } else {

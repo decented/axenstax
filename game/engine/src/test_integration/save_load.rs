@@ -334,6 +334,9 @@ fn grave_block_entity_round_trips_through_save() {
     let mut snapshot = vec![None; crate::grave::GRAVE_SLOTS];
     snapshot[0] = Some(ItemStack::new_block(crate::block::STONE, 42));
     snapshot[17] = Some(ItemStack::new_block(crate::block::DIRT, 9));
+    // The off-hand is the grave's last slot (a 37th entry, same save layout).
+    snapshot[crate::grave::GRAVE_OFFHAND_SLOT] =
+        Some(ItemStack::new_tool(crate::crafting::Tool::new(crate::crafting::ToolType::Shield, crate::crafting::ToolMaterial::Wood)));
     world.insert_grave((3, 64, 3), crate::grave::GraveData::from_snapshot(snapshot, 555));
 
     let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
@@ -349,6 +352,43 @@ fn grave_block_entity_round_trips_through_save() {
     assert_eq!(g.slots[0].as_ref().map(|s| s.count), Some(42));
     assert_eq!(g.slots[17].as_ref().map(|s| s.count), Some(9));
     assert!(g.slots[1].is_none());
+    assert_eq!(g.slots.len(), crate::grave::GRAVE_SLOTS, "the 37-slot grave round-trips");
+    assert!(
+        matches!(
+            g.slots[crate::grave::GRAVE_OFFHAND_SLOT].as_ref().map(|s| &s.item),
+            Some(crate::item::Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shield
+        ),
+        "the off-hand slot survived"
+    );
+
+    scrub(name);
+}
+
+#[test]
+fn an_old_36_slot_grave_loads_from_a_save_and_reclaims() {
+    // A grave saved before the off-hand joined it holds a 36-entry Vec: the
+    // save stores a Vec, so the old shape still loads, with no format change.
+    use crate::item::ItemStack;
+
+    let name = "__test_grave_old_shape__";
+    scrub(name);
+    let mut world = World::new();
+    world.set_block(3, 64, 3, crate::block::GRAVE);
+    let mut old = vec![None; 36];
+    old[2] = Some(ItemStack::new_block(crate::block::STONE, 12));
+    world.insert_grave((3, 64, 3), crate::grave::GraveData { slots: old, created_tick: 7 });
+    let p1 = make_slot(0, Vec3::new(0.0, 80.0, 0.0), 0.0, 0.0, 20.0);
+    save::save_world(name, &world, &[p1], 99, &[], &[], None, None).expect("save_world");
+
+    let mut loaded = World::new();
+    save::load_world(name, &mut loaded).expect("load_world");
+    let mut g = loaded.grave_at((3, 64, 3)).expect("grave restored").clone();
+    assert_eq!(g.slots.len(), 36, "the old shape is kept as saved");
+    let mut inv = crate::inventory::Inventory::new();
+    let mut off = None;
+    assert!(g.restore_to_player(&mut inv, &mut off));
+    assert_eq!(inv.slot(2).map(|s| s.count), Some(12));
+    assert!(off.is_none());
 
     scrub(name);
 }
