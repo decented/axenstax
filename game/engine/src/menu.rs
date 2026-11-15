@@ -3570,8 +3570,12 @@ enum DeleteChoice {
 /// **Delete fires on a pointer click or a tap and nothing else**: `clicked_by` is false for
 /// the keyboard activation (Enter or Space on the focused button) that `clicked` also
 /// reports, so no number of Enters, with or without Tab or the arrows moving the focus to
-/// Delete first, can delete a world. Esc and Back close the dialog (`lobby_escape`); the
+/// Delete first, can delete a world. Esc and Back close the dialog; the
 /// overlay swallows a click outside the card.
+///
+/// The dialog reads Esc and Back itself: the focused button makes egui swallow the key before
+/// the lobby's own Escape handler sees it. A gamepad's B arrives as an injected Esc, Android's
+/// Back as egui's `BrowserBack`; both close it here.
 fn draw_delete_dialog(ctx: &egui::Context, world_name: &str) -> DeleteChoice {
     let mut choice = DeleteChoice::Pending;
     let border = egui::Color32::from_rgb(90, 40, 40);
@@ -3628,6 +3632,10 @@ fn draw_delete_dialog(ctx: &egui::Context, world_name: &str) -> DeleteChoice {
         // The frame wants a `DialogResult`; this dialog's answer is `choice`, read below.
         DialogResult::Update(String::new(), String::new())
     });
+
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::BrowserBack)) {
+        choice = DeleteChoice::Cancel;
+    }
 
     choice
 }

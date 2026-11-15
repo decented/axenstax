@@ -160,10 +160,31 @@ fn a_click_on_cancel_keeps_the_world_and_closes_the_dialog() {
 }
 
 #[test]
-fn escape_and_back_close_the_dialog_and_keep_the_world() {
+fn escape_pressed_while_cancel_has_focus_closes_the_dialog_and_keeps_the_world() {
+    // The real routing: egui sees the Escape first (the focused button swallows it), so the
+    // lobby's own Escape handler never runs; the dialog has to read the key itself.
     let mut rig = Rig::new("delete-dialog-escape");
-    assert_eq!(lobby_escape(&mut rig.state), LobbyEscape::ClosedDialog);
+    rig.press(egui::Key::Escape);
+    assert!(!rig.dialog_open(), "Escape did not close the dialog");
+    assert!(rig.world_exists());
+}
+
+#[test]
+fn escape_with_the_focus_moved_to_delete_cancels_and_never_deletes() {
+    let mut rig = Rig::new("delete-dialog-escape-delete");
+    rig.press(egui::Key::Tab);
+    let action = rig.press(egui::Key::Escape);
+    assert!(!matches!(action, MenuAction::RefreshWorlds));
     assert!(!rig.dialog_open());
+    assert!(rig.world_exists());
+}
+
+#[test]
+fn android_back_closes_the_dialog_and_keeps_the_world() {
+    // winit reports Back as the logical BrowserBack key; egui sees that, not Escape.
+    let mut rig = Rig::new("delete-dialog-back");
+    rig.press(egui::Key::BrowserBack);
+    assert!(!rig.dialog_open(), "Back did not close the dialog");
     assert!(rig.world_exists());
 }
 
