@@ -609,6 +609,22 @@ pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot;
     let count_of = |b: BlockId| example.iter().flatten().filter(|s| **s == CraftSlot::Block(b)).count();
     let (has_planks, has_logs) = (count_of(block::OAK_PLANKS) > 0, count_of(block::OAK_LOG) > 0);
     if !has_planks && !has_logs {
+        return None; // no oak cell to substitute: no scan at all
+    }
+    // Cheap guard: a bag with no other tree's planks or logs, and no log
+    // material, has nothing to substitute (the recipe book asks this of every
+    // card every frame).
+    let can_substitute = inv.slots_iter().flatten().any(|s| match &s.item {
+        Item::Block(b) => {
+            (has_planks && block::is_any_planks(*b) && *b != block::OAK_PLANKS)
+                || (has_logs && block::is_any_log_block(*b) && *b != block::OAK_LOG)
+        }
+        Item::Material(m) => {
+            has_logs && matches!(m, MaterialId::GreenLog | MaterialId::SeasonedLog | MaterialId::KilnDriedLog)
+        }
+        _ => false,
+    });
+    if !can_substitute {
         return None;
     }
     let want = match_recipe(example)?;
@@ -864,7 +880,28 @@ fn wood_normalised(grid: &[[CraftSlot; 3]; 3]) -> Option<[[CraftSlot; 3]; 3]> {
 /// mixed species included, as Minecraft's "any planks" do. The three log
 /// materials keep their own rules (`is_logish_slot`).
 pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
-    match_recipe_exact(grid).or_else(|| match_recipe_exact(&wood_normalised(grid)?))
+    match_recipe_exact(grid).or_else(|| {
+        let got = match_recipe_exact(&wood_normalised(grid)?)?;
+        // The retry only ever returns a recipe with no wood species in its
+        // output. A species-dependent output (planks, a slab, stairs, a
+        // fence post, door, trapdoor or gate) comes from an exact match
+        // alone, so a mixed row of birch, spruce and birch planks is still
+        // rejected rather than read as six oak slabs.
+        (!species_dependent_output(&got.item)).then_some(got)
+    })
+}
+
+/// Whether a recipe output carries a wood species: any species' planks or
+/// log, a fence post, or a wooden building variant (slab, stairs, door,
+/// trapdoor, fence gate). The wood rule never makes these from a mixed or
+/// substituted grid; only an exact match does.
+pub fn species_dependent_output(item: &Item) -> bool {
+    let Item::Block(b) = item else { return false };
+    block::is_any_planks(*b)
+        || block::is_any_log_block(*b)
+        || block::is_fence_post(*b)
+        || crate::building_variants::info(*b)
+            .is_some_and(|(m, _)| matches!(m.family, crate::building_variants::Family::Wood))
 }
 
 /// Everything below the wood rule: the exact-grid recipe table.
@@ -4596,18 +4633,65 @@ mod tests {
     }
 
     #[test]
-    fn fence_post_recipe_reads_a_mixed_species_column_as_oak() {
-        // A mixed-species column matches no species' own fence post, so the
-        // wood rule reads it as oak planks: an OAK fence post, never a
-        // birch one by accident.
+    fn fence_post_recipe_rejects_mixed_species_planks() {
+        // Mixed-species column should NOT match — all 4 plank slots
+        // must be the same species. The wood rule's retry never returns a
+        // species-dependent output (a fence post is one), so this stays
+        // rejected.
         let mut g = empty_grid();
         let oak = CraftSlot::Block(block::OAK_PLANKS);
         let birch = CraftSlot::Block(block::BIRCH_PLANKS);
         let s = CraftSlot::Material(MaterialId::Stick);
         g[0][0] = oak;   g[0][1] = s; g[0][2] = birch;
         g[1][0] = birch; g[1][1] = s; g[1][2] = oak;
-        let out = match_recipe(&g).expect("the wood rule reads mixed planks as oak");
-        assert_eq!((out.item, out.count), (Item::Block(block::OAK_FENCE_POST), 3));
+        assert!(
+            match_recipe(&g).is_none(),
+            "mixed-species plank column must not yield a fence post"
+        );
+    }
+
+    #[test]
+    fn a_mixed_species_slab_row_is_rejected_and_uniform_rows_still_craft() {
+        let row = |a, b, c| {
+            let mut g = empty_grid();
+            g[0] = [CraftSlot::Block(a), CraftSlot::Block(b), CraftSlot::Block(c)];
+            g
+        };
+        let (bi, sp, ok) = (block::BIRCH_PLANKS, block::SPRUCE_PLANKS, block::OAK_PLANKS);
+        assert!(match_recipe(&row(bi, sp, bi)).is_none(), "birch, spruce, birch makes nothing");
+        assert!(match_recipe(&row(ok, bi, ok)).is_none(), "oak, birch, oak makes nothing");
+        let uniform = match_recipe(&row(bi, bi, bi)).expect("three birch planks make slabs");
+        assert_eq!(uniform.count, 6);
+        let birch_slab = crate::building_variants::id_for_base(bi, crate::building_variants::VShape::Slab);
+        assert_eq!(Some(uniform.item), birch_slab.map(Item::Block));
+    }
+
+    /// A wooden recipe whose output has a species never comes from a grid that
+    /// only the retry could read: swap a card's planks for a birch/spruce mix
+    /// and the result is nothing, or a recipe with no species in it.
+    #[test]
+    fn no_species_dependent_recipe_comes_from_mixed_species_planks() {
+        for card in crate::crafting_catalogue::all_cards() {
+            let mut n = 0;
+            let mut g = card.example_grid;
+            for cell in g.iter_mut().flatten() {
+                if *cell == CraftSlot::Block(block::OAK_PLANKS) {
+                    *cell = CraftSlot::Block(if n % 2 == 0 { block::BIRCH_PLANKS } else { block::SPRUCE_PLANKS });
+                    n += 1;
+                }
+            }
+            if n < 2 {
+                continue;
+            }
+            if let Some(got) = match_recipe(&g) {
+                assert!(
+                    !species_dependent_output(&got.item),
+                    "{}: mixed planks make {:?}, a species-dependent item",
+                    card.name,
+                    got.item
+                );
+            }
+        }
     }
 
     #[test]

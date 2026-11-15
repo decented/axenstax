@@ -1742,6 +1742,29 @@ mod tests {
     }
 
     #[test]
+    fn autofill_never_lays_a_mixed_species_grid_for_a_species_dependent_card() {
+        // The Oak Slab card: birch + spruce planks would only craft through
+        // the wood rule's retry, which refuses a species-dependent output, so
+        // Fill from bag lays nothing (and a uniform birch bag would make
+        // birch slabs, a different item, so that is refused too).
+        let slab = crate::building_variants::id_for_base(block::OAK_PLANKS, crate::building_variants::VShape::Slab)
+            .expect("oak slab");
+        let card = crate::crafting_catalogue::all_cards()
+            .iter()
+            .find(|c| c.output.item == Item::Block(slab))
+            .expect("an oak slab card");
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::BIRCH_PLANKS, 2)));
+        w.inv.set_slot(1, Some(ItemStack::new_block(block::SPRUCE_PLANKS, 1)));
+        assert_eq!(w.click(WindowClick::Autofill { example: card.example_grid }), ClickResult::Refused);
+        assert!(!crate::crafting_catalogue::can_craft(&w.inv, card));
+        assert_eq!(w.total(block::BIRCH_PLANKS), 2);
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::BIRCH_PLANKS, 3)));
+        assert_eq!(w.click(WindowClick::Autofill { example: card.example_grid }), ClickResult::Refused);
+    }
+
+    #[test]
     fn autofill_into_a_full_inventory_keeps_the_old_grid() {
         let mut w = Win::new();
         w.fill_with_pickaxes();
