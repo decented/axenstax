@@ -1,12 +1,11 @@
-# Axe'n'Stax test missions: build 0.2.39
+# Axe'n'Stax test missions: build 0.2.41
 
 This is the test guide for the current build. A tester, or a chat assistant co-hosting their session, reads it for what to type, exact numbers, what success looks like, and why something might not work.
 
-Everything in this file was checked against the game's code for build 0.2.39. If the game and this guide disagree, that is worth reporting.
+Everything in this file was checked against the game's code for build 0.2.41. If the game and this guide disagree, that is worth reporting.
 
-- **Build:** 0.2.39 (desktop app, Linux)
-- **Phone app (Android):** 0.2.40. If the tester plays on a phone, start with "Phone app 0.2.40" below.
-- **This session:** first the "Ask first" questions, then the re-checks (Mission 0), then the new missions 5 to 8 (off-hand, shield, lantern, tool shapes), then any of the other missions "On your own"
+- **Build:** 0.2.41 (desktop app, Linux; the phone app is 0.2.41 too). If the tester plays on a phone, start with "Phone app" below.
+- **This session:** first the "Ask first" questions, then the re-checks (Mission 0), then what was left of missions 5 to 8 (the shield at animals and doors, tool shapes), then any of the other missions "On your own"
 - **Coming next:** missions at a village, and missions with a friend
 
 ---
@@ -22,7 +21,7 @@ Thank you for the answers about the lost inventory. We still don't know what emp
 
 ---
 
-## Phone app 0.2.40 (re-check these on the phone)
+## Phone app (re-check these on the phone)
 
 These fix what went wrong the last time the game was tried on a phone. Hold the phone sideways.
 
@@ -40,22 +39,39 @@ If any of these fails, note the phone's make and model with the report.
 
 ---
 
-## New in 0.2.39 (re-check these first)
+## New in 0.2.41 (re-check these first)
 
 These answer the last playtest. Mission 0 below walks through them.
 
-1. **A held item stays in the hand in third person.** Press **F5** to see yourself. A torch, or anything else, in either hand now moves with the hand when you stand, walk, jump or swing. Before, it floated beside you whenever your arm moved.
-2. **Jumping legs follow the way you move.** Jump while running forwards: your legs swing back behind you. Jump while walking backwards (**S**): they swing forwards. Jump on the spot or sideways: they stay straight. (Your hands swing back a little in the air, as before.)
-3. **Creative no longer brings you back to life.** If you die and type `/gm c` while the **"You Died!"** screen is up, the game now says **"Press Respawn first."** and you stay dead. The Esc menu does not offer "Switch to Creative" while you are dead. Before, switching to Creative stood you up where you fell, with your things left in the grave. Nothing can hurt you while you are in Creative.
-4. **Shield and off-hand:** after pausing (**Esc**) or respawning, the next right-click decides afresh whether to use the item or raise the shield. Before, it could repeat the old choice once.
+1. **Logs keep their tree type.** Breaking a birch log gives a **Birch Log**, an oak log gives an **Oak Log**, and so on for every tree. A birch log placed is birch, and it makes birch planks. Before, every tree gave the same olive "Green Log" that placed as oak and only made oak planks. A fresh log still dries on a **Drying Rack** into a Seasoned Log, and still burns smoky (30 seconds) on a campfire or in a furnace.
+2. **Every log breaks at the same speed.** By hand, every log takes about **4.5 seconds**, oak or birch or any other, and an axe speeds them all up the same way. Before, oak took 4.5 seconds and the others about 1 second. Planks of every tree also break alike (2 seconds by hand), and so do leaves.
+3. **Planks of every tree burn.** Birch, spruce and the other planks burn 12 seconds on a campfire or in a furnace, like oak planks.
+4. **"Fill from bag" works with any wood.** In the recipe book, a recipe that shows oak planks or oak logs fills from birch (or any other) planks or logs if that is what you carry, as long as it still makes the same thing. A recipe for a particular wood (like an Oak Fence Post) still needs that wood.
+5. **The lantern looks like a lantern.** Its icon in the inventory and hotbar is a drawn lantern with a handle, not a black square. Dropped (**Q**), it is a small lantern on the ground, not a cube. Held, it hangs from your hand by its handle, in first person and in **F5**.
+6. **Your off-hand item now goes into the grave when you are defeated**, with the rest of your things. Your armour stays on you. When you get your things back from the grave, the off-hand item goes back into your off-hand (or into your bag if the off-hand is full).
+7. **`/give` knows armour.** `/give satori armour` gives the whole Satori set (helmet, chestplate, leggings, boots). `/give satori helmet` gives one piece, `/give satori helmet 2` gives two. "satoshi" works as well as "satori", and "armor" as well as "armour". The same works for the other kinds of armour, e.g. `/give iron armour`. A typo gets "Did you mean ...?".
+8. **Deleting a world is a simple yes or no.** In the world list, **Delete** opens **"Delete this world?"** with **Cancel** and **Delete** buttons. Cancel is selected, so pressing **Enter** cancels. Only a click on **Delete** deletes the world; no number of Enters can. You no longer type the world's name.
+9. **You can change every control.** Press **Esc**, then **Settings**, then open **Controls**. Each action has a **Change** button: press it, then press the key or mouse button you want (**Esc** cancels). If that key was already used, the two swap and a line says so (for example "Drop moved to G"). **Reset all to defaults** puts them all back (it asks first; Cancel is selected). **Esc** and **F1 to F12** can't be changed. Your choice is kept for every world on this computer.
+
+**Answers to last time's findings:**
+
+- **The shield and the crafting table:** a crafting table works like a chest. Right-click it with the shield down and it opens. If you are already holding right-click with the shield raised, the shield stays up whatever you point at, so nothing opens. That is on purpose.
+- **"Green" logs:** fixed, see 1 above. **Oak slower than birch:** fixed, see 2. **Lantern icon and dropped lantern:** fixed, see 5. **Off-hand kept after death:** changed, see 6. **"Satoshi armour":** see 7 (the armour's real name is Satori). **Deleting a world:** see 8. **Changing the keys:** see 9.
+
+**Still to re-check from 0.2.39** (not tried last time):
+
+10. **A held item stays in the hand in third person.** Press **F5** to see yourself. A torch, or anything else, in either hand now moves with the hand when you stand, walk, jump or swing. Before, it floated beside you whenever your arm moved.
+11. **Jumping legs follow the way you move.** Jump while running forwards: your legs swing back behind you. Jump while walking backwards (**S**): they swing forwards. Jump on the spot or sideways: they stay straight. (Your hands swing back a little in the air, as before.)
+12. **Creative no longer brings you back to life.** If you die and type `/gm c` while the **"You Died!"** screen is up, the game now says **"Press Respawn first."** and you stay dead. The Esc menu does not offer "Switch to Creative" while you are dead. Before, switching to Creative stood you up where you fell, with your things left in the grave. Nothing can hurt you while you are in Creative.
+13. **Shield and off-hand:** after pausing (**Esc**) or respawning, the next right-click decides afresh whether to use the item or raise the shield. Before, it could repeat the old choice once.
 
 **Still to re-check from earlier builds** (not tried last time):
 
-5. **Blighted crops are grey.** A blighted crop is ash grey and half the size of a healthy one, so it is easy to spot next to yellow wheat.
-6. **Respawning without a bed puts you on dry land**, near where the world started. Worlds made before 0.2.35 are fixed when they load, unless you set a spawn with a bed or `/sp`.
-7. **Satoshi's house is built on dry ground near where you start, and shows up at once.** It is never built on top of anything you placed. A house that was already built stays where it is.
-8. **Respawning at a bed puts you next to the bed**, inside the room, not on the roof.
-9. **Thunder is softer.** It rumbles in just after the flash instead of hitting at full volume, and a far bolt sounds quieter than a close one. To turn thunder down on its own, press **Esc**, then **Settings**, and move the **Thunder** slider.
+14. **Blighted crops are grey.** A blighted crop is ash grey and half the size of a healthy one, so it is easy to spot next to yellow wheat.
+15. **Respawning without a bed puts you on dry land**, near where the world started. Worlds made before 0.2.35 are fixed when they load, unless you set a spawn with a bed or `/sp`.
+16. **Satoshi's house is built on dry ground near where you start, and shows up at once.** It is never built on top of anything you placed. A house that was already built stays where it is.
+17. **Respawning at a bed puts you next to the bed**, inside the room, not on the roof.
+18. **Thunder is softer.** It rumbles in just after the flash instead of hitting at full volume, and a far bolt sounds quieter than a close one. To turn thunder down on its own, press **Esc**, then **Settings**, and move the **Thunder** slider.
 
 **Confirmed fixed last time:** a torch in an item frame, and a dropped torch, both look right.
 
@@ -85,6 +101,10 @@ These answer the last playtest. Mission 0 below walks through them.
 - A lantern does not fall if the block under it is broken. It stays in the air, like a torch.
 - A carried light can glow faintly through a thin wall.
 - `/kill` does nothing in Creative (nothing can hurt you there), even though it says "You died.".
+- Playing with a friend: when the friend gets their things back from a grave, their off-hand item goes into their bag, not their off-hand.
+- A lantern in an item frame still shows as a small yellow cube.
+- A control changed to a mouse button can open a panel (for example the inventory) but not close it again; use the key or Esc to close it.
+- A few trial and loading-screen tips still name the default keys ("press E", "press 1") even after you change them.
 - The world is split into columns 16 by 16 blocks wide. A sealed room built across the edge of one of those columns can stay lit like daytime inside at night, even with no torch.
 - A Satoshi house that was already built over the sea stays there.
 
@@ -98,7 +118,7 @@ These answer the last playtest. Mission 0 below walks through them.
 2. **Press T** (or /) to open chat and type a command. Press **Tab** to finish a command or an item name.
 3. **Type `/gm c`** to switch to Creative so you can fly. Find **flat, open grass with no trees**. Missions 1 to 3 all happen there.
 4. **Type `/gm s`** to switch back to Survival. The game must reply **"Switched to survival"** (or "already in survival").
-5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.39**. Use that number in the feedback.
+5. **Check the build number** at the bottom of the Settings menu. It should say **v0.2.41**. Use that number in the feedback.
 
 **Good to know:** hunger drops 1 point (half an icon on the hunger bar) every 30 seconds, whatever you are doing. A full bar lasts about 10 minutes, so take some food (berries, bread or cooked meat), or use `/give bread 16` in a test world.
 
@@ -106,9 +126,23 @@ These answer the last playtest. Mission 0 below walks through them.
 
 ---
 
-## Mission 0: Re-checks for 0.2.39
+## Mission 0: Re-checks for 0.2.41
 
-**What it tests:** the fixes in "New in 0.2.39", then the older re-checks.
+**What it tests:** the fixes in "New in 0.2.41" first, then the 0.2.39 re-checks if there is time.
+
+**0.2.41 first:**
+
+1. **Logs:** in Survival, with no tools, find a birch tree (white bark) and an oak tree. Break one log of each by hand and count roughly how long each takes. Look at what you picked up, place the birch log, then put a birch log in the crafting grid.
+2. **Wood in the recipe book:** with only birch planks in your bag (no oak planks), open the recipe book, pick the **Crafting Table**, and press **Fill from bag**. Then put birch planks in a campfire or furnace as fuel.
+3. **Lantern:** type `/give lantern`. Look at it in the hotbar and inventory. Hold it in first person, then press **F5** and look again. Press **Q** to drop it and look at it on the ground.
+4. **Off-hand at death:** type `/give shield`, put it in your off-hand (**F**), then type `/kill` (in Survival) and press **Respawn**. Go back to the grave, right-click it, and look at your off-hand.
+5. **Armour:** type `/give satori armour`, then `/give iron helmet 2`, then `/give satori helmt` (spelled wrong on purpose).
+6. **Delete:** make a throwaway world, go back to the world list, click **Delete** on it, and press **Enter** a few times. Then click **Delete** again and click the red **Delete** button.
+7. **Controls:** **Esc**, **Settings**, **Controls**. Change **Hotbar 1** (or any control) to a different key and try it in the world. Change **Drop** to a key that is already used and read the line that appears. Then **Reset all to defaults**.
+
+**Success:** both logs take about the same time by hand (about 4.5 seconds) and each comes out as its own kind; the placed birch log is birch and makes birch planks; Fill from bag lays birch planks and makes a crafting table, and birch planks burn; the lantern icon is a drawn lantern, it hangs from your hand by the handle, and on the ground it is a small lantern; after the death the off-hand is empty, the shield is in the grave, and reclaiming puts it back in your off-hand; you get the four Satori pieces, two iron helmets, and "Did you mean 'satori_helmet'?"; Enter only cancels the delete and the world is still there, a click on Delete deletes it; the changed key works, the clash swaps and says so, and reset puts everything back.
+
+**Then, if there is time, the 0.2.39 re-checks:**
 
 1. **Held torch in third person:** type `/give torch 4`, hold a torch, press **F5**. Stand still, then walk, then jump, then left-click to swing. Press **F** to move the torch to the other hand and do it again. Press **F5** again to see yourself from the front.
 2. **Jumping legs:** still in **F5**, run forwards and jump, then walk backwards (**S**) and jump, then jump on the spot. Watch the legs.
@@ -122,7 +156,7 @@ These answer the last playtest. Mission 0 below walks through them.
 **Success:** in F5 the torch stays in the hand, in either hand, standing, walking, jumping and swinging; jumping forwards the legs swing back, backwards they swing forwards, on the spot they stay straight; `/gm c` on the death screen says "Press Respawn first." and you stay dead until you press Respawn; blighted wheat is grey; you respawn standing on dry land (or next to your bed); the thunder rumbles in after the flash and is not a jump scare; `/weather clear` stops the storm; Tab finishes the words, the chat text size changes, and the chat is empty after reopening the world; you see the torch in your hand; the sword and pickaxe are different shapes, not slabs.
 
 **If it does not work:**
-- Anything still looks like the old build: check the build number at the bottom of Settings says **v0.2.39**.
+- Anything still looks like the old build: check the build number at the bottom of Settings says **v0.2.41**.
 - Tab does nothing: Tab only completes lines that start with `/`.
 - `/gm c` changed you to Creative while dead: say so, that is the bug this build fixes.
 
@@ -283,7 +317,7 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 - The off-hand holds one stack of any item.
 - Right-click uses the main hand first. Only if the main-hand item has nothing to do with what you point at does the off-hand item get the click. A hoe on stone has nothing to do, so a torch in the off-hand goes down; a hoe on grass still tills.
 - A bow or slingshot takes its ammo from the off-hand first.
-- If you are defeated, the off-hand item stays with you. It does not go in the grave.
+- If you are defeated, the off-hand item goes into the grave with the rest of your things (armour stays on you). Getting your things back from the grave puts it back in your off-hand.
 - The off-hand is saved with the world.
 
 **If it does not work:**
@@ -428,7 +462,7 @@ That plants a square field of wheat sprouts (about 17 by 17, nearly 300 plants) 
 | Command | What it does |
 |---|---|
 | `/gm s` / `/gm c` | Survival / Creative (Creative lets you fly) |
-| `/give <item> [count]` | Gives an item, e.g. `/give site_board`, `/give feast_table`, `/give wheat_seeds 64`, `/give shield`, `/give lantern` |
+| `/give <item> [count]` | Gives an item, e.g. `/give site_board`, `/give feast_table`, `/give wheat_seeds 64`, `/give shield`, `/give lantern`. Names can be several words: `/give satori helmet 2`, `/give satori armour` (the whole set) |
 | `/spawn <mob>` | Puts a mob 2 blocks east of you, e.g. `/spawn brigand` |
 | `/we pos1`, `/we pos2` | Marks two corners at your feet |
 | `/we set <block>` | Fills the marked box, e.g. `/we set wheat_stage_0` or `/we set air` (clears it) |
