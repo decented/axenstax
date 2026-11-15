@@ -2,6 +2,8 @@
 
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke};
 
+use crate::block::{BlockId, BlockRegistry};
+
 fn point(rect: Rect, x: f32, y: f32) -> Pos2 {
     rect.min + egui::vec2(rect.width() * x, rect.height() * y)
 }
@@ -105,4 +107,93 @@ pub(crate) fn drumstick(
         body,
         Stroke::new(1.0_f32, Color32::from_rgb(158, 129, 90)),
     ));
+}
+
+/// What an inventory slot, the hotbar and the off-hand box show for a block: its
+/// atlas layer (the top face, the established icon) or, for a block whose top face
+/// is no picture of it, a drawn icon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockIcon {
+    /// The block's `tex_top` layer, drawn full size.
+    Layer(u32),
+    /// The hand lantern: a frame with a lit window under a handle (`lantern`). Its
+    /// top face is the opaque lid fill, which as an icon was a black square.
+    Lantern,
+}
+
+/// The icon of block `id` (the one question every slot painter asks).
+pub(crate) fn block_icon(id: BlockId, registry: &BlockRegistry) -> BlockIcon {
+    if id == crate::block::LANTERN {
+        BlockIcon::Lantern
+    } else {
+        BlockIcon::Layer(registry.tex_top(id))
+    }
+}
+
+/// Paint block `id`'s icon into `rect`. `texture` is where an atlas layer's egui
+/// texture is (`None` when it has not been uploaded: a headless pass draws nothing
+/// for a layer icon).
+pub(crate) fn paint_block_icon(
+    painter: &Painter,
+    rect: Rect,
+    id: BlockId,
+    registry: &BlockRegistry,
+    texture: impl Fn(u32) -> Option<egui::TextureId>,
+) {
+    match block_icon(id, registry) {
+        BlockIcon::Layer(layer) => {
+            if let Some(tex_id) = texture(layer) {
+                painter.image(
+                    tex_id,
+                    rect,
+                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        }
+        BlockIcon::Lantern => lantern(painter, rect),
+    }
+}
+
+/// The hand lantern: a bail over a grey cap, an iron frame round a lit window, a
+/// base plate. Code-drawn from the model's own colours (black frame, grey cap,
+/// yellow core: `lantern::body`), so it needs no atlas layer and reads at hotbar size.
+pub(crate) fn lantern(painter: &Painter, rect: Rect) {
+    let frame = Color32::from_rgb(92, 86, 78);
+    let frame_dark = Color32::from_rgb(40, 38, 36);
+    let cap = Color32::from_rgb(150, 152, 160);
+    let glow = Color32::from_rgb(255, 214, 92);
+    let core = Color32::from_rgb(255, 242, 178);
+    let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(point(rect, x0, y0), point(rect, x1, y1));
+    let h = rect.height();
+    // The bail: two uprights and a bar across them.
+    let bail = Stroke::new((h * 0.07).max(1.5), frame);
+    painter.add(Shape::line(
+        vec![point(rect, 0.36, 0.26), point(rect, 0.36, 0.08), point(rect, 0.64, 0.08), point(rect, 0.64, 0.26)],
+        bail,
+    ));
+    // Cap, then the frame body with the lit window and its brighter core, then the base.
+    painter.rect_filled(r(0.26, 0.24, 0.74, 0.34), 1.0, cap);
+    painter.rect_filled(r(0.20, 0.34, 0.80, 0.88), 1.5, frame);
+    painter.rect_filled(r(0.30, 0.40, 0.70, 0.82), 1.0, glow);
+    painter.rect_filled(r(0.38, 0.48, 0.62, 0.74), 1.0, core);
+    painter.rect_filled(r(0.22, 0.86, 0.78, 0.94), 1.0, frame_dark);
+    painter.rect_stroke(r(0.20, 0.34, 0.80, 0.88), 1.5, Stroke::new(1.0_f32, frame_dark), egui::StrokeKind::Inside);
+}
+
+#[cfg(test)]
+mod block_icon_tests {
+    use super::*;
+    use crate::block::{self, BlockRegistry};
+
+    #[test]
+    fn the_lantern_is_drawn_and_every_other_block_keeps_its_top_layer() {
+        let reg = BlockRegistry::new();
+        assert_eq!(block_icon(block::LANTERN, &reg), BlockIcon::Lantern);
+        // Its top layer is the opaque lid fill (a black square as an icon): not the icon.
+        assert_ne!(block_icon(block::LANTERN, &reg), BlockIcon::Layer(reg.tex_top(block::LANTERN)));
+        for id in [block::STONE, block::TORCH, block::PAPER_LANTERN_YELLOW, block::GLASS] {
+            assert_eq!(block_icon(id, &reg), BlockIcon::Layer(reg.tex_top(id)), "block {id}");
+        }
+    }
 }

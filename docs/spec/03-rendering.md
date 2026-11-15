@@ -1615,6 +1615,13 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   pass with no cut-out bit: a small model, not a sprite. As a dropped or framed item it is the
   small cube (`FULL_TILE_BLOCKS`: its layers are full tiles). The web build's 512 layers are
   untouched (a test pins `texture_count() == 512`).
+- **The hand lantern's slot icon (pt1115).** A slot, the hotbar and the off-hand box draw a block's `tex_top` layer
+  as its icon, and the lantern's top face is the opaque wallpaper-black lid fill, so its icon was a black square. One
+  question now picks every slot's icon, `hud_icons::block_icon`: the lantern is a code-drawn icon
+  (`hud_icons::lantern`: a bail over a grey cap, an iron frame round a lit yellow window, a base plate; no atlas layer),
+  every other block its `tex_top` layer as before. The hotbar, the inventory window and its carried-item painter all go
+  through `hud_icons::paint_block_icon`. An audit of every block's `tex_top` found no other block whose icon layer is
+  one plain colour.
 - **The avatar's two hands.** `entity_model::build_player_avatar_vertices_with`
   holds the main-hand item (`held_*`) at the right arm's hand anchor and the
   off-hand item (`off_*`) at the left arm's (index 2), each through the same
