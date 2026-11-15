@@ -13,12 +13,12 @@ Open **Settings** (from the home screen, or **Esc** then **Settings** in a world
 3. The row shows the new key. It is saved straight away, on this device.
 
 - **Any control can use a mouse button**, including the side buttons (**Mouse 4** and **Mouse 5**). Break/attack, use/place and pick block can be moved onto a key, too.
-- **Already in use?** If the key you press is used by another control in the same group, the two swap, and a line tells you, for example "Drop moved to G". The same key can still do one thing while you play and another in the Workshop painter, just as **E** opens your inventory and also turns a building plan.
-- **Esc and F1 to F12 can't be changed.** They are marked *fixed*, so there is always a way back out of every screen. The scroll wheel always changes your hotbar slot.
+- **Already in use?** If the key you press is used by another control in the same group, the two swap, and a line tells you, for example "Drop moved to G". The same key can still do one thing while you play and another in the Workshop painter, just as **E** opens your inventory and also turns a building plan. While the painter (or a building plan) is up and a key is one of *its* controls, that control gets the press and the playing control on the same key stays quiet.
+- **Esc and F1 to F12 can't be changed.** They are marked *fixed*, so there is always a way back out of every screen. **Tab** can't be chosen either: the menus use it to move between buttons. The scroll wheel always changes your hotbar slot.
 - **Reset all to defaults** puts every key back. It asks first; press **Reset** with the mouse to confirm (Enter just cancels).
 - Keys go by **position** on the keyboard. The list names them as they are printed on a US keyboard, so on another layout the letter shown may be printed differently on your key: it is still the key you pressed.
 - The controls card, the **H** help and the hints on screen show your keys once you change them.
-- A panel opened with a mouse button closes with **Esc** (or its own key).
+- A panel opened with a mouse button closes with the same button (click on empty space, not on a button or slot), or with **Esc**.
 - Gamepad and touch controls aren't changed by this screen.
 
 ## Movement
