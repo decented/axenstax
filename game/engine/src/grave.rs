@@ -1,31 +1,41 @@
 //! #47 — Graves. On death (Survival, when `keep_inventory` is off), the player's
-//! 36-slot inventory is snapshotted into a recoverable GRAVE block instead of
-//! scattered as item entities. Recovery restores each stack to its **original
-//! inventory slot** (Corpse-mod parity).
+//! 36-slot inventory and the off-hand item are snapshotted into a recoverable
+//! GRAVE block instead of scattered as item entities. Recovery restores each
+//! stack to its **original slot** (Corpse-mod parity). Held things drop, worn
+//! things stay: armour is not in the grave.
 //!
-//! Design: the grave holds a 36-entry `slots` Vec **index-aligned to the player
-//! inventory** — `slots[i]` is whatever was in inventory slot `i`. So
-//! restore-to-original-slot is a plain index walk; no separate slot-map needed.
+//! Design: the grave holds a 37-entry `slots` Vec **index-aligned to the player
+//! inventory** — `slots[i]` for `i < 36` is whatever was in inventory slot `i`,
+//! and `slots[36]` is the off-hand item. So restore-to-original-slot is a plain
+//! index walk; no separate slot-map needed. A grave saved before the off-hand
+//! joined it holds 36 entries and still loads and reclaims (the save stores the
+//! `Vec`, so its length is not part of the save layout).
 //! Reuses the `chest`/block-entity persistence pattern (a new
 //! `BlockEntityData::Grave` + a `graves: Vec<SavedGrave>` save list).
 
 use crate::inventory::Inventory;
 use crate::item::ItemStack;
 
-/// Number of slots a grave mirrors — the full player inventory (hotbar + main).
-pub const GRAVE_SLOTS: usize = 36;
+/// The bag slots a grave mirrors — the full player inventory (hotbar + main),
+/// indices `0..GRAVE_BAG_SLOTS`.
+pub const GRAVE_BAG_SLOTS: usize = 36;
+/// The grave index that holds the off-hand item.
+pub const GRAVE_OFFHAND_SLOT: usize = GRAVE_BAG_SLOTS;
+/// Number of slots a grave mirrors: the bag plus the off-hand.
+pub const GRAVE_SLOTS: usize = GRAVE_BAG_SLOTS + 1;
 
 /// A death container: the snapshotted inventory + when it was made.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GraveData {
-    /// Index-aligned to the player's 36 inventory slots at death.
+    /// Index-aligned to the player's 36 inventory slots at death, then the
+    /// off-hand at [`GRAVE_OFFHAND_SLOT`]. An older grave holds only the 36.
     pub slots: Vec<Option<ItemStack>>,
     /// World tick the grave was created (for a future cosmetic-decay timer).
     pub created_tick: u32,
 }
 
 impl GraveData {
-    /// Build a grave from a 36-entry inventory snapshot (index-aligned). Shorter
+    /// Build a grave from a `GRAVE_SLOTS`-entry snapshot (index-aligned). Shorter
     /// snapshots are padded; longer are truncated, so the stored Vec is always
     /// exactly `GRAVE_SLOTS` long.
     pub fn from_snapshot(mut snapshot: Vec<Option<ItemStack>>, created_tick: u32) -> Self {
@@ -43,16 +53,21 @@ impl GraveData {
         self.slots.iter().flatten().cloned().collect()
     }
 
-    /// Restore the grave into `inv`, putting each stack back in its **original**
-    /// slot when that slot is free, else best-effort into the first free slot.
-    /// Anything that doesn't fit stays in the grave (count-conserving). Returns
-    /// `true` if the grave is now empty.
-    pub fn restore_to_inventory(&mut self, inv: &mut Inventory) -> bool {
+    /// Restore the grave into `inv` and `offhand`, putting each stack back in
+    /// its **original** slot when that slot is free, else best-effort into the
+    /// first free bag slot (the off-hand item goes back to the off-hand when
+    /// that is empty, else into the bag). Anything that doesn't fit stays in
+    /// the grave (count-conserving). Returns `true` if the grave is now empty.
+    pub fn restore_to_player(&mut self, inv: &mut Inventory, offhand: &mut Option<ItemStack>) -> bool {
         for i in 0..GRAVE_SLOTS.min(self.slots.len()) {
             let Some(stack) = self.slots[i].take() else { continue };
             // Prefer the original slot if it's free.
-            if i < 36 && inv.slot(i).is_none() {
+            if i < GRAVE_BAG_SLOTS && inv.slot(i).is_none() {
                 inv.set_slot(i, Some(stack));
+                continue;
+            }
+            if i == GRAVE_OFFHAND_SLOT && offhand.is_none() {
+                *offhand = Some(stack);
                 continue;
             }
             // Else fold into the inventory wherever it fits; keep the remainder.
@@ -133,18 +148,80 @@ mod tests {
     }
 
     #[test]
-    fn from_snapshot_is_always_36_long() {
+    fn from_snapshot_is_always_grave_slots_long() {
+        assert_eq!(GRAVE_SLOTS, 37, "36 bag slots and the off-hand");
         let g = GraveData::from_snapshot(vec![None; 3], 0);
         assert_eq!(g.slots.len(), GRAVE_SLOTS);
         let g2 = GraveData::from_snapshot(vec![None; 50], 0);
         assert_eq!(g2.slots.len(), GRAVE_SLOTS);
     }
 
+    fn shield() -> ItemStack {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        ItemStack::new_tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))
+    }
+
+    #[test]
+    fn the_off_hand_item_is_restored_to_the_off_hand_when_it_is_empty() {
+        let mut snap = snap_with(&[0]);
+        snap[GRAVE_OFFHAND_SLOT] = Some(shield());
+        let mut g = GraveData::from_snapshot(snap, 0);
+        let mut inv = Inventory::new();
+        let mut off = None;
+        assert!(g.restore_to_player(&mut inv, &mut off));
+        assert_eq!(off, Some(shield()), "the shield went back in the hand");
+        assert!(inv.slot(0).is_some());
+        assert!((0..36).all(|i| inv.slot(i).is_none_or(|s| s.item != shield().item)), "not in the bag");
+    }
+
+    #[test]
+    fn the_off_hand_item_goes_to_the_bag_when_the_off_hand_is_filled() {
+        let mut snap = vec![None; GRAVE_SLOTS];
+        snap[GRAVE_OFFHAND_SLOT] = Some(shield());
+        let mut g = GraveData::from_snapshot(snap, 0);
+        let mut inv = Inventory::new();
+        let torches = ItemStack::new_block(block::TORCH, 3);
+        let mut off = Some(torches.clone());
+        assert!(g.restore_to_player(&mut inv, &mut off));
+        assert_eq!(off, Some(torches), "the filled off-hand is not disturbed");
+        assert!((0..36).any(|i| inv.slot(i) == Some(&shield())), "the shield landed in the bag");
+    }
+
+    #[test]
+    fn the_off_hand_item_stays_in_the_grave_when_nothing_has_room() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        let mut snap = vec![None; GRAVE_SLOTS];
+        snap[GRAVE_OFFHAND_SLOT] = Some(shield());
+        let mut g = GraveData::from_snapshot(snap, 0);
+        let mut inv = Inventory::new();
+        for i in 0..36 {
+            inv.set_slot(i, Some(ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
+        }
+        let mut off = Some(ItemStack::new_block(block::TORCH, 1));
+        assert!(!g.restore_to_player(&mut inv, &mut off));
+        assert_eq!(g.remaining(), vec![shield()], "nothing lost");
+    }
+
+    #[test]
+    fn an_old_36_slot_grave_still_reclaims() {
+        // A grave saved before the off-hand joined it holds only 36 entries.
+        let mut old = vec![None; 36];
+        old[4] = Some(ItemStack::new_block(block::STONE, 11));
+        let mut g = GraveData { slots: old, created_tick: 9 };
+        let mut inv = Inventory::new();
+        let mut off = Some(ItemStack::new_block(block::TORCH, 2));
+        assert!(g.restore_to_player(&mut inv, &mut off));
+        assert_eq!(inv.slot(4).map(|s| s.count), Some(11));
+        assert_eq!(off.map(|s| s.count), Some(2), "the off-hand is left alone");
+        assert!(g.is_empty());
+    }
+
     #[test]
     fn restore_returns_each_stack_to_its_original_slot() {
         let mut g = GraveData::from_snapshot(snap_with(&[0, 5, 20]), 7);
         let mut inv = Inventory::new();
-        let empty = g.restore_to_inventory(&mut inv);
+        let mut off = None;
+        let empty = g.restore_to_player(&mut inv, &mut off);
         assert!(empty, "all slots free → grave emptied");
         assert_eq!(inv.slot(0).map(|s| s.count), Some(5));
         assert_eq!(inv.slot(5).map(|s| s.count), Some(5));
@@ -158,8 +235,9 @@ mod tests {
         // stone must still land somewhere (count conserved), not vanish.
         let mut g = GraveData::from_snapshot(snap_with(&[0]), 0);
         let mut inv = Inventory::new();
+        let mut off = None;
         inv.set_slot(0, Some(ItemStack::new_block(block::DIRT, 1)));
-        let empty = g.restore_to_inventory(&mut inv);
+        let empty = g.restore_to_player(&mut inv, &mut off);
         assert!(empty);
         let stone: u32 = (0..36)
             .filter_map(|i| inv.slot(i))
@@ -176,10 +254,11 @@ mod tests {
         use crate::crafting::{Tool, ToolMaterial, ToolType};
         let mut g = GraveData::from_snapshot(snap_with(&[10]), 0);
         let mut inv = Inventory::new();
+        let mut off = None;
         for i in 0..36 {
             inv.set_slot(i, Some(ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
         }
-        let empty = g.restore_to_inventory(&mut inv);
+        let empty = g.restore_to_player(&mut inv, &mut off);
         assert!(!empty, "nothing fit → grave retains the stone");
         assert_eq!(g.remaining().len(), 1, "stone still in grave");
     }

@@ -17,7 +17,7 @@ You have two hands. The one you use for the selected hotbar slot is your **main 
 - **Left-click always uses your main hand.** The off-hand never mines or attacks.
 - **A bow or slingshot** takes its ammo from the off-hand first, then from your bag.
 - **Light:** a torch or lantern in **either** hand lights up the dark round you.
-- **If you are defeated,** the off-hand item stays with you, like armour. It does not go in your grave.
+- **If you are defeated,** the off-hand item goes into your grave with your bag. Your armour stays on. Open the grave and the item goes back in your off-hand if that is empty, or into your bag if not.
 
 ## The shield
 

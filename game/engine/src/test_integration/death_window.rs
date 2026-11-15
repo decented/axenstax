@@ -575,3 +575,120 @@ fn a_window_op_before_the_death_hook_uses_the_old_window_then_replace_follows() 
         "nothing remained in the 36 slots"
     );
 }
+
+fn wood_shield() -> ItemStack {
+    use crate::crafting::{Tool, ToolMaterial, ToolType};
+    ItemStack::new_tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))
+}
+
+fn grave_cell(inbox: &Inbox) -> (i32, i32, i32) {
+    inbox
+        .events
+        .iter()
+        .find_map(|(_, e)| match e {
+            PlayerEventType::GraveAt { x, y, z } => Some((*x, *y, *z)),
+            _ => None,
+        })
+        .expect("a grave was placed")
+}
+
+/// Held things drop, worn things stay: a joiner who dies with a shield in the
+/// off-hand has it in the grave on both copies, keeps its armour, and another
+/// joiner opening the grave gets the shield (into the bag: a grant has no hand).
+#[test]
+fn a_joiners_off_hand_item_goes_into_the_grave_and_the_armour_stays() {
+    let mut hs = start_dedicated_server("offhand-grave");
+    let (owner, slot) = join_guest(&mut hs, "OffHandOwner");
+    let (other, borrower) = join_guest(&mut hs, "OffHandFinder");
+    let at = stand_on_floor(&mut hs, slot);
+    hs.server.players[borrower].player.pos = at;
+    hs.server.players[slot].inventory.set_slot(0, Some(ItemStack::new_block(block::STONE, 4)));
+    hs.server.players[slot].offhand = Some(wood_shield());
+    hs.server.players[slot].armour[0] = Some(crate::armour::ArmourItem::new(
+        crate::armour::ArmourSlot::Helmet,
+        crate::armour::ArmourMaterial::Iron,
+    ));
+    hs.server.players[slot].combat.die(crate::survival::DamageCause::Generic);
+    let mut inbox = Inbox::default();
+    hs.tick();
+    inbox.drain(&owner);
+    assert_eq!(inbox.syncs.len(), 1);
+    let cell = grave_cell(&inbox);
+    let grave = hs.server.world.grave_at(cell).unwrap();
+    assert_eq!(grave.slots.len(), crate::grave::GRAVE_SLOTS);
+    assert_eq!(grave.slots[crate::grave::GRAVE_OFFHAND_SLOT], Some(wood_shield()), "the shield is in the grave");
+    assert_eq!(grave.slots[0].as_ref().map(|s| s.count), Some(4));
+    // The server's copy.
+    let eff = crate::window_events::effective_window(&hs.server.players[slot]);
+    assert!(eff.offhand.is_none(), "the server's off-hand is empty");
+    assert!(eff.armour[0].is_some(), "the armour is still worn");
+    // The client's synced window.
+    let offhand_on_wire = inbox.syncs[0]
+        .slots
+        .iter()
+        .find(|(at, _)| matches!(at, protocol::WireWindowSlot::Offhand))
+        .map(|(_, s)| s.clone())
+        .expect("the sync carries the off-hand slot");
+    assert!(offhand_on_wire.is_none(), "the client's off-hand is empty");
+    let armour_on_wire = inbox.syncs[0]
+        .slots
+        .iter()
+        .find(|(at, _)| matches!(at, protocol::WireWindowSlot::Armour(0)))
+        .map(|(_, s)| s.clone())
+        .expect("the sync carries the armour");
+    assert!(armour_on_wire.is_some(), "the client's armour stays");
+    // Reclaim: a grant, so the shield lands in the bag.
+    other.send_to_server(&protocol::serialize_packet(
+        protocol::PacketType::ItemAction,
+        &protocol::ItemActionPacket {
+            seq: 1,
+            events_applied: 0,
+            action: protocol::ItemAction::OpenGrave { x: cell.0, y: cell.1, z: cell.2 },
+            hand: crate::hands::Hand::Main,
+        },
+    ));
+    hs.tick();
+    assert!(hs.server.world.grave_at(cell).is_none(), "the grave emptied");
+    let bag = crate::window_events::effective_inventory(&hs.server.players[borrower]);
+    assert!(bag.slots_iter().flatten().any(|s| *s == wood_shield()), "the shield came out of the grave");
+}
+
+#[test]
+fn a_keep_inventory_world_keeps_a_joiners_off_hand() {
+    let mut hs = start_dedicated_server("offhand-keep");
+    let (client, slot) = join_guest(&mut hs, "OffHandKeeper");
+    hs.server.world.keep_inventory = true;
+    hs.server.players[slot].offhand = Some(wood_shield());
+    hs.server.players[slot].combat.die(crate::survival::DamageCause::Generic);
+    let mut inbox = Inbox::default();
+    hs.tick();
+    inbox.drain(&client);
+    assert_eq!(inbox.syncs.len(), 1);
+    assert!(!inbox.events.iter().any(|(_, e)| matches!(e, PlayerEventType::GraveAt { .. })));
+    let eff = crate::window_events::effective_window(&hs.server.players[slot]);
+    assert_eq!(eff.offhand, Some(wood_shield()), "kept with the bag");
+}
+
+#[test]
+fn with_no_safe_grave_cell_the_off_hand_item_scatters_with_the_rest() {
+    let mut hs = start_dedicated_server("offhand-scatter");
+    let (client, slot) = join_guest(&mut hs, "OffHandScatter");
+    hs.server.loaded_columns.clear();
+    hs.server.players[slot].inventory.set_slot(0, Some(ItemStack::new_block(block::STONE, 6)));
+    hs.server.players[slot].offhand = Some(wood_shield());
+    hs.server.players[slot].combat.die(crate::survival::DamageCause::Generic);
+    let mut inbox = Inbox::default();
+    hs.tick();
+    inbox.drain(&client);
+    assert!(!inbox.events.iter().any(|(_, e)| matches!(e, PlayerEventType::GraveAt { .. })));
+    let dropped: Vec<_> = hs
+        .server
+        .ecs
+        .query::<&crate::entity::ItemEntity>()
+        .iter()
+        .map(|(_, item)| item.stack.clone())
+        .collect();
+    assert!(dropped.iter().any(|s| *s == wood_shield()), "the shield is on the ground");
+    assert!(dropped.iter().any(|s| s.count == 6), "so is the bag");
+    assert!(crate::window_events::effective_window(&hs.server.players[slot]).offhand.is_none());
+}

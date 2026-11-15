@@ -328,8 +328,8 @@ pub struct PlayerSlot {
     /// The off-hand item (Minecraft's second hand). Any item can sit here; it
     /// is not slot 36 of `inventory` but rides beside the armour, like it
     /// (`hands.rs` holds the rules: which hand a right-click uses, the swap).
-    /// Stays on the body at death, like armour (`death::split_window` never
-    /// sees it). Saved as `WorldSave.player_offhands`. A joined client's copy
+    /// At death it goes into the grave with the bag (`death::bury`; held things
+    /// drop, worn things stay, so armour does not). Saved as `WorldSave.player_offhands`. A joined client's copy
     /// on the server is `ServerPlayer.offhand` (saved in the joiner sidecar,
     /// v6; protocol 101).
     pub offhand: Option<ItemStack>,

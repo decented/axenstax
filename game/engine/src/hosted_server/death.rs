@@ -20,10 +20,9 @@ impl HostedServer {
             let mut window = crate::window_events::effective_window(sp);
             let mut grave_at = None;
             if !self.server.world.keep_inventory && !self.server.play_mode.is_creative() {
-                let (grave, kept) = crate::death::split_window(&window.inv, true);
-                for (at, stack) in kept.into_iter().enumerate() {
-                    window.inv.set_slot(at, stack);
-                }
+                // Held things drop (the bag and the off-hand item); armour, the
+                // cursor and the craft grid stay. Plans stay where they are.
+                let grave = crate::death::bury(&mut window.inv, &mut window.offhand, true);
                 if grave.iter().any(Option::is_some) {
                     let cell = crate::grave::find_safe_grave_pos(
                         |x, y, z| {
@@ -52,7 +51,7 @@ impl HostedServer {
                         self.server.world.insert_grave(
                             (x, y, z),
                             crate::grave::GraveData::from_snapshot(
-                                grave.into(),
+                                grave,
                                 self.server.world_time,
                             ),
                         );

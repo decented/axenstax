@@ -238,7 +238,7 @@ block array. This keeps the hot path (block lookups) fast and cache-friendly.
 > world-level `block_entities: AHashMap<(i32,i32,i32), BlockEntityData>` (an enum, not the
 > opaque `kind`/`data` blob above — same effect, type-safe), each variant persisted as its
 > own `Vec<Saved*>` in `WorldSave`. Variants: Campfire, Furnace, Vendor, Hive, Chest, TipJar,
-> Auction, LatentPrint, and **Grave** (#47, 2026-06-16 — block id 263; holds a 36-slot
+> Auction, LatentPrint, and **Grave** (#47, 2026-06-16 — block id 263; holds a 37-slot (36 bag + the off-hand from 2026-11-15; a 36-slot grave still loads)
 > inventory snapshot index-aligned to the dead player's inventory; persisted as
 > `WorldSave.graves: Vec<SavedGrave>`, append-only + serde-default). The **`keep_inventory`
 > world option** (`WorldMeta.keep_inventory`, serde-default false; `true` for blank-canvas
