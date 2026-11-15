@@ -24,10 +24,10 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::armour::{ArmourItem, ArmourSlot};
-use crate::block::BlockId;
+use crate::block::{self, BlockId};
 use crate::crafting::{self, CraftSlot};
 use crate::inventory::Inventory;
-use crate::item::{Item, ItemStack};
+use crate::item::{Item, ItemStack, MaterialId};
 
 /// The crafting grid's storage: always 3×3; the player's 2×2 uses the
 /// top-left four cells ([`Station::grid_size`]).
@@ -849,15 +849,10 @@ pub fn autofill_return(view: &mut WindowMut) -> bool {
     true
 }
 
-fn autofill(view: &mut WindowMut, example: &[[CraftSlot; 3]; 3]) -> bool {
-    // Step 1 — clear the grid + cursor back into the inventory.
-    if !autofill_return(view) {
-        return false;
-    }
-
-    // Step 2 — tally what the example needs (exact items).
+/// What laying `grid` takes from the bag: one entry per distinct item.
+fn grid_needs(grid: &[[CraftSlot; 3]; 3]) -> Vec<(Item, u32)> {
     let mut needs: Vec<(Item, u32)> = Vec::new();
-    for slot in example.iter().flatten() {
+    for slot in grid.iter().flatten() {
         let item = match *slot {
             CraftSlot::Block(b) => Item::Block(b),
             CraftSlot::Material(m) => Item::Material(m),
@@ -869,20 +864,83 @@ fn autofill(view: &mut WindowMut, example: &[[CraftSlot; 3]; 3]) -> bool {
             needs.push((item, 1));
         }
     }
+    needs
+}
 
-    // Step 3 — affordability check before taking anything.
-    if needs.iter().any(|(item, count)| inv_count(view.inv, item) < *count) {
-        return false; // grid already empty; items already returned
+fn affords(inv: &Inventory, needs: &[(Item, u32)]) -> bool {
+    needs.iter().all(|(item, count)| inv_count(inv, item) >= *count)
+}
+
+/// The grid an autofill of `example` lays from `inv`, or `None` when the bag
+/// can't afford it. The exact example comes first. A card names oak
+/// concretely (`OAK_PLANKS`, `OAK_LOG`; the campfire card's "any log" shows
+/// an oak log), but the matcher takes any planks or any log in most of those
+/// recipes, and mining now drops each tree's own log. So when the bag can't
+/// pay for the example, try uniform substitutions in `ALL_WOOD_SPECIES` order
+/// (oak first): every `OAK_PLANKS` cell becomes that species' planks, and
+/// every `OAK_LOG` cell becomes that species' log block or one of the three
+/// log materials. A substitute is taken only if the bag affords it AND
+/// `match_recipe` gives the same output item and count as the example, so a
+/// species-specific card (an Oak Fence Post) never quietly makes another
+/// species' item. Pure in the example and the bag, so a joiner's client and
+/// the server's window pick the same grid with no wire change.
+fn autofill_grid(inv: &Inventory, example: &[[CraftSlot; 3]; 3]) -> Option<[[CraftSlot; 3]; 3]> {
+    if affords(inv, &grid_needs(example)) {
+        return Some(*example);
+    }
+    let has = |b| example.iter().flatten().any(|s| *s == CraftSlot::Block(b));
+    if !has(block::OAK_PLANKS) && !has(block::OAK_LOG) {
+        return None;
+    }
+    let want = crafting::match_recipe(example)?;
+    for species in block::ALL_WOOD_SPECIES {
+        let planks = CraftSlot::Block(block::planks_block_for(*species));
+        let logs = [
+            CraftSlot::Block(block::log_block_for(*species)),
+            CraftSlot::Material(MaterialId::GreenLog),
+            CraftSlot::Material(MaterialId::SeasonedLog),
+            CraftSlot::Material(MaterialId::KilnDriedLog),
+        ];
+        for log in logs {
+            let mut grid = *example;
+            for cell in grid.iter_mut().flatten() {
+                match *cell {
+                    CraftSlot::Block(block::OAK_PLANKS) => *cell = planks,
+                    CraftSlot::Block(block::OAK_LOG) => *cell = log,
+                    _ => {}
+                }
+            }
+            if grid == *example || !affords(inv, &grid_needs(&grid)) {
+                continue;
+            }
+            if crafting::match_recipe(&grid).is_some_and(|got| got.item == want.item && got.count == want.count) {
+                return Some(grid);
+            }
+        }
+    }
+    None
+}
+
+fn autofill(view: &mut WindowMut, example: &[[CraftSlot; 3]; 3]) -> bool {
+    // Step 1 — clear the grid + cursor back into the inventory.
+    if !autofill_return(view) {
+        return false;
     }
 
+    // Steps 2 and 3 — pick the grid to lay (the example, or a same-output
+    // species substitute) and check the bag affords it before taking anything.
+    let Some(laid) = autofill_grid(view.inv, example) else {
+        return false; // grid already empty; items already returned
+    };
+
     // Step 4 — remove from inventory and lay the grid.
-    for (item, count) in &needs {
+    for (item, count) in &grid_needs(&laid) {
         for _ in 0..*count {
             let _ = inv_remove_one(view.inv, item);
         }
     }
-    for (grid_row, example_row) in view.grid.iter_mut().zip(example.iter()) {
-        for (cell, ex) in grid_row.iter_mut().zip(example_row.iter()) {
+    for (grid_row, laid_row) in view.grid.iter_mut().zip(laid.iter()) {
+        for (cell, ex) in grid_row.iter_mut().zip(laid_row.iter()) {
             *cell = match *ex {
                 CraftSlot::Block(b) => Some(ItemStack::new_block(b, 1)),
                 CraftSlot::Material(m) => Some(ItemStack::new_material(m, 1)),
@@ -1101,9 +1159,7 @@ mod tests {
     //! Every `WindowClick` on plain values: no egui, no GPU.
     use super::*;
     use crate::armour::ArmourMaterial;
-    use crate::block;
     use crate::crafting::{Tool, ToolMaterial, ToolType};
-    use crate::item::MaterialId;
 
     /// Owns the state a `WindowMut` borrows.
     struct Win {
@@ -1670,6 +1726,88 @@ mod tests {
         assert!(w.click(WindowClick::Autofill { example: example("Crafting Table") }).ok());
         assert_eq!(w.total(block::DIRT), 5);
         assert!(w.grid.iter().flatten().flatten().all(|s| s.item == Item::Block(block::OAK_PLANKS)));
+    }
+
+    // ── Autofill substitutes the wood species ───────────────────────────
+
+    fn laid_items(w: &Win) -> Vec<Item> {
+        w.grid.iter().flatten().flatten().map(|s| s.item.clone()).collect()
+    }
+
+    #[test]
+    fn autofill_of_the_crafting_table_card_takes_birch_planks() {
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::BIRCH_PLANKS, 4)));
+        assert!(w.click(WindowClick::Autofill { example: example("Crafting Table") }).ok());
+        let laid = laid_items(&w);
+        assert_eq!(laid.len(), 4);
+        assert!(laid.iter().all(|i| *i == Item::Block(block::BIRCH_PLANKS)));
+        assert_eq!(w.total(block::BIRCH_PLANKS), 4, "nothing lost");
+        let out = recipe_output(&w.grid, TABLE).expect("the laid grid crafts");
+        assert_eq!(out.item, Item::Block(block::CRAFTING_TABLE));
+    }
+
+    #[test]
+    fn autofill_of_the_campfire_card_takes_species_logs_and_legacy_green_logs() {
+        for log in [
+            Item::Block(block::BIRCH_LOG),
+            Item::Block(block::RUBBER_LOG),
+            Item::Material(MaterialId::GreenLog),
+            Item::Material(MaterialId::SeasonedLog),
+            Item::Material(MaterialId::KilnDriedLog),
+        ] {
+            let mut w = Win::new();
+            w.inv.set_slot(0, Some(ItemStack { item: log.clone(), count: 3 }));
+            w.inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Stick, 6)));
+            assert!(w.click(WindowClick::Autofill { example: example("Campfire") }).ok(), "{log:?}");
+            assert_eq!(laid_items(&w).iter().filter(|i| **i == log).count(), 3, "{log:?}");
+            let out = recipe_output(&w.grid, TABLE).expect("the laid grid crafts");
+            assert_eq!(out.item, Item::Block(block::CAMPFIRE_UNLIT), "{log:?}");
+        }
+    }
+
+    #[test]
+    fn autofill_of_a_species_specific_card_never_swaps_the_species() {
+        // The Fence Post card makes OAK fence posts; birch planks would make
+        // birch ones. Refused, and nothing taken.
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::BIRCH_PLANKS, 8)));
+        w.inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Stick, 8)));
+        assert_eq!(w.click(WindowClick::Autofill { example: example("Fence Post") }), ClickResult::Refused);
+        assert!(w.grid.iter().flatten().all(Option::is_none));
+        assert_eq!(w.total(block::BIRCH_PLANKS), 8);
+        // A birch log can't fill the Oak Planks card either (it makes birch
+        // planks), but a legacy Green Log can (it makes oak planks).
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::BIRCH_LOG, 1)));
+        assert_eq!(w.click(WindowClick::Autofill { example: example("Oak Planks") }), ClickResult::Refused);
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_material(MaterialId::GreenLog, 1)));
+        assert!(w.click(WindowClick::Autofill { example: example("Oak Planks") }).ok());
+        assert_eq!(laid_items(&w), vec![Item::Material(MaterialId::GreenLog)]);
+    }
+
+    #[test]
+    fn autofill_uses_the_exact_example_first_then_species_order() {
+        // Oak planks in the bag: the example itself, never a substitute.
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::OAK_PLANKS, 4)));
+        w.inv.set_slot(1, Some(ItemStack::new_block(block::BIRCH_PLANKS, 4)));
+        assert!(w.click(WindowClick::Autofill { example: example("Crafting Table") }).ok());
+        assert!(laid_items(&w).iter().all(|i| *i == Item::Block(block::OAK_PLANKS)));
+        // No oak: ALL_WOOD_SPECIES order (birch before spruce), and one
+        // species only, even when the bag holds a few of each.
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::SPRUCE_PLANKS, 4)));
+        w.inv.set_slot(1, Some(ItemStack::new_block(block::BIRCH_PLANKS, 2)));
+        w.inv.set_slot(2, Some(ItemStack::new_block(block::BIRCH_PLANKS, 2)));
+        assert!(w.click(WindowClick::Autofill { example: example("Crafting Table") }).ok());
+        assert!(laid_items(&w).iter().all(|i| *i == Item::Block(block::BIRCH_PLANKS)));
+        // Three birch and one spruce: no uniform grid is affordable.
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::BIRCH_PLANKS, 3)));
+        w.inv.set_slot(1, Some(ItemStack::new_block(block::SPRUCE_PLANKS, 1)));
+        assert_eq!(w.click(WindowClick::Autofill { example: example("Crafting Table") }), ClickResult::Refused);
     }
 
     #[test]

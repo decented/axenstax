@@ -178,8 +178,10 @@ pub fn friction_seed(tick: u64, cell: (i32, i32, i32)) -> u64 {
 pub fn fuel_value(material: Option<MaterialId>, block: Option<BlockId>) -> Option<u32> {
     if let Some(b) = block {
         return match b {
-            block::OAK_LEAVES => Some(20),    // 1 s — fastest kindling
-            block::OAK_PLANKS => Some(12 * 20),   // 12 s — light fuel
+            // Every species' leaves and planks burn like oak's: mining and
+            // chopping now give each tree its own blocks.
+            b if block::is_any_leaves(b) => Some(20),    // 1 s — fastest kindling
+            b if block::is_any_planks(b) => Some(12 * 20),   // 12 s — light fuel
             // Logs keep their tree type (2026-11-15): mining drops the
             // species' log block, and a log block is fresh (green) wood in
             // every species: 30 s and smoky, the same as a legacy GreenLog
@@ -212,7 +214,7 @@ pub fn fuel_value(material: Option<MaterialId>, block: Option<BlockId>) -> Optio
 /// clean. Called by the right-click-fuel-add handler to decide whether
 /// to bump the campfire's `smoke_ticks` counter.
 pub fn is_smoky_fuel(material: Option<MaterialId>, block: Option<BlockId>) -> bool {
-    matches!(block, Some(block::OAK_LEAVES))
+    block.is_some_and(block::is_any_leaves)
         || block.is_some_and(block::is_any_log_block)
         || matches!(material, Some(MaterialId::GreenLog))
 }
@@ -565,6 +567,21 @@ mod tests {
         // their tree type, which made seasoning pointless).
         assert_eq!(fuel_value(None, Some(block::OAK_LOG)), Some(600));
         assert_eq!(fuel_value(Some(MaterialId::Coal), None), Some(4800));
+    }
+
+    #[test]
+    fn every_species_planks_and_leaves_are_fuel_in_campfire_and_furnace() {
+        for s in block::ALL_WOOD_SPECIES {
+            let planks = block::planks_block_for(*s);
+            let leaves = block::leaves_block_for(*s);
+            assert_eq!(fuel_value(None, Some(planks)), Some(12 * 20), "campfire {s:?} planks");
+            assert_eq!(crate::furnace::fuel_value(None, Some(planks)), Some(12 * 20), "furnace {s:?} planks");
+            assert_eq!(fuel_value(None, Some(leaves)), Some(20), "campfire {s:?} leaves");
+            assert_eq!(crate::furnace::fuel_value(None, Some(leaves)), Some(20), "furnace {s:?} leaves");
+            assert!(is_smoky_fuel(None, Some(leaves)), "{s:?} leaves smoke");
+            assert!(!is_smoky_fuel(None, Some(planks)), "{s:?} planks burn clean");
+        }
+        assert_eq!(fuel_value(None, Some(block::BIRCH_PLANKS)), fuel_value(None, Some(block::OAK_PLANKS)));
     }
 
     #[test]

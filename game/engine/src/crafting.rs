@@ -559,6 +559,14 @@ pub fn is_logish_slot(slot: CraftSlot) -> bool {
     }
 }
 
+/// Whether a single grid slot holds any species' planks (`block::is_any_planks`).
+/// The one test for the recipes that take "any planks" (the Crafting Table and
+/// Sticks since 2026-11-15; the chest ring, the cart and others keep their own
+/// local closures with the same rule).
+pub fn is_planks_slot(slot: CraftSlot) -> bool {
+    matches!(slot, CraftSlot::Block(b) if block::is_any_planks(b))
+}
+
 /// Whether a single grid slot holds "any paper" for recipe purposes.
 /// Mirrors [`is_logish_slot`] — recipes that want any paper tier match
 /// this without caring about the specific material. v1 covers just
@@ -844,7 +852,9 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
             return Some(ItemStack::new_block(block::LEVER, 1));
         }
         // 2 Planks vertical → 4 Sticks
-        if top == CraftSlot::Block(block::OAK_PLANKS) && bot == CraftSlot::Block(block::OAK_PLANKS) {
+        // Any species' planks (a player who chops birch has birch planks and
+        // no oak), mixed species allowed, as the chest ring does.
+        if is_planks_slot(top) && is_planks_slot(bot) {
             return Some(ItemStack::new_material(MaterialId::Stick, 4));
         }
         // Spec 28d.nostrich — Purple Banner. Wool on top, Nostrich-
@@ -1131,11 +1141,8 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
         let bl = grid[min_r + 1][min_c];
         let br = grid[min_r + 1][min_c + 1];
         // 4 Planks → Crafting Table
-        if tl == CraftSlot::Block(block::OAK_PLANKS)
-            && tr == CraftSlot::Block(block::OAK_PLANKS)
-            && bl == CraftSlot::Block(block::OAK_PLANKS)
-            && br == CraftSlot::Block(block::OAK_PLANKS)
-        {
+        // (any species' planks, as the chest ring takes them)
+        if is_planks_slot(tl) && is_planks_slot(tr) && is_planks_slot(bl) && is_planks_slot(br) {
             return Some(ItemStack::new_block(block::CRAFTING_TABLE, 1));
         }
         // 4 Sand → 4 Glass (Wave 16, no furnace yet — direct craft).
@@ -3713,6 +3720,32 @@ mod tests {
         g[2][0] = p; g[2][1] = p; g[2][2] = p;
         // Plank ring + CHEST centre matches no tier (rings are materials), so None.
         assert!(match_recipe(&g).is_none());
+    }
+
+    #[test]
+    fn crafting_table_and_sticks_take_any_species_planks() {
+        for s in block::ALL_WOOD_SPECIES {
+            let p = CraftSlot::Block(block::planks_block_for(*s));
+            let mut g = empty_grid();
+            g[0][0] = p;
+            g[0][1] = p;
+            g[1][0] = p;
+            g[1][1] = p;
+            let out = match_recipe(&g).unwrap_or_else(|| panic!("{s:?} planks make a table"));
+            assert_eq!(out.item, Item::Block(block::CRAFTING_TABLE), "{s:?}");
+            let mut g = empty_grid();
+            g[0][0] = p;
+            g[1][0] = p;
+            let out = match_recipe(&g).unwrap_or_else(|| panic!("{s:?} planks make sticks"));
+            assert_eq!((out.item, out.count), (Item::Material(MaterialId::Stick), 4), "{s:?}");
+        }
+        // Mixed species work too, as the chest ring does.
+        let mut g = empty_grid();
+        g[0][0] = CraftSlot::Block(block::OAK_PLANKS);
+        g[0][1] = CraftSlot::Block(block::BIRCH_PLANKS);
+        g[1][0] = CraftSlot::Block(block::SPRUCE_PLANKS);
+        g[1][1] = CraftSlot::Block(block::OAK_PLANKS);
+        assert!(matches!(match_recipe(&g), Some(o) if o.item == Item::Block(block::CRAFTING_TABLE)));
     }
 
     #[test]
