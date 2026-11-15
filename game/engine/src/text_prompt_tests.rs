@@ -193,7 +193,6 @@ fn field_kinds_follow_their_captions() {
     assert_eq!(PromptKind::for_field("World name"), PromptKind::Name);
     assert_eq!(PromptKind::for_field("Rename skin"), PromptKind::Name);
     assert_eq!(PromptKind::for_field("Seed (optional)"), PromptKind::Plain);
-    assert_eq!(PromptKind::for_field("Type the world name to confirm"), PromptKind::Plain);
     assert_eq!(PromptKind::for_field("Minecraft username"), PromptKind::Plain);
     let codes = [PromptKind::Name.code(), PromptKind::Chat.code(), PromptKind::Plain.code()];
     assert_eq!(codes, [0, 1, 2], "AxenstaxActivity's KIND_* constants");
@@ -453,10 +452,10 @@ fn each_menu_field_has_its_own_cap() {
     assert_eq!(field_max_chars("World name"), NAME_MAX_CHARS);
     assert_eq!(field_max_chars("Rename skin"), NAME_MAX_CHARS);
     assert_eq!(field_max_chars("Minecraft username"), MC_USERNAME_MAX_CHARS);
-    for caption in ["Room code", "Seed (optional)", "Type the world name to confirm", "Server address"] {
+    for caption in ["Room code", "Seed (optional)", "Server address"] {
         assert_eq!(field_max_chars(caption), TEXT_MAX_CHARS, "{caption}");
     }
-    assert!(TEXT_MAX_CHARS >= NAME_MAX_CHARS, "any world's name can be typed to confirm its delete");
+    const { assert!(TEXT_MAX_CHARS >= NAME_MAX_CHARS) };
 }
 
 #[cfg(not(target_arch = "wasm32"))]

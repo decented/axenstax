@@ -49,7 +49,9 @@ pub enum MenuDialog {
         mobs_enabled: bool,
     },
     Edit { world_idx: usize, name: String, description: String },
-    Delete { world_idx: usize, confirm_text: String },
+    /// Delete this world? A two-button confirm (Cancel focused, Delete by click or tap only);
+    /// no typed name. See `draw_delete_dialog`.
+    Delete { world_idx: usize },
     Forking { world_idx: usize },
     JoinDirect { address: String },  // Direct connect dialog
     /// Spec 40 (The Workshop) — confirm wiping the Workshop room back to the void
@@ -1306,7 +1308,7 @@ pub(crate) fn handle_card_action(state: &mut MenuState, idx: usize, card_action:
             state.dialog = MenuDialog::Forking { world_idx: idx };
         }
         CardAction::Delete => {
-            state.dialog = MenuDialog::Delete { world_idx: idx, confirm_text: String::new() };
+            state.dialog = MenuDialog::Delete { world_idx: idx };
         }
         #[cfg(target_arch = "wasm32")]
         CardAction::Backup => {
@@ -2192,7 +2194,6 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 DialogResult::Cancel => {
                     state.dialog = MenuDialog::None;
                 }
-                _ => {}
             }
             return action;
         }
@@ -2233,20 +2234,17 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 DialogResult::Cancel => {
                     state.dialog = MenuDialog::None;
                 }
-                _ => {}
             }
             return action;
         }
-        MenuDialog::Delete { world_idx, confirm_text } => {
+        MenuDialog::Delete { world_idx } => {
             let world_name = state.worlds.get(world_idx)
                 .map(|e| e.meta.display_name.clone())
                 .unwrap_or_default();
-            let result = draw_delete_dialog(ctx, &world_name, &confirm_text);
+            let result = draw_delete_dialog(ctx, &world_name);
             match result {
-                DialogResult::Update(new_text, _) => {
-                    state.dialog = MenuDialog::Delete { world_idx, confirm_text: new_text };
-                }
-                DialogResult::ConfirmSingle => {
+                DeleteChoice::Pending => {}
+                DeleteChoice::Delete => {
                     if let Some(entry) = state.worlds.get(world_idx) {
                         let folder = entry.folder_name.clone();
                         #[cfg(not(target_arch = "wasm32"))]
@@ -2270,10 +2268,9 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     }
                     state.dialog = MenuDialog::None;
                 }
-                DialogResult::Cancel => {
+                DeleteChoice::Cancel => {
                     state.dialog = MenuDialog::None;
                 }
-                _ => {}
             }
             return action;
         }
@@ -2351,7 +2348,6 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 DialogResult::Cancel => {
                     state.dialog = MenuDialog::None;
                 }
-                _ => {}
             }
             return action;
         }
@@ -2888,7 +2884,6 @@ fn list_axeworld_files(dir: &str) -> Vec<String> {
 enum DialogResult {
     Update(String, String),   // Two field values changed
     Confirm(String, String),  // Two field values confirmed
-    ConfirmSingle,            // Single-action confirm (delete)
     Cancel,
 }
 
@@ -3558,91 +3553,83 @@ fn draw_edit_dialog(ctx: &egui::Context, name: &str, description: &str) -> Dialo
     }
 }
 
-fn draw_delete_dialog(ctx: &egui::Context, world_name: &str, confirm_text: &str) -> DialogResult {
-    let mut text_buf = confirm_text.to_string();
-    let mut confirmed = false;
-    let mut cancelled = false;
+/// The width of each of the delete dialog's two buttons.
+const DELETE_BUTTON_WIDTH: f32 = 140.0;
+
+/// What the delete-world dialog decided this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeleteChoice {
+    Pending,
+    Cancel,
+    Delete,
+}
+
+/// Delete this world? A two-button confirm, no typed name (a phone's keyboard does not
+/// capitalise, and the name was matched exactly). Cancel on the left has the keyboard focus
+/// whenever none of the two buttons has it, so Enter, a pad's A, and Space only ever cancel.
+/// **Delete fires on a pointer click or a tap and nothing else**: `clicked_by` is false for
+/// the keyboard activation (Enter or Space on the focused button) that `clicked` also
+/// reports, so no number of Enters, with or without Tab or the arrows moving the focus to
+/// Delete first, can delete a world. Esc and Back close the dialog (`lobby_escape`); the
+/// overlay swallows a click outside the card.
+fn draw_delete_dialog(ctx: &egui::Context, world_name: &str) -> DeleteChoice {
+    let mut choice = DeleteChoice::Pending;
     let border = egui::Color32::from_rgb(90, 40, 40);
 
-    draw_dialog_frame(ctx, "\u{26A0} Delete World", DELETE_RED, border, |ui| {
+    draw_dialog_frame(ctx, "Delete this world?", DELETE_RED, border, |ui| {
         ui.vertical_centered(|ui| {
-            ui.label(
-                egui::RichText::new(format!("This will permanently delete \"{}\" and all its data.", world_name))
-                    .size(14.0)
-                    .color(egui::Color32::from_rgb(170, 170, 170)),
-            );
-            ui.label(
-                egui::RichText::new("This cannot be undone.")
-                    .size(14.0)
-                    .color(egui::Color32::from_rgb(170, 170, 170))
-                    .strong(),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "Are you sure you want to delete {world_name}? This can't be undone."
+                    ))
+                    .size(15.0)
+                    .color(egui::Color32::from_rgb(190, 190, 190)),
+                )
+                .wrap(),
             );
         });
-
-        ui.add_space(16.0);
-
-        // Type to confirm
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Type ").size(12.0).color(egui::Color32::from_rgb(136, 136, 153)));
-            ui.label(
-                egui::RichText::new(world_name)
-                    .size(12.0)
-                    .color(egui::Color32::from_rgb(232, 160, 160))
-                    .background_color(egui::Color32::from_rgb(42, 24, 24))
-                    .strong(),
-            );
-            ui.label(egui::RichText::new(" to confirm").size(12.0).color(egui::Color32::from_rgb(136, 136, 153)));
-        });
-        ui.add_space(6.0);
-        menu_text_field(ui, &mut text_buf, "Type the world name to confirm", "", 360.0, 15.0);
 
         ui.add_space(20.0);
 
-        let matches = text_buf.trim() == world_name;
-
+        // The two buttons sit centred under the text, Cancel left and Delete right.
+        let row_width = 2.0 * DELETE_BUTTON_WIDTH + ui.spacing().item_spacing.x;
+        let lead = ((ui.available_width() - row_width) / 2.0).max(0.0);
         ui.horizontal(|ui| {
-            let del_btn = egui::Button::new(
-                egui::RichText::new("Delete Forever")
-                    .size(15.0)
-                    .color(if matches { egui::Color32::from_rgb(255, 180, 180) } else { egui::Color32::from_rgb(100, 68, 68) })
-                    .strong(),
-            )
-            .min_size(egui::vec2(200.0, 42.0))
-            .fill(if matches { egui::Color32::from_rgb(140, 30, 30) } else { egui::Color32::from_rgb(58, 24, 24) })
-            .corner_radius(egui::CornerRadius::same(6));
-            let resp = ui.add(del_btn);
-            if resp.clicked() && matches {
-                confirmed = true;
-            }
-
-            if ui.add(
-                egui::Button::new(egui::RichText::new("Cancel").size(14.0).color(TEXT_COLOR))
-                    .min_size(egui::vec2(0.0, 42.0))
+            ui.add_space(lead);
+            let cancel = ui.add(
+                egui::Button::new(egui::RichText::new("Cancel").size(15.0).color(TEXT_COLOR))
+                    .min_size(egui::vec2(DELETE_BUTTON_WIDTH, 42.0))
                     .fill(brand::SURFACE)
                     .stroke(egui::Stroke::new(1.0_f32, brand::BORDER))
                     .corner_radius(egui::CornerRadius::same(6)),
-            ).clicked() {
-                cancelled = true;
+            );
+            let delete = ui.add(
+                egui::Button::new(
+                    egui::RichText::new("Delete").size(15.0).color(egui::Color32::WHITE).strong(),
+                )
+                .min_size(egui::vec2(DELETE_BUTTON_WIDTH, 42.0))
+                .fill(egui::Color32::from_rgb(160, 40, 40))
+                .corner_radius(egui::CornerRadius::same(6)),
+            );
+            // Focus never rests outside the two buttons, and starts on Cancel.
+            let focus_in_dialog = ui.ctx().memory(|m| m.has_focus(cancel.id) || m.has_focus(delete.id));
+            if !focus_in_dialog {
+                cancel.request_focus();
+            }
+            if cancel.clicked() {
+                choice = DeleteChoice::Cancel;
+            }
+            if delete.clicked_by(egui::PointerButton::Primary) {
+                choice = DeleteChoice::Delete;
             }
         });
 
-        if !matches {
-            ui.add_space(8.0);
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Button enables when the name matches exactly").size(11.0).color(egui::Color32::from_rgb(85, 68, 68)));
-            });
-        }
-
-        DialogResult::Update(text_buf.clone(), String::new())
+        // The frame wants a `DialogResult`; this dialog's answer is `choice`, read below.
+        DialogResult::Update(String::new(), String::new())
     });
 
-    if confirmed {
-        DialogResult::ConfirmSingle
-    } else if cancelled {
-        DialogResult::Cancel
-    } else {
-        DialogResult::Update(text_buf, String::new())
-    }
+    choice
 }
 
 /// What the Join Game dialog needs to show My Keeps and hand back a Join (native only).
@@ -6330,3 +6317,7 @@ mod keeps_dialog_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "menu_phone_panels_tests.rs"]
 mod phone_panels_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "menu_delete_tests.rs"]
+mod delete_dialog_tests;
