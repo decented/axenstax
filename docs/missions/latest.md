@@ -5,18 +5,19 @@ This is the test guide for the current build. A tester, or a chat assistant co-h
 Everything in this file was checked against the game's code for build 0.2.39. If the game and this guide disagree, that is worth reporting.
 
 - **Build:** 0.2.39 (desktop app, Linux)
-- **This session:** first the "Ask first" question, then the re-checks (Mission 0), then the new missions 5 to 8 (off-hand, shield, lantern, tool shapes), then any of the other missions "On your own"
+- **This session:** first the "Ask first" questions, then the re-checks (Mission 0), then the new missions 5 to 8 (off-hand, shield, lantern, tool shapes), then any of the other missions "On your own"
 - **Coming next:** missions at a village, and missions with a friend
 
 ---
 
 ## Ask first: from last time
 
-**Co-host:** ask this at the start of the session, before Mission 0, and put the answer in your report under Re-checks.
+**Co-host:** ask these at the start of the session, before Mission 0, and put the answers in your report under Re-checks.
 
 Thank you for the answers about the lost inventory. We still don't know what emptied it, so:
 
 1. **If your things ever disappear again, stop and tell us straight away**, before doing anything else. Could you fly (Creative) at that moment? Was any message or red screen on screen? What was near you?
+2. **Do you ever play with a game controller** (an Xbox or PlayStation pad), or always with the keyboard and mouse (or touch on a phone)? Just the answer is enough; nothing to test. It tells us whether a controller-only bug needs fixing soon.
 
 ---
 
