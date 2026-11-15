@@ -6,8 +6,11 @@ use crate::item::ItemStack;
 
 // The name tables live in `give_names`: the resolver below and Tab completion
 // both read them, so a name cannot be accepted but not suggested.
-pub use super::give_names::{block_names, item_names};
-use super::give_names::{block_by_name, bow_by_name, material_by_name, tool_by_name};
+pub use super::give_names::{armour_set_names, block_names, item_names};
+use super::give_names::{
+    armour_by_name, armour_set, block_by_name, bow_by_name, closest_name, is_near_typo, material_by_name, tool_by_name,
+    ArmourWant,
+};
 
 pub struct GiveCommand;
 
@@ -18,7 +21,7 @@ pub struct GiveCommand;
 /// handler) can provision a `ScenarioDef.kit` through the same vocabulary the
 /// `/give` command uses — one resolver, no duplicate item tables.
 pub(crate) fn resolve_item(name: &str, count: u8) -> Result<ItemStack, String> {
-    let key = name.to_lowercase().replace('-', "_");
+    let key = normalise(name);
     if let Some(block_id) = block_by_name(&key) {
         return Ok(ItemStack::new_block(block_id, count.max(1)));
     }
@@ -31,6 +34,15 @@ pub(crate) fn resolve_item(name: &str, count: u8) -> Result<ItemStack, String> {
     }
     if let Some(mat) = material_by_name(&key) {
         return Ok(ItemStack::new_material(mat, count.max(1)));
+    }
+    // Armour: one piece (`satori_helmet`, `iron boots`). Armour never stacks, so the count is
+    // ignored here; `resolve_items` is the one that hands out several pieces or a whole set.
+    match armour_by_name(&key) {
+        Some(ArmourWant::Piece(slot, material)) => return Ok(ItemStack::new_armour(slot, material)),
+        Some(ArmourWant::Set(_)) => {
+            return Err(format!("'{name}' is a whole armour set, not one item; /give hands it out piece by piece"));
+        }
+        None => {}
     }
     // Spec 24 — debug Plan item. 3×3 stone footprint, default name +
     // CC-BY-SA licence. Useful for testing Inspect / place / animated
@@ -51,9 +63,55 @@ pub(crate) fn resolve_item(name: &str, count: u8) -> Result<ItemStack, String> {
             count: 1,
         });
     }
-    Err(format!(
-        "unknown item: '{name}' (try /give stone, /give wooden_pickaxe, /give bow, /give arrow, /give coal, etc.)"
-    ))
+    Err(unknown_item(name, &key))
+}
+
+/// A player-typed name as a table key: lower case, words joined by `_` whether they were
+/// typed with hyphens, underscores or spaces.
+fn normalise(name: &str) -> String {
+    name.trim().to_lowercase().replace(['-', ' '], "_")
+}
+
+/// The error for a name that is nothing `/give` knows, with the nearest real name if there is one.
+fn unknown_item(name: &str, key: &str) -> String {
+    match closest_name(key) {
+        Some(near) => format!("unknown item: '{name}'. Did you mean '{near}'?"),
+        None => format!(
+            "unknown item: '{name}' (try /give stone, /give wooden_pickaxe, /give bow, /give arrow, /give coal, /give satori armour, etc.)"
+        ),
+    }
+}
+
+/// What `/give <name> [count]` hands over: one stack for most items, `count` pieces for armour
+/// (it never stacks), and every piece of a tier for a set name (`satori armour`, `iron armor`),
+/// `count` sets of it.
+pub(crate) fn resolve_items(name: &str, count: u8) -> Result<Vec<ItemStack>, String> {
+    let key = normalise(name);
+    let copies = usize::from(count.max(1));
+    match armour_by_name(&key) {
+        Some(ArmourWant::Set(material)) => {
+            let pieces = armour_set(material);
+            Ok((0..copies)
+                .flat_map(|_| pieces.iter().map(|&(slot, mat)| ItemStack::new_armour(slot, mat)))
+                .collect())
+        }
+        Some(ArmourWant::Piece(slot, material)) => {
+            Ok((0..copies).map(|_| ItemStack::new_armour(slot, material)).collect())
+        }
+        None => resolve_item(name, count).map(|stack| vec![stack]),
+    }
+}
+
+/// The item words and the optional count of `/give` arguments. The count is only a trailing
+/// whole number after at least one item word (`oak planks 64`, `satori helmet 2`); every other
+/// word belongs to the item name, so a name may be several words.
+fn split_args(args: &[String]) -> (String, Option<&str>) {
+    match args.split_last() {
+        Some((last, words)) if !words.is_empty() && last.bytes().all(|b| b.is_ascii_digit()) => {
+            (words.join("_"), Some(last.as_str()))
+        }
+        _ => (args.join("_"), None),
+    }
 }
 
 impl Command for GiveCommand {
@@ -67,22 +125,29 @@ impl Command for GiveCommand {
         "/give <item> [count]   e.g. /give stone 64, /give wooden_pickaxe"
     }
     fn complete(&self, args_before: &[&str], partial: &str, _ctx: &CompletionContext) -> Vec<String> {
-        // Only the item name has a closed set; the count is free text.
-        match args_before {
-            [] => matching(item_names(), partial),
-            _ => Vec::new(),
+        // Only the item name has a closed set; the count is free text. A name may be several
+        // words (`satori helmet`), so after the words already typed offer the next word of
+        // every name that starts with them.
+        let sets = armour_set_names();
+        let names = item_names().iter().chain(sets.iter());
+        if args_before.is_empty() {
+            return matching(names, partial);
         }
+        if args_before.iter().any(|w| w.bytes().all(|b| b.is_ascii_digit())) {
+            return Vec::new();
+        }
+        let prefix = format!("{}_", args_before.join("_").to_lowercase().replace('-', "_"));
+        let next_words = names.filter_map(|n| n.strip_prefix(prefix.as_str())).map(|rest| rest.split('_').next().unwrap_or(rest));
+        matching(next_words, partial)
     }
     fn execute(&self, ctx: &mut CommandContext, args: &[String]) -> CommandResult {
-        let item_name = match args.first() {
-            Some(s) => s,
-            None => {
-                let msg = "usage: /give <item> [count]".to_string();
-                ctx.error(msg.clone());
-                return CommandResult::Error(msg);
-            }
-        };
-        let (count, capped_from): (u8, Option<u32>) = match args.get(1) {
+        if args.is_empty() {
+            let msg = "usage: /give <item> [count]".to_string();
+            ctx.error(msg.clone());
+            return CommandResult::Error(msg);
+        }
+        let (item_name, count_word) = split_args(args);
+        let (count, capped_from): (u8, Option<u32>) = match count_word {
             Some(s) => match s.parse::<u32>() {
                 Ok(n) if n >= 1 => {
                     if n > 64 {
@@ -104,11 +169,25 @@ impl Command for GiveCommand {
             },
             None => (1, None),
         };
-        let stack = match resolve_item(item_name, count) {
+        let stacks = match resolve_items(&item_name, count) {
             Ok(s) => s,
             Err(e) => {
-                ctx.error(e.clone());
-                return CommandResult::Error(e);
+                // `/give stone many`: the item is fine and the last word was meant as a count.
+                // Only when the whole name is nothing like a real one: `satori helmt` is a typo
+                // for a name (`satori` alone is the gem), so it gets the nearest-match message.
+                let msg = match args.split_last() {
+                    Some((last, words))
+                        if !words.is_empty()
+                            && count_word.is_none()
+                            && !is_near_typo(&normalise(&item_name))
+                            && resolve_item(&words.join("_"), 1).is_ok() =>
+                    {
+                        format!("can't parse '{last}' as a count")
+                    }
+                    _ => e,
+                };
+                ctx.error(msg.clone());
+                return CommandResult::Error(msg);
             }
         };
         let Some(slot) = ctx.players.get_mut(ctx.player_idx) else {
@@ -116,24 +195,75 @@ impl Command for GiveCommand {
             ctx.error(msg.clone());
             return CommandResult::Error(msg);
         };
-        if slot.inventory.add_item(stack).is_none() {
+        let total = stacks.len();
+        let label = given_label(&stacks, &item_name);
+        let mut placed = 0;
+        for stack in stacks {
+            if slot.inventory.add_item(stack).is_some() {
+                break;
+            }
+            placed += 1;
+        }
+        if placed > 0 {
             // /give breaks pure-survival, consistent with /clear and /gamemode
             // (engine audit 2026-06-04, F: /give marked cheats_used but not the
             // pure-survival ledger, so `/give diamond_block 64` still read as a
             // pure survival run). Owner decision P0.3.
             *ctx.cheats_used_marker = true;
             *ctx.pure_survival_broken_marker = true;
+        }
+        if placed == total {
             let msg = match capped_from {
-                Some(n) => format!("Gave {count} × {item_name} (capped from {n})"),
-                None => format!("Gave {count} × {item_name}"),
+                Some(n) => format!("Gave {} (capped from {n})", label.with_count(count)),
+                None => format!("Gave {}", label.with_count(count)),
             };
             ctx.success(msg);
             CommandResult::Success
         } else {
-            let msg = "inventory full".to_string();
+            let msg = if placed == 0 {
+                "inventory full".to_string()
+            } else {
+                format!("inventory full: gave {placed} of {total} pieces of {}", label.name)
+            };
             ctx.error(msg.clone());
             CommandResult::Error(msg)
         }
+    }
+}
+
+/// How a hand-over reads back to the player: armour by its real name, never by what was typed.
+struct GivenLabel {
+    name: String,
+    /// Armour is counted in pieces/sets already named in `name`; other items as `N × name`.
+    counted_in_name: bool,
+}
+
+impl GivenLabel {
+    fn with_count(&self, count: u8) -> String {
+        if self.counted_in_name {
+            self.name.clone()
+        } else {
+            format!("{count} × {}", self.name)
+        }
+    }
+}
+
+fn given_label(stacks: &[ItemStack], typed: &str) -> GivenLabel {
+    let armour_name = |s: &ItemStack| match &s.item {
+        crate::item::Item::Armour(a) => Some(crate::armour::armour_label(a.slot, a.material)),
+        _ => None,
+    };
+    let first = stacks.first().and_then(armour_name);
+    match first {
+        Some(label) if stacks.len() == 1 => GivenLabel { name: label.to_string(), counted_in_name: true },
+        Some(label) if stacks.iter().all(|s| armour_name(s) == Some(label)) => {
+            GivenLabel { name: format!("{} × {label}", stacks.len()), counted_in_name: true }
+        }
+        Some(label) => {
+            let tier = label.split(' ').next().unwrap_or(label);
+            GivenLabel { name: format!("{} pieces of {tier} armour", stacks.len()), counted_in_name: true }
+        }
+        None => GivenLabel { name: typed.to_string(), counted_in_name: false },
     }
 }
 

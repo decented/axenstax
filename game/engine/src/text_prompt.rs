@@ -70,8 +70,8 @@ impl PromptKind {
     }
 
     /// The kind a menu text field asks for, from its caption: the two name fields
-    /// get capitalised words, everything else (seed, room code, npub, the delete
-    /// confirmation, a Minecraft username) plain text.
+    /// get capitalised words, everything else (seed, room code, npub, a Minecraft
+    /// username) plain text.
     pub fn for_field(caption: &str) -> PromptKind {
         match caption {
             "World name" | "Rename skin" => PromptKind::Name,
@@ -90,12 +90,11 @@ pub const NAME_MAX_CHARS: usize = 128;
 pub const MC_USERNAME_MAX_CHARS: usize = 16;
 
 /// The one shared cap of every other menu field: a room code, a server address, a Keep
-/// link, an npub, a seed, or a world's name typed to confirm its delete. The join box
+/// link, an npub or a seed. The join box
 /// has no fixed longest input: a Keep link is 145 characters, alone or inside a pasted
 /// message of several hundred (`keeps::route_join` finds it there), and a `ws://` or
 /// `wss://` address may carry a path and query of any length. 4096 holds all of them
-/// with wide headroom (a prompt must never cut real join text), and is above the name
-/// cap, so any world's name can be typed to confirm its delete.
+/// with wide headroom (a prompt must never cut real join text).
 pub const TEXT_MAX_CHARS: usize = 4096;
 
 /// The most a menu field's prompt lets you type (UTF-16 units on Android; the web

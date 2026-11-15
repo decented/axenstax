@@ -3157,7 +3157,7 @@ Cards sorted by last played (most recent first).
 **Selection and actions:**
 - Click a card to select it (blue border highlight, action bar revealed).
 - Double-click to play immediately.
-- Action bar on selected card: **Play** (green, prominent), **Edit** (name + description dialog), **Fork** (duplicate world), **Delete** (red, type-to-confirm).
+- Action bar on selected card: **Play** (green, prominent), **Edit** (name + description dialog), **Fork** (duplicate world), **Delete** (red, two-button confirm).
 - "+ Create New World" button below the list (dashed border).
 
 **Empty state:** If no worlds exist, centred "No worlds yet" message with prominent "Create Your First World" button.
@@ -3176,12 +3176,11 @@ Folder name: lowercased, spaces to underscores, non-alphanumeric stripped, trunc
 - **Play** — load and enter the world.
 - **Edit** — modal dialog with name (pre-filled) and description (pre-filled) fields. Changes `world_meta.json` only. Folder name unchanged.
 - **Fork** — duplicates entire world directory to a new folder. New world gets display name `"<original> (fork)"`, description `"Forked from <original>"`, fresh `created_at`. Brief "Forking..." status on card.
-- **Delete** — type-to-confirm modal:
-  1. Warning: "This will permanently delete **"<name>"** and all its data. This cannot be undone."
-  2. Text input: "Type **<name>** to confirm" (must match exactly, case-sensitive).
-  3. "Delete Forever" button disabled until text matches.
-  4. Cancel button.
-  This pattern prevents accidental deletion — especially important for younger players. Muscle memory cannot delete a world.
+- **Delete** — a two-button confirm (changed 2026-11-15: it used to ask for the world's name typed exactly, which on a phone meant a keyboard that does not capitalise against a case-sensitive match):
+  1. Title "Delete this world?"; body "Are you sure you want to delete <name>? This can't be undone."
+  2. **Cancel** on the left, **Delete** on the right in a warning colour. No text field, so no on-screen keyboard is raised for it, on desktop or touch.
+  3. **Cancel holds the keyboard focus** whenever the dialog is up, so Enter (or a pad's A) can only cancel. **Delete fires on a mouse click or a tap and on nothing else**: Enter or Space on a Delete the player has Tabbed or arrowed to does nothing, so no number of key presses can delete a world. Esc and Back cancel; a click outside the card does nothing. The same dialog on desktop and touch.
+  This keeps accidental deletion hard (a deliberate pointer action on the button named Delete, with Cancel the default) without a typing step. Pinned by `menu_delete_tests.rs`.
 
 ##### Pause Menu (in-game)
 
@@ -3200,7 +3199,7 @@ GameMode::Menu { worlds, selected, dialog }
     None              — world list visible
     CreateDialog      — name + seed input
     EditDialog        — name + description input for selected world
-    DeleteDialog      — type-to-confirm for selected world
+    DeleteDialog      — two-button confirm (Cancel focused) for selected world
     Forking           — brief progress indicator (auto-dismisses)
 
 GameMode::Playing
@@ -3278,7 +3277,7 @@ Current world folder name stored in `Mutex<Option<String>>` static. Cursor captu
   wire's world-name limit; "Rename skin" the same), "Minecraft username" 16 (the
   Mojang rule `mc_import::validate_username` checks), and one shared 4096
   (`TEXT_MAX_CHARS`) for everything else (room code, server address, Keep link, npub,
-  seed, the delete confirmation): a Keep link is 145 characters and may sit inside a
+  seed): a Keep link is 145 characters and may sit inside a
   pasted message of several hundred, a `wss://` address may carry a long path, and the
   join parser has no fixed longest, so real join text is never cut. A
   prompt's cap is never below what its field already holds, so OK on an untouched
@@ -3450,7 +3449,7 @@ gated behind the Spec 1 + Spec 2 `hosted_server.rs` queue):
 | `/tp <x> <y> <z>` | Op | yes | Teleport self |
 | `/seed` | — | no | Show world seed |
 | `/clear` | Op | yes | Empty inventory |
-| `/give <item> [count]` | Op | yes | Add item to inventory |
+| `/give <item> [count]` | Op | yes | Add item to inventory. The item name may be several words (`oak planks 64`, `satori helmet 2`): the count is only a trailing whole number. Every armour piece of every tier is a name (`<tier>_<slot>`: `satori_helmet`, `iron_boots`; tiers leather, iron, chainmail, diamond, satori, rubber; slots helmet, chestplate, leggings, boots), typed with underscores, spaces or hyphens, in either order, with `helm`, `chest`, `legs` and `boot` as short forms; `<tier> armour` or `armor` (`satori armour`) gives the whole set of that tier, and `satoshi` is accepted as a typing alias for `satori` (never shown). A wrong name answers with the nearest real one ("Did you mean 'satori_helmet'?"), not a count error. Tab completes names, sets, and the next word of a multi-word name. One name table (`give_names.rs`) feeds the resolver, Tab and Trials item names (`ItemKind::from_name`). |
 **Removed 2026-11-01 (owner decision): the game has no in-game feedback channel.**
 `/bug`, `/idea` and `/mailbox`, the hidden Settings tester unlock (tap the version
 line 7 times), the native outbox/worker/status board, the tester-unlock setting

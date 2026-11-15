@@ -95,7 +95,7 @@ Click **Fork** on a world card. Creates a copy of the world with a new name. Use
 
 ## Deleting a world
 
-Click **Delete** on a world card → confirmation dialog → type the world name to confirm → delete. There's no undo. Worlds you delete are gone.
+Click **Delete** on a world card → a box asks "Are you sure you want to delete <your world>? This can't be undone." with **Cancel** and **Delete**. Cancel is already selected, so pressing Enter just closes the box; to delete, click or tap **Delete**. Esc (or Back on a phone) also cancels. There's no undo. Worlds you delete are gone.
 
 ## Hosting + joining (multiplayer)
 

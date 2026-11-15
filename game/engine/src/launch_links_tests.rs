@@ -155,7 +155,7 @@ fn a_link_waits_while_another_dialog_is_open() {
     let busy = [
         MenuDialog::ResetWorkshop,
         MenuDialog::SignIn { paste_uri: String::new(), show_paste: false },
-        MenuDialog::Delete { world_idx: 0, confirm_text: String::new() },
+        MenuDialog::Delete { world_idx: 0 },
         MenuDialog::JoinKeep { invite: crate::keeps::Invite { host_key: HOST, secret: SECRET } },
     ];
     for mut dialog in busy {

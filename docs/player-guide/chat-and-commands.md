@@ -83,6 +83,11 @@ Spawn an item into your inventory.
 - `/give iron_pickaxe` — one iron pickaxe.
 - `/give wheat 64` — a full stack of wheat.
 - `/give campfire` — one campfire block.
+- `/give oak planks 64` — names can be several words; the count, if any, goes last.
+- `/give satori helmet` — one Satori Helmet. Every armour piece works the same way (`iron boots`, `diamond chestplate`, `leather leggings`, short forms `chest` and `legs` too).
+- `/give satori armour` (or `armor`) — the whole set of four. Try it with any tier: `iron armour`, `diamond armour`.
+
+If you mistype a name, the message suggests the nearest real one. Press **Tab** to complete names.
 
 A "cheats used" marker is added to the World Integrity Ledger when `/give` runs. Survival-purist achievements account for it.
 

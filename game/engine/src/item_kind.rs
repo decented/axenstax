@@ -5,8 +5,8 @@
 //!
 //! Authored in a trial's JSON as a `/give`-style name (`"iron_pickaxe"`,
 //! `"orange_dye"`, `"crafting_table"`, `"iron_helmet"`), resolved through the
-//! same vocabulary as kits (`give::resolve_item`) plus the armour names
-//! (`<material>_<slot>`), which `/give` does not list. It also accepts the
+//! same vocabulary as kits (`give::resolve_item`), armour names
+//! (`<material>_<slot>`) included. It also accepts the
 //! typed form it serialises to (`{"Tool": ["Pickaxe", "Iron"]}`), so a def
 //! round-trips through `ScenarioDef::to_json` and back unchanged. An unknown
 //! name is a parse error: a filter that silently widened to "any item" would
@@ -56,13 +56,12 @@ impl ItemKind {
         }
     }
 
-    /// Resolve a `/give`-style name (hyphens or underscores, any case), or an
-    /// armour name `<material>_<slot>` (`iron_helmet`, `leather_boots`).
+    /// Resolve a `/give`-style name (hyphens, underscores or spaces, any case). Armour
+    /// (`iron_helmet`, `leather_boots`) is part of that vocabulary, so a Trial names it the
+    /// way a player would `/give` it.
     pub fn from_name(name: &str) -> Option<Self> {
-        if let Ok(stack) = crate::commands::builtins::give::resolve_item(name, 1) {
-            return Some(Self::of(&stack.item));
-        }
-        armour_by_name(&name.to_lowercase().replace('-', "_"))
+        let stack = crate::commands::builtins::give::resolve_item(name, 1).ok()?;
+        Some(Self::of(&stack.item))
     }
 
     /// A short, friendly description for the auto-derived task line
@@ -88,27 +87,6 @@ fn words(camel: &str) -> String {
         out.extend(c.to_lowercase());
     }
     out
-}
-
-fn armour_by_name(key: &str) -> Option<ItemKind> {
-    let (mat, slot) = key.rsplit_once('_')?;
-    let material = match mat {
-        "leather" => ArmourMaterial::Leather,
-        "iron" => ArmourMaterial::Iron,
-        "diamond" => ArmourMaterial::Diamond,
-        "satori" => ArmourMaterial::Satori,
-        "chainmail" => ArmourMaterial::Chainmail,
-        "rubber" => ArmourMaterial::Rubber,
-        _ => return None,
-    };
-    let slot = match slot {
-        "helmet" => ArmourSlot::Helmet,
-        "chestplate" => ArmourSlot::Chestplate,
-        "leggings" => ArmourSlot::Leggings,
-        "boots" => ArmourSlot::Boots,
-        _ => return None,
-    };
-    Some(ItemKind::Armour(slot, material))
 }
 
 impl<'de> Deserialize<'de> for ItemKind {
