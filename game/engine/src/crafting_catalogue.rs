@@ -1137,9 +1137,11 @@ fn push_more_literal_cards(out: &mut Vec<RecipeCard>) {
     out.push(tool_card("Fishing Rod", Tool::new(ToolType::FishingRod, ToolMaterial::Wood),
         vec![mat(M::Stick, 3), mat(M::String, 2)],
         grid(&[(0, 2, STICK), (1, 1, STICK), (1, 2, STRING), (2, 0, STICK), (2, 2, STRING)]), RecipeCategory::Tools));
+    // Any log works (`FuzzyKind::Log`); the card shows the oak log.
+    const LOG: CraftSlot = CraftSlot::Block(block::OAK_LOG);
     out.push(card("Campfire", ItemStack::new_block(block::CAMPFIRE_UNLIT, 1),
-        vec![mat(M::Stick, 6), RecipeIngredient { item: Item::Material(M::GreenLog), count: 3, fuzzy: Some(FuzzyKind::Log) }],
-        grid(&[(0, 0, STICK), (0, 1, STICK), (0, 2, STICK), (1, 0, m_at(M::GreenLog)), (1, 1, m_at(M::GreenLog)), (1, 2, m_at(M::GreenLog)), (2, 0, STICK), (2, 1, STICK), (2, 2, STICK)]),
+        vec![mat(M::Stick, 6), RecipeIngredient { item: Item::Block(block::OAK_LOG), count: 3, fuzzy: Some(FuzzyKind::Log) }],
+        grid(&[(0, 0, STICK), (0, 1, STICK), (0, 2, STICK), (1, 0, LOG), (1, 1, LOG), (1, 2, LOG), (2, 0, STICK), (2, 1, STICK), (2, 2, STICK)]),
         RecipeCategory::Stations));
 }
 

@@ -8,10 +8,9 @@
 //! driver flips the block back to RUBBER_LOG and drops the index
 //! entry.
 //!
-//! Mining either variant yields a GreenLog timber drop (the species-
-//! neutral wood-log convention) — the cooldown state is lost when
-//! the player fells the tree. The player chooses between ongoing
-//! tapping or one-shot timber.
+//! Mining either variant yields a rubber log block (logs keep their tree
+//! type) — the cooldown state is lost when the player fells the tree. The
+//! player chooses between ongoing tapping or one-shot timber.
 //!
 //! Spec: `docs/foundations/2026-05-23-rubber.md`.
 

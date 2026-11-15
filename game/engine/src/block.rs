@@ -69,9 +69,10 @@ pub const HAY_BALE: BlockId = 72;
 pub const AMETHYST_BLOCK: BlockId = 73;
 
 // Spec 28b Wood Species (2026-05-20). Five new species × {log, leaves,
-// planks}. Bincode-positional. Oak stays at its original ids 7/8/9; the
-// new species mine-drop to GreenLog (species-neutral) just like Oak,
-// preserving the Wave 29 log-seasoning pipeline.
+// planks}. Bincode-positional. Oak stays at its original ids 7/8/9. Every
+// species' log mines to its own log block (2026-11-15; it was the
+// species-neutral GreenLog material before), and every log block counts as
+// fresh wood in the Wave 29 log-seasoning pipeline.
 pub const BIRCH_LOG: BlockId = 74;
 pub const BIRCH_LEAVES: BlockId = 75;
 pub const BIRCH_PLANKS: BlockId = 76;
@@ -824,6 +825,21 @@ pub fn planks_block_for(s: WoodSpecies) -> BlockId {
         WoodSpecies::Acacia => ACACIA_PLANKS,
         WoodSpecies::DarkOak => DARK_OAK_PLANKS,
         WoodSpecies::Rubber => RUBBER_PLANKS,
+    }
+}
+
+/// Inverse of `log_block_for`: the species of a log block (a tapped rubber
+/// log is a rubber log), or `None` if the id isn't a log.
+pub fn species_for_log(id: BlockId) -> Option<WoodSpecies> {
+    match id {
+        OAK_LOG => Some(WoodSpecies::Oak),
+        BIRCH_LOG => Some(WoodSpecies::Birch),
+        SPRUCE_LOG => Some(WoodSpecies::Spruce),
+        JUNGLE_LOG => Some(WoodSpecies::Jungle),
+        ACACIA_LOG => Some(WoodSpecies::Acacia),
+        DARK_OAK_LOG => Some(WoodSpecies::DarkOak),
+        RUBBER_LOG | RUBBER_LOG_TAPPED => Some(WoodSpecies::Rubber),
+        _ => None,
     }
 }
 
@@ -3485,11 +3501,6 @@ impl BlockRegistry {
             // mine_drop_with_seed variant adds a chance of recovering
             // 1 Salt on top.
             SALT_PATH => ItemStack::new_block(DIRT, 1),
-            // Rubber — tapped log drops 1 GreenLog (matches the species-
-            // neutral timber convention). The cooldown state is lost
-            // when the player fells the tree. The live RUBBER_LOG itself
-            // mines to GreenLog via the multi-species log arm above.
-            RUBBER_LOG_TAPPED => ItemStack::new_material(MaterialId::GreenLog, 1),
             // Living world S3 — a held feast leaves a marker; breaking it gives
             // back a table to lay the next one (the marker is never an item).
             FEAST_MARKER => ItemStack::new_block(FEAST_TABLE, 1),
@@ -3585,22 +3596,19 @@ impl BlockRegistry {
             // nothing; the hideout's identity lives in the
             // `World::brigand_hideouts` side-table, not in this block.
             BRIGAND_HIDEOUT_BANNER => ItemStack::empty(),
-            // Log Seasoning (Wave 29). Mining any oak-log block (tree
-            // trunk OR player-placed) drops 1 GreenLog material. The
-            // OAK_LOG block id stays valid as a placement target — only
-            // the mine drop changed. Old saves' OAK_LOG block-items in
-            // inventory are still placeable and still burn as 60 s fuel
-            // (campfire fuel-value back-compat arm).
+            // Logs keep their tree type (2026-11-15). Mining any species'
+            // log, natural or placed, drops that species' log block, one
+            // per block: a birch trunk gives birch logs, which place as
+            // birch, craft birch planks and hang on a Drying Rack as fresh
+            // wood. Every log block is itself fresh (green) wood — see
+            // `is_any_log_block` and the fuel ladder in `campfire.rs`. The
+            // legacy species-neutral `MaterialId::GreenLog` stack still
+            // works (places as oak, crafts oak planks) but nothing drops it
+            // any more. Handled by the `other` self-drop arm below.
             //
-            // Spec 28b — every species' log mines to the same GreenLog.
-            // Species-neutral GreenLog keeps the Wave 29 drying-rack
-            // pipeline simple (one fuel ladder, one workstation recipe);
-            // visual species identity lives in the placed block, not the
-            // log material. Per-species sawmill output is deferred to a
-            // post-alpha "wood-grade economy" wave.
-            OAK_LOG | BIRCH_LOG | SPRUCE_LOG | JUNGLE_LOG | ACACIA_LOG | DARK_OAK_LOG | RUBBER_LOG => {
-                ItemStack::new_material(MaterialId::GreenLog, 1)
-            }
+            // A tapped rubber log is felled as the plain rubber log (the
+            // cooldown state is lost when the player fells the tree).
+            RUBBER_LOG_TAPPED => ItemStack::new_block(RUBBER_LOG, 1),
             // Fibre plants (Spec 36). Phase 2: the WILD plant yields SEEDS —
             // you bring them home to farm. The fibre itself (Cotton / Hemp
             // Fibre) comes from harvesting the grown crop (see growth.rs
@@ -4152,16 +4160,23 @@ mod tests {
     }
 
     #[test]
-    fn every_species_log_mines_to_green_log() {
-        use crate::item::{Item, MaterialId};
+    fn every_species_log_mines_to_its_own_log_block() {
+        // Logs keep their tree type (2026-11-15): breaking a log of any
+        // species drops that species' log block, one per block, never the
+        // neutral GreenLog material.
+        use crate::item::Item;
         let reg = BlockRegistry::new();
         for s in ALL_WOOD_SPECIES {
-            let drop = reg.mine_drop(log_block_for(*s));
-            match drop.item {
-                Item::Material(MaterialId::GreenLog) => {}
-                _ => panic!("{:?} log should mine to GreenLog", s),
-            }
+            let log = log_block_for(*s);
+            let drop = reg.mine_drop(log);
+            assert_eq!(drop.item, Item::Block(log), "{:?} log should mine to itself", s);
+            assert_eq!(drop.count, 1);
+            assert_eq!(reg.mine_drop_with_seed(log, 7).item, Item::Block(log));
+            assert_eq!(species_for_log(log), Some(*s));
         }
+        // A tapped rubber log is felled as the plain rubber log.
+        assert_eq!(reg.mine_drop(RUBBER_LOG_TAPPED).item, Item::Block(RUBBER_LOG));
+        assert_eq!(species_for_log(OAK_PLANKS), None);
     }
 
     #[test]
@@ -4360,27 +4375,20 @@ mod tests {
     }
 
     #[test]
-    fn oak_log_mine_drops_green_log_material() {
-        // Wave 29 — mining an OAK_LOG (tree trunk or placed block) now
-        // drops a GreenLog material instead of the block itself. The
-        // material can be re-placed as a block via the right-click
-        // handler's `material_as_placeable_block` lookup.
-        use crate::item::{Item, MaterialId};
+    fn oak_log_mine_drops_the_oak_log_block() {
+        // Logs keep their tree type (2026-11-15): an oak trunk drops an oak
+        // log block, not the old species-neutral GreenLog material.
+        use crate::item::Item;
         let reg = BlockRegistry::new();
         let drop = reg.mine_drop(OAK_LOG);
-        match drop.item {
-            Item::Material(MaterialId::GreenLog) => {}
-            other => panic!("expected GreenLog material, got {:?}", other),
-        }
+        assert_eq!(drop.item, Item::Block(OAK_LOG));
         assert_eq!(drop.count, 1);
     }
 
     #[test]
     fn oak_log_block_is_still_registered_for_placement() {
-        // Back-compat: OAK_LOG block id stays valid even though mining
-        // returns a material instead of the block. Old saves with
-        // ItemStack::new_block(OAK_LOG, ..) in inventory must still
-        // place a real oak-log block.
+        // OAK_LOG stays a valid, placeable block id: it is what mining
+        // drops and what a legacy GreenLog stack places as.
         let reg = BlockRegistry::new();
         let def = reg.get(OAK_LOG);
         assert_eq!(def.name, "genesis:oak_log");

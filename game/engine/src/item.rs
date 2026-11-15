@@ -79,9 +79,11 @@ pub enum MaterialId {
     BakedCorn,
     BakedPotato,
     BakedCarrot,
-    // Log Seasoning (Wave 29, 2026-05-19). Three-tier wood economy. Tree
-    // mines drop GreenLog; the Drying Rack workstation seasons them into
-    // SeasonedLog over ~5 real minutes; KilnDriedLog is the future Kiln
+    // Log Seasoning (Wave 29, 2026-05-19). Three-tier wood economy. Fresh
+    // wood is any species' log block (tree mines drop the species' log
+    // block since 2026-11-15; GreenLog is the legacy species-neutral stack,
+    // nothing drops it any more); the Drying Rack workstation seasons it
+    // into SeasonedLog over ~5 real minutes; KilnDriedLog is the future Kiln
     // output (defined now for the fuel-value table; produced post-Spec 20).
     // Appended after Wave 28 baked-veg materials to preserve bincode
     // variant indices.
@@ -1542,15 +1544,34 @@ impl Item {
     }
 }
 
+/// The three log materials are drawn as a log, not a flat colour swatch: the
+/// oak log block's icon (the same `tex_top` path every block icon takes) with a
+/// per-stage tint, returned as `(block whose icon to draw, RGB multiplier
+/// 0..1)`. Fresh is a faint green cast, seasoned a warm amber, kiln-dried a
+/// charred brown. `None` for every other material. The 3D cube a dropped or
+/// held log is drawn as (`entity_model::material_texture`) already uses the
+/// oak log's bark and takes no tint.
+pub fn log_material_icon(m: MaterialId) -> Option<(BlockId, [f32; 3])> {
+    let tint = match m {
+        MaterialId::GreenLog => [0.85, 1.0, 0.70],
+        MaterialId::SeasonedLog => [1.0, 0.90, 0.75],
+        MaterialId::KilnDriedLog => [0.65, 0.55, 0.50],
+        _ => return None,
+    };
+    Some((crate::block::OAK_LOG, tint))
+}
+
 /// If a material can be placed as a world block (right-click-to-place),
 /// return the block id it represents. Returns `None` for non-placeable
 /// materials. Cross-game-generic primitive — game-specific data lives in
 /// the match arm below.
 ///
 /// Wave 29 (log seasoning): all three log materials place as OAK_LOG so
-/// players can build with green logs immediately after chopping a tree
-/// without going through a 1:1 crafting conversion. Seasoning matters
-/// for fuel quality + smoke economy, not for structural use.
+/// a legacy GreenLog stack, a seasoned log and a kiln-dried log are all
+/// buildable without a 1:1 crafting conversion. Seasoning matters for fuel
+/// quality + smoke economy, not for structural use. (Since 2026-11-15 mining
+/// drops the species' own log BLOCK, which places as itself, so only legacy
+/// and seasoned stacks reach this arm.)
 pub fn material_as_placeable_block(m: MaterialId) -> Option<BlockId> {
     match m {
         MaterialId::GreenLog | MaterialId::SeasonedLog | MaterialId::KilnDriedLog => {
@@ -1842,6 +1863,20 @@ mod tests {
         assert_eq!(Item::Material(MaterialId::GreenLog).name(&registry), "Green Log");
         assert_eq!(Item::Material(MaterialId::SeasonedLog).name(&registry), "Seasoned Log");
         assert_eq!(Item::Material(MaterialId::KilnDriedLog).name(&registry), "Kiln-Dried Log");
+    }
+
+    #[test]
+    fn log_materials_are_drawn_as_a_log_with_a_tint_per_stage() {
+        let mut tints = std::collections::HashSet::new();
+        for m in [MaterialId::GreenLog, MaterialId::SeasonedLog, MaterialId::KilnDriedLog] {
+            let (block, tint) = log_material_icon(m).expect("a log material has a log icon");
+            assert_eq!(block, crate::block::OAK_LOG, "{m:?} draws the log's own icon");
+            assert!(tint.iter().all(|c| (0.0..=1.0).contains(c)), "{m:?} tint is a multiplier");
+            let key = tint.map(|c| (c * 100.0) as i32);
+            assert!(tints.insert(key), "{m:?} must have its own tint");
+        }
+        assert!(log_material_icon(MaterialId::Stick).is_none());
+        assert!(log_material_icon(MaterialId::Coal).is_none());
     }
 
     #[test]

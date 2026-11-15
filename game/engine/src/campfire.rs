@@ -172,17 +172,20 @@ pub fn friction_seed(tick: u64, cell: (i32, i32, i32)) -> u64 {
 
 /// Burn-time per fuel item, in 20-TPS ticks. Returns `None` if the
 /// material/block isn't a recognised fuel. Fuel ladder (Wave 17 + 29):
-/// leaves 1 s / sticks 2 s / green log 30 s / planks 12 s / placed-oak-log
-/// block 60 s / seasoned log 60 s / coal 240 s / kiln-dried log 120 s.
+/// leaves 1 s / sticks 2 s / green log 30 s (a legacy GreenLog stack, or any
+/// species' log block: a log is fresh wood) / planks 12 s / seasoned log 60 s
+/// / coal 240 s / kiln-dried log 120 s.
 pub fn fuel_value(material: Option<MaterialId>, block: Option<BlockId>) -> Option<u32> {
     if let Some(b) = block {
         return match b {
             block::OAK_LEAVES => Some(20),    // 1 s — fastest kindling
             block::OAK_PLANKS => Some(12 * 20),   // 12 s — light fuel
-            // Back-compat: old saves carry oak-log as a block-item in
-            // inventory (pre-Wave-29). New mines drop GreenLog material.
-            // Both burn the same 60 s for old-save players.
-            block::OAK_LOG => Some(60 * 20),      // 60 s — standard fuel
+            // Logs keep their tree type (2026-11-15): mining drops the
+            // species' log block, and a log block is fresh (green) wood in
+            // every species: 30 s and smoky, the same as a legacy GreenLog
+            // stack. (It used to be a 60 s clean oak-log arm; that made
+            // seasoning pointless once the drop became the block.)
+            b if block::is_any_log_block(b) => Some(30 * 20), // 30 s — fresh-cut
             // Wooden slabs, stairs, doors, trapdoors and gates burn too.
             b => crate::building_variants::fuel_ticks(b),
         };
@@ -210,10 +213,12 @@ pub fn fuel_value(material: Option<MaterialId>, block: Option<BlockId>) -> Optio
 /// to bump the campfire's `smoke_ticks` counter.
 pub fn is_smoky_fuel(material: Option<MaterialId>, block: Option<BlockId>) -> bool {
     matches!(block, Some(block::OAK_LEAVES))
+        || block.is_some_and(block::is_any_log_block)
         || matches!(material, Some(MaterialId::GreenLog))
 }
 
-/// Smoke ticks added when a single GreenLog is burned as fuel. 1200 ticks
+/// Smoke ticks added when a single green log (a log block of any species, or
+/// a legacy GreenLog stack) is burned as fuel. 1200 ticks
 /// = 60 s — 2× the log's 30 s burn so the smoke beacon outlives the flame,
 /// matching the precedent of leaves (1 s burn / 3 s smoke).
 pub const SMOKE_TICKS_PER_GREEN_LOG: u32 = 1200;
@@ -556,7 +561,9 @@ mod tests {
         assert_eq!(fuel_value(None, Some(block::OAK_LEAVES)), Some(20));
         assert_eq!(fuel_value(Some(MaterialId::Stick), None), Some(40));
         assert_eq!(fuel_value(None, Some(block::OAK_PLANKS)), Some(240));
-        assert_eq!(fuel_value(None, Some(block::OAK_LOG)), Some(1200));
+        // A log block is fresh wood: 30 s (it was a clean 60 s before logs kept
+        // their tree type, which made seasoning pointless).
+        assert_eq!(fuel_value(None, Some(block::OAK_LOG)), Some(600));
         assert_eq!(fuel_value(Some(MaterialId::Coal), None), Some(4800));
     }
 
@@ -568,12 +575,29 @@ mod tests {
         assert_eq!(fuel_value(Some(MaterialId::GreenLog), None), Some(30 * 20));
         assert_eq!(fuel_value(Some(MaterialId::SeasonedLog), None), Some(60 * 20));
         assert_eq!(fuel_value(Some(MaterialId::KilnDriedLog), None), Some(120 * 20));
-        // Back-compat: old saves' OAK_LOG block-items still burn the same.
-        assert_eq!(fuel_value(None, Some(block::OAK_LOG)), Some(60 * 20));
+        // Every species' log block is green wood too, same as a GreenLog.
+        for s in block::ALL_WOOD_SPECIES {
+            assert_eq!(fuel_value(None, Some(block::log_block_for(*s))), Some(30 * 20), "{s:?}");
+        }
+        assert_eq!(fuel_value(None, Some(block::OAK_LOG)), fuel_value(Some(MaterialId::GreenLog), None));
     }
 
     #[test]
-    fn is_smoky_fuel_green_log_and_leaves_only() {
+    fn every_species_log_block_is_smoky_green_wood_in_campfire_and_furnace() {
+        for s in block::ALL_WOOD_SPECIES {
+            let log = block::log_block_for(*s);
+            assert_eq!(fuel_value(None, Some(log)), Some(30 * 20), "campfire {s:?}");
+            assert_eq!(crate::furnace::fuel_value(None, Some(log)), Some(30 * 20), "furnace {s:?}");
+            assert!(is_smoky_fuel(None, Some(log)), "{s:?} smokes");
+        }
+        // Seasoned and kiln-dried wood stay clean.
+        assert!(!is_smoky_fuel(Some(MaterialId::SeasonedLog), None));
+        assert_eq!(crate::furnace::fuel_value(Some(MaterialId::SeasonedLog), None), Some(60 * 20));
+        assert_eq!(crate::furnace::fuel_value(Some(MaterialId::KilnDriedLog), None), Some(120 * 20));
+    }
+
+    #[test]
+    fn is_smoky_fuel_green_wood_and_leaves_only() {
         // Smoke pillar (Wave 28) fires for leaves + green logs only.
         // Seasoned + kiln-dried + sticks + planks + coal all burn clean.
         assert!(is_smoky_fuel(Some(MaterialId::GreenLog), None));
@@ -582,7 +606,8 @@ mod tests {
         assert!(!is_smoky_fuel(Some(MaterialId::KilnDriedLog), None));
         assert!(!is_smoky_fuel(Some(MaterialId::Stick), None));
         assert!(!is_smoky_fuel(Some(MaterialId::Coal), None));
-        assert!(!is_smoky_fuel(None, Some(block::OAK_LOG)));
+        // A log block is green wood and smokes (logs keep their tree type).
+        assert!(is_smoky_fuel(None, Some(block::OAK_LOG)));
         assert!(!is_smoky_fuel(None, Some(block::OAK_PLANKS)));
     }
 

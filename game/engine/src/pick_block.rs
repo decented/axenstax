@@ -9,7 +9,7 @@
 //!   papyrus reed) run backwards, and the normalisations the break drop
 //!   already makes (`BlockRegistry::mine_drop`: lit campfire to unlit,
 //!   turning wheel to idle, deepslate variants to the canonical block).
-//!   Where the mine drop is the *raw* thing (ore to coal, log to green log)
+//!   Where the mine drop is the *raw* thing (ore to coal, a crop to its seed)
 //!   the pick wants the *placeable* thing, so those return the block.
 //! - [`plan_pick`] — what to do to the inventory, per play mode: a
 //!   [`PickPlan`] over the hotbar and bag. `game_loop` applies it through the
@@ -136,9 +136,9 @@ fn crop_item(b: BlockId) -> Option<Item> {
 }
 
 /// The material that places as `b` (the economy-block items and saplings are
-/// stored as materials), if any. The log materials place as an oak log but an
-/// oak log is itself a placeable block, so they are alternates, not the pick
-/// ([`alternates_for`]).
+/// stored as materials), if any. The log materials (legacy stacks) place as an
+/// oak log but an oak log is itself a placeable block, so they are alternates,
+/// not the pick ([`alternates_for`]).
 fn placing_material(b: BlockId) -> Option<MaterialId> {
     if b == block::OAK_LOG {
         return None;
@@ -172,9 +172,10 @@ pub fn pick_item_for(b: BlockId) -> Option<Item> {
 }
 
 /// Other items that place as the same block as `item`, for the survival
-/// search: an oak log is carried as green, seasoned or kiln-dried log
-/// material (they place as an oak log), so looking at a log with only green
-/// logs in the bag still picks. Empty for most items.
+/// search: an oak log may be carried as a legacy green, seasoned or
+/// kiln-dried log material (they place as an oak log), so looking at an oak
+/// log with only those in the bag still picks. A species log block (what
+/// mining drops) is its own pick. Empty for most items.
 pub fn alternates_for(item: &Item) -> Vec<Item> {
     let Some(target) = places_as(item) else { return Vec::new() };
     crate::inventory_explorer::ALL_MATERIAL_IDS
@@ -520,7 +521,22 @@ mod tests {
     }
 
     #[test]
-    fn survival_green_logs_answer_for_an_oak_log() {
+    fn a_carried_species_log_answers_for_that_species_log_block() {
+        // Logs keep their tree type: mining a birch trunk gives a birch log,
+        // which is the pick for a birch log block (and never for an oak one).
+        let mut inv = Inventory::new();
+        inv.set_slot(12, Some(ItemStack::new_block(block::BIRCH_LOG, 3)));
+        assert_eq!(plan_pick_block(PlayMode::Survival, &inv, 0, block::BIRCH_LOG), PickPlan::Swap { bag_slot: 12 });
+        assert_eq!(plan_pick_block(PlayMode::Survival, &inv, 0, block::OAK_LOG), PickPlan::Nothing);
+        for s in block::ALL_WOOD_SPECIES {
+            let log = block::log_block_for(*s);
+            assert_eq!(places_as(&Item::Block(log)), Some(log), "{s:?} places as itself");
+        }
+        assert!(alternates_for(&Item::Block(block::BIRCH_LOG)).is_empty());
+    }
+
+    #[test]
+    fn survival_legacy_green_logs_answer_for_an_oak_log() {
         let mut inv = Inventory::new();
         inv.set_slot(12, Some(ItemStack::new_material(MaterialId::GreenLog, 4)));
         assert_eq!(plan_pick_block(PlayMode::Survival, &inv, 0, block::OAK_LOG), PickPlan::Swap { bag_slot: 12 });

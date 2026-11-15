@@ -1264,6 +1264,15 @@ pub(crate) fn paint_shield_icon(ui: &egui::Ui, icon_rect: egui::Rect, egui_integ
     painter.circle_stroke(board.center(), h * 0.15, egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(90, 92, 98)));
 }
 
+/// The multiplier colour of a log material's icon tint ([`crate::item::log_material_icon`]).
+fn log_tint_color(tint: [f32; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(
+        (tint[0] * 255.0) as u8,
+        (tint[1] * 255.0) as u8,
+        (tint[2] * 255.0) as u8,
+    )
+}
+
 /// One stack drawn inside a slot rect: its icon, count badge and durability
 /// bar. Shared by the hotbar slots and the off-hand box.
 pub(crate) fn draw_stack_in_slot(
@@ -1316,6 +1325,19 @@ pub(crate) fn draw_stack_in_slot(
                 egui::FontId::proportional(12.0),
                 egui::Color32::WHITE,
             );
+        }
+        // The log materials draw as a log (the oak log icon, tinted by
+        // stage), not a flat swatch.
+        Item::Material(m) if crate::item::log_material_icon(*m).is_some() => {
+            let (log, tint) = crate::item::log_material_icon(*m).expect("checked by the guard");
+            if let Some(tex_id) = egui_integration.block_texture(registry.tex_top(log)) {
+                ui.painter().image(
+                    tex_id,
+                    icon_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    log_tint_color(tint),
+                );
+            }
         }
         Item::Material(_) => {
             let color = stack.item.color(registry);

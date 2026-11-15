@@ -469,6 +469,31 @@ fn a_joiner_hangs_and_takes_down_logs_on_a_lending_hosts_rack() {
     rig.assert_lockstep(0, "after taking down");
 }
 
+/// Logs keep their tree type (2026-11-15): a log block of any species is
+/// fresh wood, so a joiner hangs it on the server's rack like the legacy
+/// GreenLog stack, and what comes down is the one species-neutral seasoned log.
+#[test]
+fn a_joiner_hangs_a_species_log_block_on_the_servers_rack() {
+    let mut rig = Rig::dedicated("rack-species", 1);
+    let cell = rig.place(2, block::DRYING_RACK);
+    let pos = (cell[0], cell[1], cell[2]);
+    for (i, species) in crate::block::ALL_WOOD_SPECIES.iter().enumerate() {
+        let log = Item::Block(crate::block::log_block_for(*species));
+        rig.give(0, i, log.clone(), 1);
+        accepted(&rig.use_block(0, cell, UseKind::DryingRack, i).clone(), 1);
+        assert_eq!(rig.cs[0].count(&log), 0, "{species:?}: the log is taken");
+        assert_eq!(rig.world().drying_racks[&pos].occupied_slots(), i + 1, "{species:?}");
+        rig.assert_lockstep(0, "after hanging a species log");
+    }
+    for slot in rig.world().drying_racks.get_mut(&pos).unwrap().slots.iter_mut() {
+        if slot.species.is_some() {
+            slot.seasoning_ticks = crate::drying_rack::SEASON_TICKS;
+        }
+    }
+    accepted(&rig.use_block(0, cell, UseKind::DryingRack, 8).clone(), 0);
+    assert_eq!(rig.cs[0].count(&mat(MaterialId::SeasonedLog)), 1, "granted");
+}
+
 /// A campfire: raw food goes on the server's fire, fuel burns (relighting a
 /// smouldering fire, whose block flip and smoke everyone gets), and cooked
 /// food comes off to an empty hand.

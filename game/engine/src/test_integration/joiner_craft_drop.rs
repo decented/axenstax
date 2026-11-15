@@ -535,6 +535,49 @@ fn a_break_into_a_full_shadow_still_grants_its_whole_yield() {
     assert_eq!(rig.shadow_count(0, &cobble()), 0, "the shadow had no room");
 }
 
+/// Logs keep their tree type (2026-11-15): a joiner who breaks a log of any
+/// species is granted that species' log block, the server's shadow of its
+/// inventory takes it, and nothing neutral (GreenLog) is granted.
+#[test]
+fn a_joiner_breaking_a_species_log_is_granted_that_log_block() {
+    for species in crate::block::ALL_WOOD_SPECIES {
+        let log = crate::block::log_block_for(*species);
+        let mut rig = Rig::dedicated(&format!("break-log-{species:?}"), 1);
+        let floor = (rig.at.x.floor() as i32 + 1, rig.at.y as i32 - 1, rig.at.z.floor() as i32);
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        rig.hs.server.loaded_columns.insert((floor.0.div_euclid(cs), floor.2.div_euclid(cs)));
+        rig.world().set_block(floor.0, floor.1, floor.2, log);
+        let axe = Tool::new(ToolType::Axe, ToolMaterial::Wood);
+        let input = protocol::InputPacket {
+            tick: 1,
+            x: rig.at.x,
+            y: rig.at.y,
+            z: rig.at.z,
+            health: 20.0,
+            held_kind: pair(&Item::Tool(axe)).0,
+            held_id: pair(&Item::Tool(axe)).1,
+            hotbar_slot: Some(0),
+            block_changes: vec![protocol::BlockChange { x: floor.0, y: floor.1, z: floor.2, new_block: block::AIR, meta: 0 }],
+            mined: vec![protocol::MinedBlock {
+                x: floor.0,
+                y: floor.1,
+                z: floor.2,
+                tool: crate::inventory::item_to_wire_full(&Item::Tool(axe)),
+            }],
+            ..Default::default()
+        };
+        rig.joiners[0].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        rig.tick();
+        assert_eq!(rig.world().get_block(floor.0, floor.1, floor.2), block::AIR, "{species:?}");
+        assert_eq!(rig.tally(0).breaks, 1, "{species:?}");
+        assert_eq!(rig.granted(0, &Item::Block(log)), 1, "{species:?}: the client is granted its own log");
+        assert_eq!(rig.granted(0, &Item::Material(MaterialId::GreenLog)), 0, "{species:?}: nothing neutral");
+        rig.report();
+        assert_eq!(rig.shadow_count(0, &Item::Block(log)), 1, "{species:?}: the shadow holds that log");
+        assert_eq!(rig.shadow_count(0, &Item::Material(MaterialId::GreenLog)), 0);
+    }
+}
+
 /// C2b-fix (verify M1) — a drifted-full shadow must not stop a joiner
 /// picking things up: the server grants the whole ground item, adds what
 /// fits and tallies the rest.
