@@ -41,6 +41,43 @@ pub enum Context {
     Director,
 }
 
+/// Which non-gameplay contexts are live this frame, told to `InputState` by the game
+/// loop. A press that matches a live context's action is that context's: the Gameplay
+/// action bound to the same key does not also fire (see [`Bindings::actions_firing`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActiveContexts {
+    /// A plan's ghost is up (`ghost_state`).
+    pub building_plan: bool,
+    /// The Workshop: its world, or an avatar paint session.
+    pub workshop: bool,
+    /// An avatar (skin) paint session is open: the painter-only actions are live.
+    pub avatar_paint: bool,
+    /// The Director camera is on.
+    pub director: bool,
+}
+
+impl ActiveContexts {
+    /// Every context live (tests, the default-overlap parity check).
+    pub const ALL_LIVE: ActiveContexts =
+        ActiveContexts { building_plan: true, workshop: true, avatar_paint: true, director: true };
+
+    /// Is this non-gameplay action live now? Gameplay actions are never "owned".
+    pub fn owns(self, action: Action) -> bool {
+        use Action::*;
+        match action.context() {
+            Context::Gameplay => false,
+            Context::BuildingPlan => self.building_plan,
+            Context::Director => self.director,
+            Context::Workshop => match action {
+                // Only an avatar paint session reads these.
+                PaintUndo | PaintRedo | PaintPicker | PaintPanel | PaintLimbs | PaintTool | PaintFill
+                | PaintGrid | PaintLine => self.avatar_paint,
+                _ => self.workshop,
+            },
+        }
+    }
+}
+
 impl Context {
     pub const ALL: [Context; 4] = [
         Context::Gameplay,
@@ -563,6 +600,29 @@ impl Bindings {
         Context::ALL.into_iter().filter_map(move |c| self.action_for(c, binding))
     }
 
+    /// The actions a press of `binding` sets the flag of, given the live contexts.
+    ///
+    /// Every context's action bound to it fires (the game loop picks by its own state, as
+    /// it always has), except that a Gameplay action does not fire while a live
+    /// non-gameplay action holds the same binding: that context owns the press (the
+    /// painter's Grid on Q must not also drop the dye). The shipped overlaps (E, Q, B, F, M:
+    /// both actions on their default key) keep firing together, exactly as before
+    /// remapping, because the game loop already tells those pairs apart.
+    pub fn actions_firing(&self, binding: Binding, active: ActiveContexts) -> Vec<Action> {
+        let all: Vec<Action> = self.actions_for(binding).collect();
+        all.iter()
+            .copied()
+            .filter(|&a| {
+                a.context() != Context::Gameplay
+                    || !all.iter().any(|&o| {
+                        o.context() != Context::Gameplay
+                            && active.owns(o)
+                            && !(a.default_binding() == binding && o.default_binding() == binding)
+                    })
+            })
+            .collect()
+    }
+
     /// The action's current binding as the player sees it ("Q", "Mouse 4").
     pub fn label(&self, action: Action) -> String {
         self.binding_for(action).label()
@@ -924,6 +984,39 @@ mod tests {
         b.rebind(Action::Drop, Binding::Key(KeyCode::KeyG));
         let r = b.rebind(Action::Satoshi, Binding::Key(KeyCode::KeyG));
         assert_eq!(r.message().as_deref(), Some("Drop moved to N"));
+    }
+
+    #[test]
+    fn every_default_overlap_keeps_firing_together_with_all_contexts_live() {
+        // Parity with 0.2.40: wherever two actions of different contexts ship on one key,
+        // a press fires both (the game loop picks), whatever is live.
+        let b = Bindings::defaults();
+        let mut overlaps = 0;
+        for a in Action::ALL {
+            let binding = a.default_binding();
+            let all: Vec<Action> = b.actions_for(binding).collect();
+            if all.len() > 1 {
+                overlaps += 1;
+                for active in [ActiveContexts::ALL_LIVE, ActiveContexts::default()] {
+                    assert_eq!(b.actions_firing(binding, active), all, "{} on {}", a.id(), binding.label());
+                }
+            }
+        }
+        assert!(overlaps >= 5, "E, Q, B, F and M overlap by default");
+    }
+
+    #[test]
+    fn a_live_context_owns_a_rebound_key_but_only_while_live() {
+        let mut b = Bindings::defaults();
+        b.rebind(Action::PaintGrid, Binding::Key(KeyCode::KeyQ));
+        let q = Binding::Key(KeyCode::KeyQ);
+        let live = ActiveContexts { workshop: true, avatar_paint: true, ..Default::default() };
+        let fired = b.actions_firing(q, live);
+        assert!(fired.contains(&Action::PaintGrid) && !fired.contains(&Action::Drop));
+        // The ghost's own Q is not Gameplay, so it is not silenced by the painter.
+        assert!(fired.contains(&Action::PlanRotateCcw));
+        let fired = b.actions_firing(q, ActiveContexts { workshop: true, ..Default::default() });
+        assert!(fired.contains(&Action::Drop), "a Workshop world without a paint session does not own Grid");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Tracks which keys are held, mouse movement deltas, mouse button clicks,
 //! and hotbar selection per frame.
 
-use crate::keybindings::{Action, Binding, Bindings};
+use crate::keybindings::{Action, ActiveContexts, Binding, Bindings};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use winit::event::MouseButton;
@@ -41,6 +41,9 @@ pub struct InputState {
     /// Every key and mouse button down now. Held actions ask whether their
     /// binding is in here, so a held action can be a key or a mouse button.
     held: ahash::AHashSet<Binding>,
+    /// Which non-gameplay contexts are live (set by the game loop each frame): a
+    /// press one of them owns does not also fire the Gameplay action on that key.
+    active: ActiveContexts,
     /// The live bindings (Settings → Controls). Every press, release and held
     /// read goes through them; the defaults are the shipped controls.
     bindings: Arc<Bindings>,
@@ -170,6 +173,7 @@ impl InputState {
     pub fn new() -> Self {
         Self {
             held: ahash::AHashSet::new(),
+            active: ActiveContexts::default(),
             bindings: Arc::new(Bindings::defaults()),
             overrides_applied: None,
             mouse_dx: 0.0,
@@ -220,6 +224,11 @@ impl InputState {
             director_target_next: false,
             replay_record_toggle: false,
         }
+    }
+
+    /// Tell the input which non-gameplay contexts are live now (once a frame).
+    pub fn set_active_contexts(&mut self, active: ActiveContexts) {
+        self.active = active;
     }
 
     /// The live bindings.
@@ -282,11 +291,13 @@ impl InputState {
 
     /// A key or mouse button went down: every context's action bound to it
     /// sets its flag; `game_loop` picks the one its context wants (E opens the
-    /// inventory, or turns a plan ghost while one is up).
+    /// inventory, or turns a plan ghost while one is up). A live non-gameplay
+    /// context owns its own binding: the Gameplay action on the same key stays
+    /// quiet (`Bindings::actions_firing`), except for the shipped overlaps.
     fn press(&mut self, binding: Binding) {
         self.held.insert(binding);
         let bindings = Arc::clone(&self.bindings);
-        for action in bindings.actions_for(binding) {
+        for action in bindings.actions_firing(binding, self.active) {
             self.press_action(action);
         }
     }
@@ -782,6 +793,53 @@ mod tests {
         let mut input = InputState::new();
         input.set_bindings(std::sync::Arc::new(b));
         input
+    }
+
+    use crate::keybindings::ActiveContexts;
+
+    #[test]
+    fn a_live_painter_owns_its_rebound_key_and_the_dye_is_not_dropped() {
+        // The painter's Grid on Q, painting with a dye held: Q toggles the grid only.
+        let mut input = remapped(Action::PaintGrid, Binding::Key(KeyCode::KeyQ));
+        input.set_active_contexts(ActiveContexts { workshop: true, avatar_paint: true, ..Default::default() });
+        input.key_pressed(KeyCode::KeyQ);
+        assert!(input.workshop_grid, "Q is the grid now");
+        assert!(!input.drop_item, "and does not also drop the dye");
+        // Outside a paint session the painter owns nothing: Q drops as Q always did.
+        let mut input = remapped(Action::PaintGrid, Binding::Key(KeyCode::KeyQ));
+        input.set_active_contexts(ActiveContexts::default());
+        input.key_pressed(KeyCode::KeyQ);
+        assert!(input.drop_item, "no paint session: Q still drops");
+    }
+
+    #[test]
+    fn a_gameplay_action_rebound_onto_a_live_contexts_key_stays_quiet_there() {
+        // Drop on G (the Workshop's pick-colour key): in the Workshop G picks a colour only.
+        let mut input = remapped(Action::Drop, Binding::Key(KeyCode::KeyG));
+        input.set_active_contexts(ActiveContexts { workshop: true, ..Default::default() });
+        input.key_pressed(KeyCode::KeyG);
+        assert!(input.workshop_eyedropper && !input.drop_item);
+        input.end_frame();
+        input.set_active_contexts(ActiveContexts::default());
+        input.key_pressed(KeyCode::KeyG);
+        assert!(input.drop_item, "outside the Workshop G drops");
+    }
+
+    #[test]
+    fn the_shipped_overlaps_still_fire_together_with_every_context_live() {
+        // 0.2.40 set both flags of E, Q, B, F and M and `game_loop` told them apart.
+        let mut input = InputState::new();
+        input.set_active_contexts(ActiveContexts::ALL_LIVE);
+        input.key_pressed(KeyCode::KeyE);
+        assert!(input.inventory_toggle && input.rotate_ghost_cw);
+        input.key_pressed(KeyCode::KeyQ);
+        assert!(input.drop_item && input.rotate_ghost_ccw);
+        input.key_pressed(KeyCode::KeyB);
+        assert!(input.explorer_toggle && input.workshop_tool_cycle);
+        input.key_pressed(KeyCode::KeyF);
+        assert!(input.swap_hands && input.workshop_fill);
+        input.key_pressed(KeyCode::KeyM);
+        assert!(input.map_toggle && input.workshop_cycle_symmetry);
     }
 
     #[test]

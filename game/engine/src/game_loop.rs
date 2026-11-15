@@ -1962,6 +1962,14 @@ impl super::GameState {
         if let Some(ignored) = self.input.apply_overrides(&self.graphics.key_bindings) {
             crate::keybindings::log_ignored(&ignored);
         }
+        // Which non-gameplay contexts are live: a press one of them owns does not
+        // also fire the Gameplay action on the same key (Spec 05 section 1.9).
+        self.input.set_active_contexts(crate::keybindings::ActiveContexts {
+            building_plan: self.players.first().is_some_and(|p| p.ghost_state.is_some()),
+            workshop: self.world.is_workshop || self.skin_paint.is_some(),
+            avatar_paint: self.skin_paint.is_some(),
+            director: self.director_active(),
+        });
     }
 
     /// Exhibits — per-world art lifecycle. On first
