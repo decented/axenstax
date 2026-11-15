@@ -454,6 +454,13 @@ impl Binding {
         }
     }
 
+    /// Tab: egui always takes it (it moves the keyboard focus through the menus), so a
+    /// press never reaches the game and a binding on it could not fire. It cannot be
+    /// chosen for an action. (Workshop's Paint panel still ships on it: see Spec 05 section 1.9.)
+    pub fn is_menu_key(self) -> bool {
+        matches!(self, Binding::Key(KeyCode::Tab))
+    }
+
     /// Esc and F1 to F12: never a binding for a remappable action.
     pub fn is_fixed(self) -> bool {
         matches!(
@@ -491,6 +498,11 @@ pub enum Rebind {
     FixedAction,
     /// Esc or an F key was offered: refused.
     FixedKey,
+    /// Tab was offered: refused (the menus use it).
+    MenuKey,
+    /// The binding is held by `other` in the same context and the swap would hand `other`
+    /// Tab (the action's old binding), which no action can use: refused.
+    WouldSwapOntoTab { other: Action },
     /// A key or button the table cannot name: refused.
     Unsupported,
 }
@@ -503,6 +515,10 @@ impl Rebind {
             Rebind::Swapped { other, to } => Some(format!("{} moved to {}", other.name(), to.label())),
             Rebind::FixedAction => Some("That control can't be changed.".to_string()),
             Rebind::FixedKey => Some("Esc and F1 to F12 can't be used: they stay as they are.".to_string()),
+            Rebind::MenuKey => Some("Tab can't be used: the menus use it.".to_string()),
+            Rebind::WouldSwapOntoTab { other } => {
+                Some(format!("{} would have to take Tab, which can't be used. Pick another key.", other.name()))
+            }
             Rebind::Unsupported => Some("That key or button can't be used.".to_string()),
         }
     }
@@ -572,6 +588,9 @@ impl Bindings {
         if binding.is_fixed() {
             return Rebind::FixedKey;
         }
+        if binding.is_menu_key() {
+            return Rebind::MenuKey;
+        }
         if binding.name().is_none() {
             return Rebind::Unsupported;
         }
@@ -580,6 +599,11 @@ impl Bindings {
             return Rebind::Unchanged;
         }
         let clash = self.action_for(action.context(), binding);
+        if let Some(other) = clash
+            && old.is_menu_key()
+        {
+            return Rebind::WouldSwapOntoTab { other };
+        }
         self.by_action[action as usize] = binding;
         match clash {
             Some(other) => {
@@ -623,6 +647,10 @@ impl Bindings {
             };
             if binding.is_fixed() {
                 ignored.push(format!("'{name}' is a fixed key ('{id}')"));
+                continue;
+            }
+            if binding.is_menu_key() {
+                ignored.push(format!("'{name}' is a menu key ('{id}')"));
                 continue;
             }
             b.by_action[action as usize] = binding;
@@ -907,6 +935,38 @@ mod tests {
         assert_eq!(b.rebind(Action::Drop, Binding::Key(KeyCode::F13)), Rebind::Unsupported);
         assert_eq!(b, Bindings::defaults(), "nothing changed");
         assert!(Rebind::FixedKey.message().is_some());
+    }
+
+    #[test]
+    fn tab_is_refused_as_a_binding_and_ignored_in_settings() {
+        let mut b = Bindings::defaults();
+        assert_eq!(b.rebind(Action::Hotbar1, Binding::Key(KeyCode::Tab)), Rebind::MenuKey);
+        assert_eq!(b, Bindings::defaults(), "nothing changed");
+        assert_eq!(Rebind::MenuKey.message().as_deref(), Some("Tab can't be used: the menus use it."));
+        let mut map = BTreeMap::new();
+        map.insert("hotbar_1".to_string(), "Tab".to_string());
+        map.insert("inventory".to_string(), "KeyI".to_string());
+        let (loaded, ignored) = Bindings::from_overrides(&map);
+        assert_eq!(loaded.binding_for(Action::Hotbar1), Action::Hotbar1.default_binding());
+        assert_eq!(loaded.binding_for(Action::Inventory), Binding::Key(KeyCode::KeyI), "the rest still loads");
+        assert_eq!(ignored.len(), 1, "one line for it: {ignored:?}");
+        assert!(ignored[0].contains("Tab"));
+    }
+
+    #[test]
+    fn the_paint_panels_shipped_tab_never_passes_to_another_action_by_a_swap() {
+        // Moving Paint panel onto a key another Workshop action holds would hand that
+        // action Tab; it is refused instead, and nothing changes.
+        let mut b = Bindings::defaults();
+        let held = Action::ALL
+            .into_iter()
+            .find(|a| a.context() == Action::PaintPanel.context() && *a != Action::PaintPanel)
+            .unwrap();
+        let r = b.rebind(Action::PaintPanel, b.binding_for(held));
+        assert_eq!(r, Rebind::WouldSwapOntoTab { other: held });
+        assert_eq!(b, Bindings::defaults());
+        // A free key moves it as ever.
+        assert_eq!(b.rebind(Action::PaintPanel, Binding::Key(KeyCode::Backquote)), Rebind::Bound);
     }
 
     #[test]

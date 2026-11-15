@@ -126,7 +126,7 @@ pub fn draw_list(ui: &mut egui::Ui, st: &mut KeyBindingsUi, gfx: &mut GraphicsSe
     let mut changed = false;
     let dim = crate::brand::MUTED_TEXT;
     ui.label(
-        RichText::new("Change a key: press Change, then the key or mouse button you want. Esc and F1 to F12 stay as they are.")
+        RichText::new("Change a key: press Change, then the key or mouse button you want. Esc and F1 to F12 stay as they are, and Tab can't be used.")
             .size(11.0 * ts)
             .color(dim),
     );
