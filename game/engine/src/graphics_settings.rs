@@ -478,6 +478,15 @@ pub struct GraphicsSettings {
     /// personal pref like `show_debug_hud`, excluded from preset detection.
     /// Old settings files load it as off.
     pub grownup_panel: bool,
+    /// Settings → Controls (Spec 05 §1.9): the player's key-binding overrides,
+    /// action id → binding name (`keybindings`: `"drop": "KeyG"`). Only changes
+    /// are stored, so an empty map is the shipped controls and an old file
+    /// loads it empty. Unknown ids or names, fixed keys and any clash a bad file
+    /// leaves are ignored on load (`Bindings::from_overrides`, logged once).
+    /// Per-device like every field here (native `settings.json`, web
+    /// localStorage); never part of a preset.
+    #[serde(default)]
+    pub key_bindings: std::collections::BTreeMap<String, String>,
 }
 
 /// The shipped relay set for the rendezvous handshake: public third-party
@@ -643,6 +652,7 @@ impl GraphicsSettings {
             thunder_volume: DEFAULT_THUNDER_VOLUME,
             controls_card_seen: false,
             grownup_panel: false,
+            key_bindings: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1192,6 +1202,28 @@ mod tests {
         s.apply_preset(GraphicsPreset::Potato);
         assert!(s.grownup_panel, "a preset click must not touch it");
         assert_eq!(s.preset(), GraphicsPreset::Potato);
+    }
+
+    /// Settings → Controls: an old settings file loads no overrides, a stored
+    /// map survives a save round-trip and a preset click, and a hand-edited
+    /// file with junk still parses (the junk is dropped later, by the bindings).
+    #[test]
+    fn key_binding_overrides_default_empty_round_trip_and_survive_presets() {
+        assert!(GraphicsSettings::default().key_bindings.is_empty());
+        let old: GraphicsSettings = serde_json::from_str(r#"{ "render_distance": 8 }"#).unwrap();
+        assert!(old.key_bindings.is_empty(), "an old settings.json loads the shipped controls");
+        let mut s = GraphicsSettings::default();
+        s.key_bindings.insert("hotbar_1".to_string(), "KeyZ".to_string());
+        s.key_bindings.insert("attack".to_string(), "MouseBack".to_string());
+        let back: GraphicsSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.key_bindings, s.key_bindings);
+        let mut p = back;
+        p.apply_preset(GraphicsPreset::Low);
+        p.clamp();
+        assert_eq!(p.key_bindings, s.key_bindings, "a preset or clamp never touches the controls");
+        let junk: GraphicsSettings =
+            serde_json::from_str(r#"{ "key_bindings": { "nope": "KeyQ", "drop": "NotAKey" } }"#).unwrap();
+        assert_eq!(junk.key_bindings.len(), 2, "kept as written; `Bindings::from_overrides` drops it");
     }
 
     #[test]
