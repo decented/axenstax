@@ -1,11 +1,11 @@
 # Farming Tier 1.5 — Processed Economy Base
 
-**Status**: DELIVERED on main (2026-05-21). Workstation framework (`workstation.rs`, PR #50) shipped as the generic processing-block primitive; Furnace (blocks 59/60) + Mill (108) + Oven (109) + AgingRack carry their state via `BlockEntityData`. All sourcing crops shipped (Sugarcane, SugarBeet, Beetroot, Pumpkin, Berries) + animal products (Egg, MilkBucket via Bucket). ~20 new recipes wired in `crafting.rs`. `complexity_tier` + `food_value` + `trade_value` live on `Item`. Spec 6 §13 (`ServerEconomyConfig`) shipped as `server_economy.rs` (PR #45). Phase 13 (Axolittle UX playtest) remains the validation gate.
+**Status**: DELIVERED on main (2026-05-21). Workstation framework (`workstation.rs`, PR #50) shipped as the generic processing-block primitive; Furnace (blocks 59/60) + Mill (108) + Oven (109) + AgingRack carry their state via `BlockEntityData`. All sourcing crops shipped (Sugarcane, SugarBeet, Beetroot, Pumpkin, Berries) + animal products (Egg, MilkBucket via Bucket). ~20 new recipes wired in `crafting.rs`. `complexity_tier` + `food_value` + `trade_value` live on `Item`. Spec 6 §13 (`ServerEconomyConfig`) shipped as `server_economy.rs` (PR #45). Phase 13 (tester UX playtest) remains the validation gate.
 **Date**: 2026-05-14
 **Branch**: `feat/farming-tier-1.5-economy` once started; off `main` (after Tier 1 lands).
 **Session**: Fresh — implementer should treat this doc as the only brief.
 **Prerequisite**: Tier 1 (`docs/foundations/2026-05-14-farming-system.md`) delivered — Tier 1.5 reuses tilled-soil, the growth-tick, the seed→plant→harvest loop, and the Hoe-tier ladder.
-**Trigger**: Axolittle 2026-05-14 — "let's go with farming and a base for an economy, so we want to be able to grow more different items and bake/cook/process them to make higher value items." This spec banks that expansion while the design intent is fresh; it sits between Tier 1 (basic farming) and Tier 2 (plough + draft animals) in the foundations queue.
+**Trigger**: The tester 2026-05-14 — "let's go with farming and a base for an economy, so we want to be able to grow more different items and bake/cook/process them to make higher value items." This spec banks that expansion while the design intent is fresh; it sits between Tier 1 (basic farming) and Tier 2 (plough + draft animals) in the foundations queue.
 
 ---
 
@@ -27,7 +27,7 @@ Total scope: **~2400 lines** (spec → workstation framework → 4 stations → 
 
 - **Tier 1** is a complete shippable farming loop on its own (hoe → till → plant → grow → harvest → bread). Tier 1.5 is **depth on top of breadth**, not a missing piece. Tier 1 must ship and get a playtest first.
 - **Tier 2** is automation (plough + draft animals + breeding + fences). Tier 1.5 is **handcrafted depth** — every recipe is a player action, every workstation is a player-operated block. Tier 1.5 makes Tier 2's automation *valuable* by establishing what's being automated.
-- **Tier 1.5 is independent of Tier 2.** Different files, different mechanics. They can be parallelised after Tier 1 lands, though serialising them is cleaner for Axolittle's playtest sequencing.
+- **Tier 1.5 is independent of Tier 2.** Different files, different mechanics. They can be parallelised after Tier 1 lands, though serialising them is cleaner for the tester's playtest sequencing.
 - **Cross-game lift, per shared infra strategy**:
   - The **workstation framework** (block-entity with input/fuel/output slots + tick-based processing + UI hook) lifts directly to any game that wants stations of any kind — cooking, egg incubation, artifact-restoration benches in other games on the same primitives.
   - The **trade-value hook** is generic item-economy plumbing. Same field works for any inventory in any game.
@@ -64,7 +64,7 @@ Total scope: **~2400 lines** (spec → workstation framework → 4 stations → 
 
 ### Memory pointers
 
-- axenstax has farming — base design Tier 1 captures. This spec extends that by Axolittle's 2026-05-14 economy ask; that memory will be updated to record the extension.
+- axenstax has farming — base design Tier 1 captures. This spec extends that by the tester's 2026-05-14 economy ask; that memory will be updated to record the extension.
 - shared infra strategy — workstation framework + trade-value hook + recipe-chain pattern are explicitly cross-game-friendly. Keep AxeNStax flavour (specific recipes, food names) out of the framework code; live in data tables.
 - bitcoin parent controlled — trade-value lives at the item-metadata layer (always present). Sats conversion lives at the server-economy layer (parent-controlled, off by default).
 - pretest check — before starting each phase, verify the code-state claims in this doc against actual current code; values like "next free block ID" will have moved since this was written.
@@ -98,7 +98,7 @@ Total scope: **~2400 lines** (spec → workstation framework → 4 stations → 
 | 10 | **Sugar Beet + Beetroot + Pumpkin + Berries** — four more sources. Sugar beet is a wheat-clone whose harvest mills to Sugar (lower yield than sugarcane). Beetroot is a separate wheat-clone whose harvest is the salad/cooking root — eaten raw (low) or made into Beetroot Soup via Furnace. Pumpkin grows on a stem like Minecraft. Berries are a replenishing bush (right-click harvests without breaking the plant). Pumpkin Pie + Berry Pie via Oven. Stew (cooking pot omitted — Stew is a Furnace recipe via Bowl + ingredients to keep the workstation count manageable) | `block.rs` (SUGAR_BEET_STAGE_0..3, BEETROOT_STAGE_0..3, PUMPKIN, PUMPKIN_STEM_*, BERRY_BUSH_*), `growth.rs` (pumpkin-stem-produces-pumpkin logic; berry-bush-refills logic), `item.rs` (SugarBeet, SugarBeetSeeds, Beetroot, BeetrootSeeds, Pumpkin (food), Berries, Bowl, Stew, BeetrootSoup, PumpkinPie, BerryPie, BakedPotato, LoadedBakedPotato), `texture_gen.rs`, tests | ~500 | ✓ |
 | 11 | **`Item::complexity_tier()` + `Item::trade_value()`** — both data-driven from a single per-item annotation table. Defaults sensibly. Hand-tune per-item per the value ladder | `item.rs` (annotation table + accessor methods), tests asserting the value-ladder invariants | ~120 | ✓ |
 | 12 | **Spec 5 + Spec 6 updates** — (a) Spec 5: §4.5 marked DELIVERED (Furnace); **also renumber the duplicate §4.5 "Slash Commands" at Spec 5 line 1267 onwards** — that section collides with the Furnace one and needs to move to §4.7+. §6.2 food table expanded with new entries + complexity-tier column. New §3.x "Farming Tier 1.5" subsection. (b) Spec 6: create new §13 "Server Economy Modes / Item Trade-Value" describing trade-value → sats conversion semantics on Bitcoin-enabled servers (with parent-control gate per §10.3); retarget the stale parenthetical at line 297 from "§6" to "§13". | `docs/spec/05-gameplay-systems.md`, `docs/spec/06-bitcoin-integration.md` | ~200 | ✓ |
-| 13 | **Axolittle playtest** — value-ladder feel; station ergonomics; recipe discovery; trade-value tuning | n/a | 0 | ✗ blocked |
+| 13 | **playtest** — value-ladder feel; station ergonomics; recipe discovery; trade-value tuning | n/a | 0 | ✗ blocked |
 
 **Total**: ~2400 lines spec + code + tests for Tier 1.5. Phase 13 is the playtest gate.
 
@@ -636,24 +636,24 @@ Bring `docs/spec/05-gameplay-systems.md` and `docs/spec/06-bitcoin-integration.m
 
 ---
 
-## Phase 13 — Axolittle playtest (BLOCKED on his time)
+## Phase 13 — playtest (BLOCKED on tester time)
 
-### What he's evaluating
+### What they're evaluating
 
 - **Value ladder feel** — does climbing from raw wheat to Cake feel rewarding? Or grindy? Tune `complexity_tier` thresholds.
 - **Station ergonomics** — is having 4 distinct workstations too many to juggle? Or is the variety part of the fun? Compare to Minecraft's furnace-and-grid simplicity.
-- **Recipe discovery** — without a recipe book UI, can he figure out new recipes? Should the Oven UI auto-suggest valid recipes from current inputs?
+- **Recipe discovery** — without a recipe book UI, can they figure out new recipes? Should the Oven UI auto-suggest valid recipes from current inputs?
 - **Aging Rack pacing** — 3 in-game days for cheese — too slow? Too fast? Wall-clock vs in-game-day pacing — which felt right?
 - **Trade-value tuning** — are the numbers in the ladder table balanced? Especially for the eventual Bitcoin-conversion layer (Spec 6 §13) — is 40 trade-units per Cake "feels worth the work"?
 - **Animal product cooldowns** — egg cooldown (5-10 min) and cow milking cooldown (5 in-game min) — too long? Too short?
 - **Sugarcane water requirement** — does requiring water adjacency feel natural, or annoying?
 - **Berry-bush damage** — is walking-through-damage fun or just annoying? Skip if collision system can't do partial volumes anyway.
-- **What's missing** — any obvious recipe he expected that isn't there? (Honey? Cocoa? Tea? Bread upgrades?)
+- **What's missing** — any obvious recipe they expected that isn't there? (Honey? Cocoa? Tea? Bread upgrades?)
 - **Tier 2 / Tier 3 readiness** — with Tier 1.5 in hand, does Tier 2 (plough + animals) still feel like the right next step, or has something else surfaced as more pressing?
 
 ### Outputs
 
-- Memory entries capturing his calls.
+- Memory entries capturing their calls.
 - Spec 5 + Spec 6 + this foundation doc updated as needed.
 - New foundation specs queued for whatever surfaces (e.g., Tier 2, NPC vendors, Bitcoin-conversion polish).
 
@@ -840,7 +840,7 @@ All deferrable; none load-bearing for gameplay. Audio engineer (or texture-gen-s
 
 ---
 
-## Open design questions (for Axolittle, in priority order)
+## Open design questions (for the tester, in priority order)
 
 These are intentionally left as design TBDs for Phase 13. Implementer should ship a sensible default per recommendation; playtest overrides.
 
@@ -849,7 +849,7 @@ These are intentionally left as design TBDs for Phase 13. Implementer should shi
 3. **Should sweet bread / bread / cake stack to 64, 16, or 1?** (Recommended 64 / 64 / 1 — Cake is a place-and-eat-from-block in Minecraft; for Tier 1.5, Cake is just a high-value food item that stacks to 1 to match its complexity, no cake-block.)
 4. **Should Berries replenish for any tool, or only by right-click (no break)?** (Recommended right-click only — encourages the "tend a garden" loop. Breaking the block destroys the bush + drops 0-1 berries.)
 5. **Carrots-on-a-stick (Minecraft has them as pig-riding tool)?** Defer to Tier 2 — riding-mob mechanic is Tier 2.
-6. **Honey / Cocoa / other tropical-or-niche ingredients?** Defer to a Tier 1.5b polish spec if Axolittle wants them after playtest.
+6. **Honey / Cocoa / other tropical-or-niche ingredients?** Defer to a Tier 1.5b polish spec if the tester wants them after playtest.
 7. **Composter (food waste → bone meal)?** Defer. Bone meal currently has no farming-acceleration mechanic anyway (Tier 1 didn't add Minecraft's bonemeal-as-instant-grow); when it does, a Composter station fits naturally as a 5th workstation.
 8. **Salt as an ingredient?** Defer. Either as a Mill recipe on sea-water/salt-block, or as a sourced ore — both add a new sourcing branch (mining for food).
 9. **Spoilage?** Defer. Adds depth + grind; not requested.
@@ -861,7 +861,7 @@ These are intentionally left as design TBDs for Phase 13. Implementer should shi
 - All 13 phases complete or explicitly blocked (Phase 13 = playtest gate).
 - `./check.sh` ALL GREEN throughout — no phase ships with regressions.
 - Spec 5 reflects what shipped; Spec 6 §13 "TBD" is replaced with substance; drift audit re-run finds nothing new.
-- Axolittle's gameplay loop works end-to-end on a single dev box: grow wheat + sugarcane → mill to flour + sugar → milk cow → wait for egg → bake Dough → Oven → Cake → eat (big hunger restore). Then re-run with Cheese: wait 3 in-game days, harvest Cheese, make Loaded Baked Potato.
+- The tester's gameplay loop works end-to-end on a single dev box: grow wheat + sugarcane → mill to flour + sugar → milk cow → wait for egg → bake Dough → Oven → Cake → eat (big hunger restore). Then re-run with Cheese: wait 3 in-game days, harvest Cheese, make Loaded Baked Potato.
 - Memory entry axenstax has farming updated with "Tier 1.5 DELIVERED `<commit>`" line; Tier 2 status confirmed or revised based on playtest.
 - This foundation doc gets a status flip from READY TO BUILD → DELIVERED at the top with commit links.
 - `docs/foundations/README.md` queue table updated.
@@ -872,8 +872,8 @@ These are intentionally left as design TBDs for Phase 13. Implementer should shi
 
 Per CLAUDE.md "Spec Maintenance" rule:
 - All design decisions in this doc that change during implementation get reflected back into Spec 5 and Spec 6 — not just in git history.
-- The Tier 2 sketch in `docs/foundations/2026-05-14-farming-system.md` gets refreshed after Tier 1.5 ships and Axolittle's playtest feedback lands.
-- The axenstax has farming memory file is the long-term home for Axolittle's design calls. Any new design input during Tier 1.5 implementation goes there first, then propagates to spec.
+- The Tier 2 sketch in `docs/foundations/2026-05-14-farming-system.md` gets refreshed after Tier 1.5 ships and the tester's playtest feedback lands.
+- The axenstax has farming memory file is the long-term home for the tester's design calls. Any new design input during Tier 1.5 implementation goes there first, then propagates to spec.
 - Workstation framework + trade-value hook are flagged as cross-game-friendly in shared infra strategy — when other AxeNStax-internal games (other games on the same primitives) start, lift the framework rather than duplicating.
 
 ---
@@ -883,7 +883,7 @@ Per CLAUDE.md "Spec Maintenance" rule:
 - **signet boundary**: N/A. Tier 1.5 touches no Signet/identity.
 - **shared infra strategy**: ✓ — workstation framework, trade-value hook, multi-step-recipe pattern, animal-product extraction are all cross-game-friendly. Keep recipe tables in data, not in framework code.
 - **pretest check**: implementer should re-verify each phase's claims against actual code state before starting. Block-ID counts, texture-layer counts, variant indices, save-version, protocol-version — all shift between Tier 1 delivery and Tier 1.5 start.
-- **axenstax has farming**: this spec is the implementation contract for Axolittle's 2026-05-14 economy ask. Keep them in sync; update the memory when this spec changes.
+- **axenstax has farming**: this spec is the implementation contract for the tester's 2026-05-14 economy ask. Keep them in sync; update the memory when this spec changes.
 - **alpha launch posture**: Tier 1.5 is **post-alpha-launch** in priority, same posture as Tier 1. Doesn't gate the alpha. Spec'd now while the design intent is fresh; built when it floats to the top of the queue.
 - **bitcoin parent controlled**: ✓ — trade-value lives at the item layer (always present); sats conversion lives at the server-economy layer (parent-controlled, off by default).
 - **proof of play is proof of work**: ✓ — Tier 1.5 intentionally does NOT invoke proof-of-play. Cooking is not mining.

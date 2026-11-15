@@ -38,7 +38,7 @@ Say what you saw, not just pass or fail.
 12. Try to break or place something on the island. Then swim out past the water and build.
 13. A gamepad can't press Play on the island card yet. Does that matter to you?
 
-## Questions for Axolittle
+## Questions for the tester
 - Which ten should be on the front shelf?
 - Do any of the merged trials feel worse for losing their own card?
 - What should act two's shelf be called, and when should it appear?

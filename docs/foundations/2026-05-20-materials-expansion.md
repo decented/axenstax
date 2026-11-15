@@ -24,7 +24,7 @@ Add ~30 new MaterialIds to fill the Minecraft-parity gap. Group by source:
 
 ## Why this lives here
 
-- Axolittle's intuition: a "Minecrafter" expects ~70-90 distinct items / materials. AxeNStax has 41 + ~65 blocks. The gap is real but most additions are inert data with one or two integration points (drop tables, recipe entries).
+- The tester's intuition: a "Minecrafter" expects ~70-90 distinct items / materials. AxeNStax has 41 + ~65 blocks. The gap is real but most additions are inert data with one or two integration points (drop tables, recipe entries).
 - Decoupled from 28a/28b/28d/28e so it can land independently; the missing-integration error is friendly (you can mine Copper Ore but can't make Bronze yet — the recipe lands with 28e).
 - Cross-game lift: the MaterialId pattern is engine-generic. Sister games consume per-game subsets via a registration list.
 

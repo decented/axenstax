@@ -15,7 +15,7 @@ see `docs/foundations/2026-09-05-world-chat.md`.
 
 ## 0. Design Philosophy
 
-Every system in this document serves one overriding goal: **a Minecraft veteran must feel at home within 30 seconds of spawning**. The benchmark player is "Axolittle" — an 11-year-old with thousands of hours in Minecraft Java Edition. If Axolittle picks up the controls and something feels wrong — movement is floaty, block placement is laggy, breaking feels unresponsive — we have failed, regardless of how architecturally clean the code is.
+Every system in this document serves one overriding goal: **a Minecraft veteran must feel at home within 30 seconds of spawning**. The benchmark player is a Minecraft Java Edition veteran with thousands of hours. If that player picks up the controls and something feels wrong — movement is floaty, block placement is laggy, breaking feels unresponsive — we have failed, regardless of how architecturally clean the code is.
 
 Minecraft is the reference point, not the ceiling. Where Minecraft has known pain points (combat timing, redstone inconsistency, inventory management), Axe'n'Stax improves. Where Minecraft nailed it (movement physics, block interaction rhythm, hotbar flow), we match or exceed.
 
@@ -484,7 +484,7 @@ If the player moves the crosshair off the current target and back, break progres
 
 **Survival mode**: Block breaking is progressive. The player holds the break input and a `break_progress` counter increments each tick. The target tick count is computed by `break_time_ticks(block_type, held_tool)` which uses the break time formula from section 2.1. When progress reaches the target, the block breaks. Progress resets if the player looks at a different block or releases the break input.
 
-**Creative mode**: A targeted block breaks in one tick (instant) regardless of tool — no progressive break timer. **But** instant breaking is rate-limited by a **break cooldown** (`PlayerSlot.break_cooldown`, `BLOCK_BREAK_COOLDOWN_TICKS` = 5 ticks ≈ 0.25s ≈ 4 breaks/s). Without it, a held break button destroyed one block **every tick (~20/s)** — Axolittle flagged this as "breaking too fast" in creative (2026-06-07). The cooldown is armed when a creative break is committed (`arm_break_cooldown`) and ticked down every frame (`tick_break_cooldown`), exactly mirroring the placement cooldown. **Survival is exempt** — it's already paced by `break_time` (block hardness), so the cooldown only gates the otherwise-instant creative path. Mechanically: the creative branch is `else if is_creative && break_ready()`; while it's on cooldown the survival branch (now guarded by `else if !is_creative`) is also skipped, so the held button simply does nothing that tick.
+**Creative mode**: A targeted block breaks in one tick (instant) regardless of tool — no progressive break timer. **But** instant breaking is rate-limited by a **break cooldown** (`PlayerSlot.break_cooldown`, `BLOCK_BREAK_COOLDOWN_TICKS` = 5 ticks ≈ 0.25s ≈ 4 breaks/s). Without it, a held break button destroyed one block **every tick (~20/s)** — the tester flagged this as "breaking too fast" in creative (2026-06-07). The cooldown is armed when a creative break is committed (`arm_break_cooldown`) and ticked down every frame (`tick_break_cooldown`), exactly mirroring the placement cooldown. **Survival is exempt** — it's already paced by `break_time` (block hardness), so the cooldown only gates the otherwise-instant creative path. Mechanically: the creative branch is `else if is_creative && break_ready()`; while it's on cooldown the survival branch (now guarded by `else if !is_creative`) is also skipped, so the held button simply does nothing that tick.
 
 This distinction must be implemented from the start. A common bug is implementing instant breaking first and forgetting to add the timer for survival mode. The `break_time_ticks()` function (in `crafting.rs`) is the source of truth for break durations.
 
@@ -495,7 +495,7 @@ Block placement has a **6-tick (300ms) cooldown** between successive placements 
 - Click-spam on mouse.
 - Macro/autoclicker abuse.
 
-This was **4 ticks (200ms)** through Wave 25; Axolittle found held-placement too twitchy in creative (2026-06-07), so the generic block-place path (`game_loop.rs`) was raised to 6 ticks. Special placements set their own cooldowns on the same `place_cooldown` field — e.g. saplings/campfires stay at 4 ticks, beds at 16 — so this change only affects ordinary building. (Bow and slingshot shots are paced on their own game-tick cadence since C3c-2-fix: `PlayerSlot::shot_ready`, 8 ticks, 2.5 shots a second at any frame rate; they still set `place_cooldown` to 8 so the rest of the right-click chain keeps its pacing.) The cooldown applies equally to keyboard+mouse and gamepad inputs.
+This was **4 ticks (200ms)** through Wave 25; the tester found held-placement too twitchy in creative (2026-06-07), so the generic block-place path (`game_loop.rs`) was raised to 6 ticks. Special placements set their own cooldowns on the same `place_cooldown` field — e.g. saplings/campfires stay at 4 ticks, beds at 16 — so this change only affects ordinary building. (Bow and slingshot shots are paced on their own game-tick cadence since C3c-2-fix: `PlayerSlot::shot_ready`, 8 ticks, 2.5 shots a second at any frame rate; they still set `place_cooldown` to 8 so the rest of the right-click chain keeps its pacing.) The cooldown applies equally to keyboard+mouse and gamepad inputs.
 
 The 4-tick workstation cooldown (campfire, drying rack, blueprint stamp, furnace slot-clicks, etc.) is a named constant, `player_slot::PLACE_COOLDOWN_TICKS`, used at every `place_cooldown = ...` call site of that value (2026-09-06 hardening pass, replacing a repeated bare `4` literal). Decrementing happens through `PlayerSlot::tick_place_cooldown`, mirroring `tick_break_cooldown` above. **Known debt (C3c-2-fix):** `tick_place_cooldown` runs once a FRAME (the per-frame block-interaction loop), not once a game tick, so every "N ticks" above is N frames and the right-click arms it paces run faster at a higher frame rate (the bow's cadence was moved off it; eating already counts fixed ticks); both are pinned by unit tests in `player_slot.rs` (a cooldown of 4 reaches 0 after exactly 4 ticks, never underflows).
 
@@ -775,7 +775,7 @@ The inventory UI supports standard drag-and-drop interactions:
 3. **Cursor-following decorations must use `ctx.layer_painter`, never an `Area`.** The cursor-held item icon is drawn at the pointer position and *moves with* every click. If it's a `egui::Area` it claims hit-test space even with `interactable(false)`, which silently swallows the next click instead of letting it reach the destination slot — pick-up works, place-down does nothing. Paint directly via `ctx.layer_painter(LayerId::new(Order::Tooltip, ...))` so there's no widget and no hit-test region.
 - **Double-click**: Gather all matching items from the inventory into the cursor stack.
 
-**Inventory clicks follow Minecraft left/right semantics (2026-06-07).** Across **every** slot in the inventory/crafting screen — the 36 inventory+hotbar slots, the 3×3 table grid, and the inventory 2×2 grid — **left-click works on the whole stack, right-click works on a single item**. This is the Minecraft Java convention, so a veteran's muscle memory carries over (Axolittle's call after the buttons were initially described the other way round). Concretely, with the **cursor holding** items:
+**Inventory clicks follow Minecraft left/right semantics (2026-06-07).** Across **every** slot in the inventory/crafting screen — the 36 inventory+hotbar slots, the 3×3 table grid, and the inventory 2×2 grid — **left-click works on the whole stack, right-click works on a single item**. This is the Minecraft Java convention, so a veteran's muscle memory carries over (the tester's call after the buttons were initially described the other way round). Concretely, with the **cursor holding** items:
 
 | | Empty target slot | Same item (room) | Same item (full) | Different item |
 |---|---|---|---|---|
@@ -784,7 +784,7 @@ The inventory UI supports standard drag-and-drop interactions:
 
 …and with an **empty cursor** clicking a filled slot: **left** picks up the whole stack, **right** picks up the ceil-half (e.g. 5 → 3 to cursor, 2 left behind). All paths are lossless (swaps exchange full stacks; the cursor never strands items). The merge/cap respects `Item::max_stack()` (64 for blocks/materials; tools/plans/armour are 1 and never stack).
 
-This means **crafting-grid cells can hold more than one item** — fill the grid with stacks (left-click to dump a whole stack into a cell, or right-click to place one) and pull many results out in a row (batch crafting), instead of re-laying the recipe after every craft. Axolittle flagged "you can't stack blocks in the crafting table or inventory grid" (2026-06-07) — left/right stacking is the fix. The button is plumbed via `ClickTarget::{GridSlot, InventorySlot}(.., right: bool)` (egui `secondary_clicked()` → `right=true`) and turned into a `WindowClick::{Grid, Slot}` for `window::apply` (below).
+This means **crafting-grid cells can hold more than one item** — fill the grid with stacks (left-click to dump a whole stack into a cell, or right-click to place one) and pull many results out in a row (batch crafting), instead of re-laying the recipe after every craft. The tester flagged "you can't stack blocks in the crafting table or inventory grid" (2026-06-07) — left/right stacking is the fix. The button is plumbed via `ClickTarget::{GridSlot, InventorySlot}(.., right: bool)` (egui `secondary_clicked()` → `right=true`) and turned into a `WindowClick::{Grid, Slot}` for `window::apply` (below).
 
 **Crafting-panel interactions are lossless (engine audit 2026-06-04, A; revised 2026-06-07).** Two paths used to delete items: (1) dropping a multi-count cursor onto an *occupied* grid cell placed one and discarded `count-1` — now left/right merge-or-swap (see the table above) never discards anything; (2) closing the panel returned grid+cursor items to the inventory but dropped whatever didn't fit — now `CraftingUi::close` keeps un-returnable items in the grid/cursor and **stays open** (returns `false`), so the player frees space rather than losing items. The E-press close surfaces a "make room" toast on a blocked close; the pause path simply leaves the panel open under the menu.
 
@@ -913,7 +913,7 @@ The gem can be combined into tools and armour at the top tier (above diamond —
 | Satori Boots | 4 Satori (boots pattern) | 1 Satori Boots |
 | Block of Satori | 9 Satori (3×3 fill) | 1 Block of Satori (round-trip recipe, same as diamond storage) |
 
-The full armour set provides **20 total armour points** with **12 toughness** — same armour points as diamond, more toughness (greater protection against heavy hits per Spec 6 §6 damage formula). Notably: in a future meteor-survival mechanic (Axolittle's must-have from `docs/research/2026-03-06-blocks-qa-round2-gameplay.md`), the gem-tier armour set would be the survival threshold.
+The full armour set provides **20 total armour points** with **12 toughness** — same armour points as diamond, more toughness (greater protection against heavy hits per Spec 6 §6 damage formula). Notably: in a future meteor-survival mechanic (the tester's must-have from `docs/research/2026-03-06-blocks-qa-round2-gameplay.md`), the gem-tier armour set would be the survival threshold.
 
 **On-chain note (RETIRED 2026-11-08, owner):** an earlier draft made the gem equal to one sat at drop time, with an internal balance that moved with it and a Lightning withdrawal. That was retired on 2026-09-27 (Satori carries no sats value) and the withdrawal path was never built. Crafting consumes the gem and nothing else; trading it moves the gem and nothing else.
 
@@ -968,7 +968,7 @@ Mature crops break to **tilled soil**, not air — so the player can immediately
 
 ### 3.10 Campfire
 
-> **Status (2026-05-18):** Wave 27 DELIVERED on main, foundation `docs/foundations/2026-05-18-campfire.md` Phases 2-8. Phase 9 (Axolittle playtest) is the remaining gate.
+> **Status (2026-05-18):** Wave 27 DELIVERED on main, foundation `docs/foundations/2026-05-18-campfire.md` Phases 2-8. Phase 9 (playtest) is the remaining gate.
 
 The Campfire is Tier 1's cooking workstation. Pre-furnace (furnace lands in T1.5 with the broader workstation framework); wood-only fuel; doubles as a light source. Replaces the earlier `raw_meat + coal vertical` crafting-table hack — meat now cooks at a real workstation, not via a one-shot recipe.
 
@@ -1160,7 +1160,7 @@ lent-world servers) and the PWA resume in `game_loop`. No save-format change.
 > block-entities; all sourcing crops (sugarcane, sugar beet, beetroot,
 > pumpkin, berries) + animal products (eggs, milk via Bucket) ship as
 > `MaterialId` variants. Recipe ladder consumes `complexity_tier` +
-> `food_value` + `trade_value` on `Item`. Phase 13 (Axolittle playtest)
+> `food_value` + `trade_value` on `Item`. Phase 13 (playtest)
 > is the remaining gate.
 
 Tier 1.5 turns the Tier-1 till→plant→harvest loop into an **economy**:
@@ -1230,7 +1230,7 @@ framework introduced in Spec 19 §"Furnace" cross-reference):
 
 | Workstation | Block ID | Recipes |
 |---|---:|---|
-| Furnace | 59 (unlit), 60 (lit) | **Ore-only** post-Spec-29 (2026-05-21). Smelts RawIron → IronIngot, Copper → CopperIngot, Tin → TinIngot. Iron ore smelting was a BRIDGE in `crafting.rs` — removed when Furnace landed. Fuel ladder mirrors the Campfire. **Food cooking lives at the Campfire** (Spec 17) — raw meats no longer smelt in the furnace following Axolittle's playtest call to align with Minecraft's workstation roster. |
+| Furnace | 59 (unlit), 60 (lit) | **Ore-only** post-Spec-29 (2026-05-21). Smelts RawIron → IronIngot, Copper → CopperIngot, Tin → TinIngot. Iron ore smelting was a BRIDGE in `crafting.rs` — removed when Furnace landed. Fuel ladder mirrors the Campfire. **Food cooking lives at the Campfire** (Spec 17) — raw meats no longer smelt in the furnace following the tester's playtest call to align with Minecraft's workstation roster. |
 | Mill | 108 | Wheat → Flour. Sugar Beet → Sugar. Sugarcane → Sugar. |
 | Oven | 109 | Flour + Egg + Milk → Dough → Cake. Pumpkin + Sugar → Pumpkin Pie. Berries + Dough → Berry Pie. Bread baking lifts here from the crafting table when the player has an Oven (still craftable at the table for kitchenless play). |
 | Aging Rack | 110 | Time-based: Milk → Cream → Butter → Cheese. Real-time recipes — the "set and come back later" depth mechanic; aging tick uses the same block-entity progress model as Campfire fuel-burn. |
@@ -1335,7 +1335,7 @@ Plugins register recipes during world initialisation. Recipes can be added, remo
 
 ### 4.5 Furnace / Smelting
 
-The furnace is a block entity with three slots: input, fuel, and output. **Spec 29 (2026-05-21)** narrowed its role to **ore smelting only** following Axolittle's playtest: the campfire (Spec 17) is the canonical cooking station, and the furnace + campfire have no overlap.
+The furnace is a block entity with three slots: input, fuel, and output. **Spec 29 (2026-05-21)** narrowed its role to **ore smelting only** following the tester's playtest: the campfire (Spec 17) is the canonical cooking station, and the furnace + campfire have no overlap.
 
 **Smelting process**:
 1. Right-click the furnace block to open its UI.
@@ -2035,7 +2035,7 @@ Axe'n'Stax uses a **signal propagation system** inspired by Minecraft redstone b
 > (1) **Phase 1 is binary** (on / off) — the per-terminal `energised: u8` is *reserved* for the
 > Phase-3 analog economy (dimmer lamp, motor speed). (2) **Phase 1 cables have NO distance
 > decay** — a circuit lights at any length; the "signal loses 1 per block / 15-block limit"
-> below is the original Minecraft-parity plan and is now an **open design question for Axolittle**
+> below is the original Minecraft-parity plan and is now an **open design question for the tester**
 > (no-limit, the differentiator, vs a repeater-gated limit). Shipped: Lever / Button / Pressure
 > Plate / Hand Crank / Steam Generator / Battery / **Water Wheel** → Cable → Electric Lamp / Powered Rail, plus a
 > **Logic Gate (AND/OR/NOT/XOR)** in place of repeater + comparator. **Phase 2 (also delivered
@@ -2354,7 +2354,7 @@ rolled its own private window, independently, and so did the server for fire.
 
 #### The Workshop has no weather — FIXED 2026-07-31
 
-**Bug (Axolittle, 2026-07-31):** it rained, and lightning struck, inside the
+**Bug (the tester, 2026-07-31):** it rained, and lightning struck, inside the
 Workshop. The Workshop is an indoor authoring space on a void platform, so
 weather over it is nonsense on its face — but a strike is worse than cosmetic:
 the bolt ignites through `FireSystem` like any other fire, so a storm could set
@@ -2439,7 +2439,7 @@ and the world seed, plus the querying position's height.
   `WINDMILL_STOP = 0.30` to stop once turning; the gap stops a lull flickering
   the mill on and off. Sea-level duty cycle on a clear day sits ~0.38–0.51
   across seeds (by design — intermittent); at +30 it is ~1.00 (a hilltop mill
-  effectively never stops on a clear day — noted as an Axolittle feel
+  effectively never stops on a clear day — noted as a tester feel
   question: if a hilltop mill should still stutter occasionally, the lever is
   `ALTITUDE_CAP`, not `ALTITUDE_PER_BLOCK`).
 - A transition (still → turning or turning → still) swaps the block to/from
@@ -3977,7 +3977,7 @@ ways to do them — §8b.)
 
 **Known, not a bug: placeholder meshes.** Cat, Parrot, and Crab all render with
 a placeholder mesh (the established cat-uses-wolf-mesh pattern) — dedicated
-models are Axolittle-playtest-boundary work, not shipped this wave.
+models are the tester-playtest-boundary work, not shipped this wave.
 
 ---
 
@@ -4078,13 +4078,13 @@ Foundation: `docs/foundations/2026-06-04-the-workshop-community-redesign.md`. Bu
 - **Mode A — reskin** (`commit_project_override`): paint the asset's faces (16×16, the block's native texel grid); pinning writes an `AuthoredFaces` into the `OverrideRegistry` (Spec 03 §3.2). Works on blocks AND mobs (mobs are textured exactly like blocks; the same painter reskins both — NOT the player-avatar 64×64 atlas).
 - **Mode B — reshape** (`capture_box_as_plan` → `micro_model::from_plan` → `micro_registry`): build the new form (single-block, ≤16³) and capture it into a baked micro-model shape override (reuses #18). Multi-block sculptures + mob reshape (#19) are parked.
 
-**Control surface.** The **16×16 paint-grid editor** (`workshop_painter.rs`) opens with `/ws edit <asset>`: six face grids seeded from the asset's current texture, a 16-colour palette, click/drag to paint, Pin → global reskin (headless-rendered via `--shot-painter`). The **`/ws` command** (`commands/builtins/workshop.rs`: `place` / `edit` / `paint` / `pump` / `deflate` / `pin` / `reshape` / `list` / `reset`) drives the whole loop. Remaining tactile *feel/flavour* — the **bellows-inflate gesture** as a held tool, an **in-world 3D inflated copy**, the **mob mannequin + play toggle** — is the **Axolittle playtest boundary**.
+**Control surface.** The **16×16 paint-grid editor** (`workshop_painter.rs`) opens with `/ws edit <asset>`: six face grids seeded from the asset's current texture, a 16-colour palette, click/drag to paint, Pin → global reskin (headless-rendered via `--shot-painter`). The **`/ws` command** (`commands/builtins/workshop.rs`: `place` / `edit` / `paint` / `pump` / `deflate` / `pin` / `reshape` / `list` / `reset`) drives the whole loop. Remaining tactile *feel/flavour* — the **bellows-inflate gesture** as a held tool, an **in-world 3D inflated copy**, the **mob mannequin + play toggle** — is the **playtest boundary**.
 
 **The v2 gesture — blow-up-and-sculpt (Spec 40 evolution, `docs/foundations/2026-06-08-workshop-blow-up-and-sculpt.md`).** The authoring *front-end* was redesigned from `/ws place` + 2D paint-grid into one in-world gesture (the 2D grid + `/ws place` are kept as a power-user/test fallback). The player **places a normal block**, **aims the Bellows at it**, and **holds right-click** to blow it up to a fixed **×4** working size:
 
 - **Cage preview + room-check (Phase 1).** While aiming, a green/red 4×4×4 wireframe cage shows where it will grow — anchored at the block's near-bottom corner, growing up and away from the player (`workshop::blow_up_cage_min`/`_cells`/`_clear`, drawn via the ghost-wireframe path). Green = clear, red = blocked (the blow-up refuses with a toast). The crosshair resolves the exact texel via `raycast::face_texel`.
 - **Hold-to-charge fixed ×4 (Phase 2).** A tick-based charge (`workshop::BlowUp`, `BlowUpPhase::{Charging,Locked,Collapsing}`) drives 3 smooth swells (×2/×3/×4) via `blow_up_scale_for_charge`; release before full → collapse to ×1 (only ×1 and ×4 are stable); reach full → **lock**. Sneak+right-click on a locked copy collapses it. ×4 (4 blocks tall) is the floor-reach ceiling — no flying. The balloon renders from its cage corner at the animated scale (`entity_model::build_workshop_inworld_vertices`).
-- **In-world dye editing (Phase 3).** A locked ×4 copy carries a **16³ `EditBuffer`** (`workshop.rs`) — each cell is `Option<BlockId>`: `Some(id)` = an occupied coloured microblock (colour = the dye's WALLPAPER block via `MaterialId::paint_block`; 16 dyes), `None` = carved-away. One field is **both colour and occupancy** (the paint-with-blocks model — there is no per-vertex colour). The crosshair selects a cell via `raycast::pick_cell_in_cage` (a DDA into the cage AABB, since the balloon is a render overlay, not world blocks). With a dye in hand: **left-click paints** the aimed cell, **right-click places** a coloured microblock against the aimed face; a **pickaxe/empty hand left-click carves**; the **G key eyedrops** a colour; the **M key cycles symmetry** (off / left-right / all-sides, default all-sides via the 90° XZ rotation — matches the native 3-surface block model). Edits are click-edge (one cell per click) and gated to a `Locked` Block balloon. The balloon renders live from the buffer by baking it through `micro_model::bake_micro_model` (greedy-merged, `block_id`-textured) scaled ×4 to the cage corner — so paint and sculpt are visible. The WIP buffer is transient (`#[serde(skip)]`; persists on pin only). **Playtest boundary (Axolittle):** the paint *feel*, the ¼-block aim comfort, the tiled-wallpaper look of an edited balloon, and the symmetry default.
+- **In-world dye editing (Phase 3).** A locked ×4 copy carries a **16³ `EditBuffer`** (`workshop.rs`) — each cell is `Option<BlockId>`: `Some(id)` = an occupied coloured microblock (colour = the dye's WALLPAPER block via `MaterialId::paint_block`; 16 dyes), `None` = carved-away. One field is **both colour and occupancy** (the paint-with-blocks model — there is no per-vertex colour). The crosshair selects a cell via `raycast::pick_cell_in_cage` (a DDA into the cage AABB, since the balloon is a render overlay, not world blocks). With a dye in hand: **left-click paints** the aimed cell, **right-click places** a coloured microblock against the aimed face; a **pickaxe/empty hand left-click carves**; the **G key eyedrops** a colour; the **M key cycles symmetry** (off / left-right / all-sides, default all-sides via the 90° XZ rotation — matches the native 3-surface block model). Edits are click-edge (one cell per click) and gated to a `Locked` Block balloon. The balloon renders live from the buffer by baking it through `micro_model::bake_micro_model` (greedy-merged, `block_id`-textured) scaled ×4 to the cage corner — so paint and sculpt are visible. The WIP buffer is transient (`#[serde(skip)]`; persists on pin only). **Playtest boundary (the tester):** the paint *feel*, the ¼-block aim comfort, the tiled-wallpaper look of an edited balloon, and the symmetry default.
 - **Pin bake (Phase 4).** The player presses **P** (or `/ws pin` on a locked, edited balloon) to commit the working copy as a global appearance override; every placed instance of that block type immediately wears it. The balloon then collapses ×4→×1 (reusing the Phase-2 collapse animation). Pin output path depends on whether the buffer was shape-changed (`EditBuffer::shape_changed`):
   - **Pure-paint** (no cells added/removed): `EditBuffer::to_authored_faces` collapses the 16³ colour buffer down to the block's 3 native surfaces and writes an `AuthoredFaces` entry via `override_registry`. The greedy mesher and texture array continue as normal.
   - **Shape-changed** (any place or carve): `EditBuffer::to_micro_model` bakes a coloured micro-model that is registered in `world.micro_registry`. The chunk mesher now handles registered micro-models for **solid** blocks: the greedy pass detects the micro-registration and skips that block's faces, instead emitting a per-instance micro-model draw (plus a far-LOD billboard) — completing the previously-deferred solid-block micro hook. Transparent/fluid blocks are unaffected.

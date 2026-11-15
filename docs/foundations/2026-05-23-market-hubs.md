@@ -1,6 +1,6 @@
 # Market Hubs (v1) — vendor clustering + compass navigation
 
-**Status:** Phases 2-10 DELIVERED 2026-05-23 on `feat/market-hubs`. Phase N = Axolittle playtest gate (open). (Spec was initially written build-deferred in Round 6 ASSESS, then built same-round.)
+**Status:** Phases 2-10 DELIVERED 2026-05-23 on `feat/market-hubs`. Phase N = playtest gate (open). (Spec was initially written build-deferred in Round 6 ASSESS, then built same-round.)
 **Branch (when built):** `feat/market-hubs` off `main`.
 **Trigger:** Goal-driven solo dev cycle, Round 6 ASSESS. From `docs/vision/economies-long-run.md` §4.2 — "Market Hubs (T2)". Written as a queued deliverable; the build was deferred at the tail of a long session because Market Hubs is larger than the self-contained economy blocks (Specs 33-36) and has a soft dependency on plot rentals.
 
@@ -88,7 +88,7 @@ v1 as specced above sidesteps this: a Market Hub is a **discovery + aggregation 
 | 9 | Integration tests | ~150 |
 | 10 | check.sh + doc-flip + queue README | 0 |
 | 11 | Merge | — |
-| N | Axolittle playtest — hub radius feel, directory usefulness, compass clarity, "do I want remote buying" | n/a |
+| N | playtest — hub radius feel, directory usefulness, compass clarity, "do I want remote buying" | n/a |
 
 ---
 

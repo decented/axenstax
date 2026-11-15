@@ -107,7 +107,7 @@ please check every one of these explicitly, they need a real playtest:
       line** (text right after the command). A bare `/idea` with no text opens
       a separate composer instead and does **not** complete the trial.
 
-## Questions for Axolittle
+## Questions for the tester
 
 1. Copper Ore: fair rarity/depth, or should it be easier/harder to find?
 2. Windmill: is the hilltop-vs-sea-level difference obvious and satisfying, or

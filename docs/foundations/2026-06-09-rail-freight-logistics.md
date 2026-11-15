@@ -166,7 +166,7 @@ except Spectator. Adventure may ride + dispatch but not place or break ("use, do
 
 - **Cart-item textures** — placeholder block-texture tints today (BRIDGE-marked); dedicated
   art awaits the texture wave that covers cart visuals.
-- **Breach / recipe-cost feel** — breach ticks and recipe costs are tunable; Axolittle
+- **Breach / recipe-cost feel** — breach ticks and recipe costs are tunable; the
   playtest determines final values.
 - **Phase 3 robbery** — transit-only breach gate (`// BRIDGE:` in the breach handler) remains
   unbuilt; gated on the hostile-act ledger and Phase 3 generally.
@@ -298,7 +298,7 @@ it's self-limiting (pocket-shuttling doesn't scale), so no anti-gift rule is nee
   same logistics problem. Breach tanks **reputation** + fires a **bounty** + records to a
   new `world.hostile_acts` ledger (none exists yet — see build plan P3.3). *Robbery must be
   rare, hard, risky, and costly — spice, not tax;*
-  most freight should arrive safely (critical for the kid alpha).
+  most freight should arrive safely (critical for the alpha).
 
 ### Phase 4 — Aether freight security *(gated on the Aether tier existing)*
 Active layer, **information + flagging only** (owner-confirmed — no remote lockdown,
@@ -318,9 +318,9 @@ Still future: uphill haulage / longer-route automation tuning. And later,
 **Aether signalling/dispatch** (routing, block signals) — railway signalling was
 an early telecom network, a natural aether job.
 
-### Final — Axolittle playtest gate
+### Final — playtest gate
 Speed, distances, ride-tedium on long hauls, and whether robbery is *fun*, are feel
-numbers only a real player (and the kid who'll tell us if a 15-minute ride is boring) can
+numbers only a real player (and the tester who'll tell us if a 15-minute ride is boring) can
 tune.
 
 ---

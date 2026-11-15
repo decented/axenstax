@@ -149,7 +149,7 @@ the next mesh — no side-state to migrate, no save bump for connections.
   machinery is species-agnostic; adding a variant is a block id + recipe + a
   `shape_of` arm. Captured for a follow-up content wave.
 - **Feel tuning** (collision step-up onto slabs/stairs, door swing arc, sign text
-  ergonomics) — the Axolittle playtest item; the geometry is exact, the *feel* is
+  ergonomics) — the playtest item; the geometry is exact, the *feel* is
   a number-tune.
 
 ## Acceptance (all met)

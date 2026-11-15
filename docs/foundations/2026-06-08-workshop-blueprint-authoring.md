@@ -78,7 +78,7 @@ survival achievement**. Display can surface the tag (mirror `develop_state_color
 - **C — survival-locked.** Creative-authored blueprints can't be *placed* in a pure-survival world at
   all (only re-built by hand). Strongest, probably too strict.
 
-This fork is **not** decided — it's a gameplay/economy call (Axolittle + owner), and it interacts
+This fork is **not** decided — it's a gameplay/economy call (the tester + owner), and it interacts
 with Proof-of-Play / survival purity. **Brainstorm before building.**
 
 ---
@@ -110,6 +110,6 @@ with Proof-of-Play / survival purity. **Brainstorm before building.**
   the integrity surface that keeps creative-made content from masquerading as proof-of-play work —
   the downstream policy fork must respect it. ✅
 - **`feedback_autonomy_to_playtest_boundary`:** Phase 1 (capture + tag) is solo-buildable once the
-  fork is picked; the policy + feel are owner/Axolittle calls. ✅
+  fork is picked; the policy + feel are owner/tester calls. ✅
 - **`feedback_uk_english_naming`:** UK English throughout. ✅
 - **No build yet:** design/spec only; the downstream-policy fork needs a brainstorm before any code. ✅

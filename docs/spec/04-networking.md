@@ -332,7 +332,7 @@ Phase 4 (the BRIDGE removal) is:
 // Trigger: remote players go through Signet auth on connect, not just at
 // website login. See docs/spec/08-security-anti-cheat.md §9.0.1.
 //
-// Held back for Axolittle multi-client playtest before flipping the flag.
+// Held back for the tester multi-client playtest before flipping the flag.
 ```
 
 #### 1.8.5 Open Questions

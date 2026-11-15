@@ -49,7 +49,7 @@ pub fn sample(tick: u64, weather: Weather, seed: u64, y: i32) -> WindSample
 - `PowerDeviceKind::Windmill` **appended last** in the enum (bincode-positional; saved).
 - Textures: `TEX_WINDMILL` (sail cross on planks) and `TEX_WINDMILL_TURNING` (blurred sails); top/bottom reuse planks. See the layer-budget rule in §1.
 - **Turn rule** (in `tick_devices`, mirroring the Water Wheel arm): each tick sample `wind` (passed in — see 2.3). The mill is **exposed** if the cell above is not solid AND at least two of its four horizontal neighbours are not solid AND no solid block sits in the 8 cells above it (a cheap sky check — use the chunk heightmap if `World` exposes one, else the 8-cell scan). Hysteresis: turn **on** when exposed and `speed ≥ 0.35`, turn **off** when not exposed or `speed < 0.30`. Swap `WINDMILL ↔ WINDMILL_TURNING` on transitions only. `is_active_source` → `d.on`.
-- Recipe (placeholder, Axolittle confirms feel): 3×3 — top row `Canvas / Canvas / Canvas`, middle `Plank / Copper Ingot / Plank`, bottom `Stick / Iron Ingot / Stick` → 1 Windmill. Canvas already exists (fibre economy). Add to the catalogue + the `electricity_blocks_are_craftable` guard + the catalogue↔matcher consistency test.
+- Recipe (placeholder, the tester confirms feel): 3×3 — top row `Canvas / Canvas / Canvas`, middle `Plank / Copper Ingot / Plank`, bottom `Stick / Iron Ingot / Stick` → 1 Windmill. Canvas already exists (fibre economy). Add to the catalogue + the `electricity_blocks_are_craftable` guard + the catalogue↔matcher consistency test.
 - Placement: the `game_loop.rs` place-arm's exhaustive `PowerDeviceKind` match gains `WINDMILL`; break-arm removes the device + `notify_neighbours` (the ghost-source regression test pattern).
 - Hover label (`power_ui.rs`): `Windmill — turning (wind: fresh)` / `Windmill — still (wind: light)` / `Windmill — blocked (needs open sky)`; wind words: `<0.20 calm`, `<0.35 light`, `<0.60 fresh`, `<0.85 strong`, else `gale`.
 - F3 debug line gains `wind: <word> <speed:.2> <compass>`.
@@ -109,7 +109,7 @@ Per `docs/authoring/trials.md` (6 registration points + `trials_lint` green). Al
 
 ## 5. Docs (source-of-truth rule)
 
-Player guide `electricity.md` (drop the copper warning; add the Windmill + wind words; Water Wheel unchanged), `blocks-and-mining.md` (copper band), `whats-coming.md`, `minigames.md` (trial count), learn `switch-on-a-lamp.md` (one line). Spec 02 ore table, Spec 05 wind subsection, Spec 48 Phase 4 status. Test sheet `docs/test-sheets/2026-09-07-wind-copper-electricity.md` for Axolittle.
+Player guide `electricity.md` (drop the copper warning; add the Windmill + wind words; Water Wheel unchanged), `blocks-and-mining.md` (copper band), `whats-coming.md`, `minigames.md` (trial count), learn `switch-on-a-lamp.md` (one line). Spec 02 ore table, Spec 05 wind subsection, Spec 48 Phase 4 status. Test sheet `docs/test-sheets/2026-09-07-wind-copper-electricity.md` for the tester.
 
 ## 6. Release
 

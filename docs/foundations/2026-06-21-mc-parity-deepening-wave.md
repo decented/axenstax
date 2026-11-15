@@ -172,7 +172,7 @@ new `WorldSave` field was added by this wave.
 ## What was deliberately NOT done overnight
 
 - **Single-player → HostedServer dual-sim collapse** — the audit itself flags
-  it as wanting Axolittle present for phase-by-phase regression; can't be
+  it as wanting the tester present for phase-by-phase regression; can't be
   solo-verified.
 - **Live multiplayer auth test** — owner-boundary (2-machine LAN + bunker).
 
@@ -185,5 +185,5 @@ trunk WASM build · brotli bundle-size gate). New tests this wave: 8
 
 **Feel-tuning is the playtest boundary** — the tunables (hop height, charge
 speed, gore knockback, ravine width/depth, mineshaft loot, lava cadence) carry
-documented defaults for Axolittle to refine. See the test sheet:
+documented defaults for the tester to refine. See the test sheet:
 `docs/test-sheets/2026-06-21-mc-parity-deepening.md`.

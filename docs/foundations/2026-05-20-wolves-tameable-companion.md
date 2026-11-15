@@ -1,6 +1,6 @@
 # Wolves — Tameable Companion Mob — Spec 28d.wolves
 
-**Status:** DELIVERED as of 2026-05-21 on main. `MobType::Wolf` + `wolf.rs` (~607 LOC) — 5-state AI (idle / follow / sit / attack-hostile / attack-recent-attacker) + bone-taming + owner pubkey + pet list on `PlayerSlot` + emotional-loss drops (tamed: nothing). Drove the `tameable.rs` framework extraction (PR #49) for future Cat/Parrot/etc. Phase 9 (Axolittle playtest) remains the validation gate.
+**Status:** DELIVERED as of 2026-05-21 on main. `MobType::Wolf` + `wolf.rs` (~607 LOC) — 5-state AI (idle / follow / sit / attack-hostile / attack-recent-attacker) + bone-taming + owner pubkey + pet list on `PlayerSlot` + emotional-loss drops (tamed: nothing). Drove the `tameable.rs` framework extraction (PR #49) for future Cat/Parrot/etc. Phase 9 (playtest) remains the validation gate.
 **Branch (when building):** `feat/wolves-build` off `main`.
 **Trigger:** Sub-foundation of [Spec 28 Minecraft-parity content surface](2026-05-20-minecraft-parity-content-surface.md) §4 — sister to the seven species in [Spec 28d Mob Roster](2026-05-20-mob-roster-expansion.md). Builds out the **tameable mob framework** that future companion species (Cat, Parrot, Fox, future pets) consume.
 
@@ -12,7 +12,7 @@ Add **wolves** as a tameable companion mob with five AI states (idle / follow-ow
 
 Owner identity is carried by pubkey on the mob component so a wolf knows whose it is across save/load and across player sessions. The PlayerSlot maintains a small pet-list for quick lookup.
 
-**Scope:** ~1,500 LOC + ~2 textures across 9 phases. Phase 9 is the Axolittle playtest gate (wolf "feel" is the failure surface — does follow-distance feel right, do attacks discriminate correctly).
+**Scope:** ~1,500 LOC + ~2 textures across 9 phases. Phase 9 is the playtest gate (wolf "feel" is the failure surface — does follow-distance feel right, do attacks discriminate correctly).
 
 ---
 
@@ -68,7 +68,7 @@ Owner identity is carried by pubkey on the mob component so a wolf knows whose i
 | 6 | Right-click-on-tamed-wolf toggles sit/stand. Owner-only — non-owners get a "not your wolf" toast. | `wolf.rs`, `block_interact.rs` | ~120 | ✓ |
 | 7 | Drops — `drops_for(MobType::Wolf, tamed) -> Vec<ItemStack>`. Untamed: leather + 1-2 bones (seeded). Tamed: empty. | `mob.rs::drops_for` (extended signature) | ~80 | ✓ |
 | 8 | Tests — AI doesn't infinite-loop, follow stays ≤ 8 blocks, taming succeeds at ~33% over many trials (seed-deterministic), attack-discrimination ignores tamed wolves of the same owner, drops table empty for tamed | `wolf.rs::tests` | ~280 | ✓ |
-| 9 | Axolittle playtest — spawn wolves in a Forest, tame one with bones, follow on a walk, find a hostile mob, observe the wolf attacks it; attack the wolf with your sword, observe owner doesn't get auto-attacked back | — | — | playtest gate |
+| 9 | playtest — spawn wolves in a Forest, tame one with bones, follow on a walk, find a hostile mob, observe the wolf attacks it; attack the wolf with your sword, observe owner doesn't get auto-attacked back | — | — | playtest gate |
 
 **Total Phases 2-8:** ~1,300 LOC + tests. Phase 9 is the gate.
 
@@ -218,7 +218,7 @@ Existing call sites pass `tamed = false` by default; only wolves carry the tamed
 
 ---
 
-## §9 — Axolittle playtest
+## §9 — playtest
 
 1. `/give bone` x 10.
 2. `/tp` to a Forest (or wait for biome spawn).

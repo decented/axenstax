@@ -92,7 +92,7 @@ lightweight-alloy angle is **deferred** (owner call, 2026-05-27).
 ## Verification & boundary
 - **Unit-testable:** Magnesium Ore drops Magnesium; all four recipes match;
   Fertiliser advances/speeds crop growth; Firestarter lights a campfire.
-- **Playtest boundary (Axolittle):** ore find-rate, fertiliser feel vs
+- **Playtest boundary (the tester):** ore find-rate, fertiliser feel vs
   bonemeal, sparkler/flare visuals.
 - `check.sh` green; engine + WASM build.
 

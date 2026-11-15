@@ -7,7 +7,7 @@ Task 17 (`AxeNStax-internal/docs/test-sheets/2026-07-06-pets-debt-water-wave.md`
 Owner directive was "crack on until built".
 **Scope decided with owner:** fire burn-tiers/afterburn **dropped** from this wave (no spec
 exists; it was deferred as "feel-tuning, wants a playtest first" — building it solo would
-invent fire-feel without Axolittle). Pets campaign = **the whole gap list**. Campaign 3 =
+invent fire-feel without the tester). Pets campaign = **the whole gap list**. Campaign 3 =
 water step-side seams only.
 
 Three campaigns, one branch, built in sequence with the clippy sweep last:
@@ -127,18 +127,18 @@ reusing the existing mob-melee pattern. This closes the last half-built 1C item.
 
 - `MobType::Crab` appended **LAST** (save-order discipline — MobType is
   bincode-positional, `mob.rs:17-138`). TOML def, placeholder small mesh (the
-  established cat-uses-wolf-mesh pattern; model passes are Axo feel work later).
+  established cat-uses-wolf-mesh pattern; model passes are the tester feel work later).
 - Spawns coastal: passive, on sand near sea level (spawn-rule mechanics pinned in plan
   against `spawning.rs`/biome tables). Drops **Crab Claw** (new material) on kill.
 - **Reach Claw** tool (craft: crab claw + sticks): while held, block place/break ray
-  distance +2 over the current reach constant. No durability drain v1 (knob for Axo).
+  distance +2 over the current reach constant. No durability drain v1 (knob for the tester).
   Catalogue cards for both recipes.
 
 ### P10 — Feel knobs → test sheet
 
 Follow/stay distances, ward radius, alarm radius + cooldown, whistle behaviour, bed
 rescue feel, pack-equip grammar, crab spawn rate, reach bonus, treat guarantee — all on
-Axolittle's sheet. Placeholder models called out explicitly so "cat looks like a wolf"
+the tester's sheet. Placeholder models called out explicitly so "cat looks like a wolf"
 arrives as a known, not a bug.
 
 ---
@@ -229,7 +229,7 @@ exposed vertical strip between the two surfaces is never meshed — a see-throug
   comment is replaced.
 
 Explicitly out (owner-approved): fire burn-tiers/afterburn (no spec; feel-tuning needs
-Axo — design it in a playtest session). Weather sync stays a watch item (synced by
+the tester — design it in a playtest session). Weather sync stays a watch item (synced by
 construction; no code).
 
 ---
@@ -299,7 +299,7 @@ shape between plan and build, each reviewed and verified correct:
   multiplayer session does not get the bed rescue today. Tracked in Spec 05 +
   the CLAUDE.md known-debt list; not a regression, a scope boundary.
 - **Cat, Parrot, and Crab render with placeholder meshes** (the established
-  cat-uses-wolf-mesh pattern) — feel/model work is an Axolittle playtest
+  cat-uses-wolf-mesh pattern) — feel/model work is a playtest
   follow-up, not a defect.
 
 ## Hardening pass — 2026-07-07 (follow-up wave)

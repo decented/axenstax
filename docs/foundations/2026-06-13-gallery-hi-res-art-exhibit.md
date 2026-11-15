@@ -121,7 +121,7 @@ unrelated to this work — surfaces only under parallel `cargo test`.)
 
 ## Deferred / playtest boundary
 
-- **Feel + visuals** (lighting, painting size, maze flow, queasiness) — Axolittle
+- **Feel + visuals** (lighting, painting size, maze flow, queasiness) — the
   playtest; tunable via the constants in `gallery.rs` + `fs_painting`.
 - Per-painting **title/artist plaques** in-world (metadata already in `ART`).
 - Mip-mapping the painting textures (currently 1 mip; linear-filtered).

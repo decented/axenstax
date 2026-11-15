@@ -99,7 +99,7 @@ Recipe (T1.x; refines in T1.5):
 | 10 | Village Bell block + Wandering Villager mob + claim-and-migrate behaviour | `block.rs`, `mob.rs`, `mob_ai.rs`, `crafting.rs` | ~250 |
 | 11 | Save/load — villager state, profession claims, reputation, village positions all survive | `save.rs` | ~150 |
 | 12 | Spec 2 §6 update (structure-gen) + new Spec 5 §X.Y (villagers + villages) + foundations README | various docs | ~50 |
-| 13 | Axolittle playtest gate | – | – |
+| 13 | playtest gate | – | – |
 
 **Total:** ~2,250 LOC across 12 build phases. Comparable to Spec 11 (~1,900 LOC) and Spec 12 (~2,500 LOC est).
 
@@ -114,7 +114,7 @@ Phases 2-12 are solo-buildable. Phase 13 is the playtest gate. The spec delibera
 - 7 new texture layers per mob (head front/side/top, body side/top, legs front/side — matches existing cow/zombie/pig pattern).
 - Villager drops: **nothing** on death (intentional — encourages defending, not farming).
 - Iron Golem drops: 3-5 iron ingots (motivates raids but not griefing — see below).
-- **Anti-grief**: Villager has a damage-cooldown protecting it from accidental player hits — first hit is a "warning" toast, second hit within 30s actually damages. (Kid-friendly. Tunes per Axolittle's playtest.)
+- **Anti-grief**: Villager has a damage-cooldown protecting it from accidental player hits — first hit is a "warning" toast, second hit within 30s actually damages. (Kid-friendly. Tunes per playtest.)
 
 ### Phase 3 — Profession
 
@@ -141,7 +141,7 @@ Phases 2-12 are solo-buildable. Phase 13 is the playtest gate. The spec delibera
 ### Phase 5 — Dialogue overlay
 
 - Right-click a villager when within 4 blocks → opens a dialogue UI (egui modal).
-- Shows: villager name (procgen — "Villager #N" until Axolittle adds nicer names in playtest feedback), profession, current quest offer + reward preview.
+- Shows: villager name (procgen — "Villager #N" until the tester adds nicer names in playtest feedback), profession, current quest offer + reward preview.
 - Buttons: **Accept**, **Decline**, **Close**.
 - Only one active quest per (player, villager) pair. Decline puts it on a 5-minute cooldown.
 
@@ -225,11 +225,11 @@ Quest generation: each villager has a profession-keyed quest pool. On dialogue-o
 - Vision doc — note that Spec 19 phases 1-12 are the T2/T3 prerequisite for "Raid Defence" T3 content in §6.4.
 - Foundations README — mark Spec 19 DELIVERED with file touchpoints.
 
-### Phase 13 — Axolittle playtest
+### Phase 13 — playtest
 
 Open questions for the playtest:
 - Does the village feel alive? Or do villagers wander too much / too little?
-- Is the dialogue UI legible? Does an 11-year-old understand the quest screen?
+- Is the dialogue UI legible? Does a new player understand the quest screen?
 - Quest pacing — too easy? too grindy? right ratio of fetch/make/kill?
 - Reputation — does the system feel rewarding, or punishing when you accidentally hit a villager?
 - Player-built villages — does the migration mechanic feel magical or tedious?
@@ -257,7 +257,7 @@ This deepens the Bitcoin economy without complicating compliance.
 
 ## Open design questions
 
-These are decisions to settle during build (or kick to Axolittle):
+These are decisions to settle during build (or kick to the tester):
 
 1. **Villager voice lines?** — silent ambient text only? Future voice-feedback-server integration (Spec 4) for actual TTS? Skip for now; ambient text fits Spec 5's tone.
 2. **Trading items _between_ villagers (Minecraft's emerald economy)?** — explicitly skipped. Villager-to-villager trade would re-introduce the "NPC market" trap.

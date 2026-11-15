@@ -1,6 +1,6 @@
 # Deepslate Reserve & In-World Visibility
 
-**Status**: READY TO BUILD. Phases 2–5 are autonomous solo work. Phase 6 (Axolittle playtest) blocks on his time.
+**Status**: READY TO BUILD. Phases 2–5 are autonomous solo work. Phase 6 (playtest) blocks on tester time.
 **Date**: 2026-05-17
 **Branch**: `feat/deepslate-reserve` once started; off `main`.
 **Session**: Fresh — implementer should treat this doc + Spec 6 (especially §1.4, §6.2, §7) as the only briefs.
@@ -22,10 +22,10 @@ The same fiction extends to the "Fund the Reserve" flow (Spec 6 §6.2 amended): 
 
 ## Why this lives here
 
-- **Spec 6 mechanics are correct but invisible.** The whole §1.4 closed-world principle hinges on the player *understanding* that funding goes to a shared pool. Numeric transparency (current §7.5 panel) is necessary but not sufficient — a 9-year-old doesn't read tables. Visual transparency lands intuitively.
+- **Spec 6 mechanics are correct but invisible.** The whole §1.4 closed-world principle hinges on the player *understanding* that funding goes to a shared pool. Numeric transparency (current §7.5 panel) is necessary but not sufficient — a new player doesn't read tables. Visual transparency lands intuitively.
 - **The "buried sats" fiction is already in the canon.** Spec 6 §2.2c.2 describes Satori vein generation in deepslate. Spec 6 §10.5 #5 calls the player's role "Proof of Play" — they're observing proof-of-work, not generating it. The "sats are buried in the rock" metaphor matches the established lore; this spec just makes it visible.
 - **Cross-game lift.** Any Decented game with a "mining-equivalent" loop (ingredient-gathering, egg-hunting) can adopt the same "pool-as-visible-world-feature" pattern. The primitive is engine-generic; the *what gets rendered as rich* is per-game.
-- **Kid-friendliness.** Axolittle's design feedback consistently favours **visible feedback loops** over abstracted stats. The deepslate-as-pool framing is exactly the kind of mechanic that reads instantly to an 11-year-old: "the rock is full of sats; I dig; I get sats; my friend's dad just sponsored, so now the rock is fuller."
+- **Child-friendly design.** The tester's design feedback consistently favours **visible feedback loops** over abstracted stats. The deepslate-as-pool framing is exactly the kind of mechanic that reads instantly to a new player: "the rock is full of sats; I dig; I get sats; my friend just sponsored, so now the rock is fuller."
 
 ---
 
@@ -58,7 +58,7 @@ Everything in this spec is rendering + UX. **Cross-platform on both targets.** T
 - bitcoin parent controlled — Bitcoin features are opt-in per server, parent-controlled. The reserve visualisation works in both Bitcoin-enabled and Bitcoin-disabled modes (the latter shows "untranslated proof-of-work effort" without the sats overlay).
 - economies vision — the multi-economy vision this serves.
 - uk english naming — UK English throughout. "Sponsor", "Fund", "Reserve" — not "Patron" / "Donate" / "Pool" (the latter still works as a technical term but in the user-facing copy prefer "Reserve").
-- autonomy to playtest boundary — Phases 2–5 solo, Phase 6 = Axolittle.
+- autonomy to playtest boundary — Phases 2–5 solo, Phase 6 = the tester.
 
 ### What does NOT exist yet (and this spec does NOT need)
 
@@ -77,7 +77,7 @@ Everything in this spec is rendering + UX. **Cross-platform on both targets.** T
 | 3 | Visual variants — deepslate texture array with 4 richness tiers; chunk gen weights variant by server signal | `game/engine/src/block.rs`, `game/engine/src/chunk.rs`, shader textures | ~150 | ✓ |
 | 4 | HUD richness gauge — replaces "Pool Balance" raw number with a visual gauge ("The Reserve is fat / healthy / thin"); add to Bitcoin menu | `game/engine/src/hud_ui.rs` | ~80 | ✓ |
 | 5 | Fund-the-Reserve dialog — visual flow showing where sats go, split breakdown, "sponsor of [server]" confirmation | `tools/sites/game/static/js/auth.js` (PWA-side), `game/engine/src/menu.rs` (native-side) | ~90 | ✓ |
-| 6 | Axolittle playtest — does the "rich deepslate" reading feel right? Does the funding flow feel like sponsorship not pay-to-win? | n/a | 0 | ✗ blocked |
+| 6 | playtest — does the "rich deepslate" reading feel right? Does the funding flow feel like sponsorship not pay-to-win? | n/a | 0 | ✗ blocked |
 
 **Total**: ~400 lines spec + code. Phase 6 is the playtest gate.
 
@@ -132,7 +132,7 @@ pub struct ServerStatePacket {
 
 > **Phase B0 (2026-10-06): live richness no longer feeds chunk generation.** World generation must be a pure function of seed + world flags + the worldgen fingerprint so a multiplayer joiner regenerates the host's untouched chunks bit-identically (Spec 02 §5.2). The per-tick copy of `reserve.richness` into `BiomeGenerator` made the same seed bake different deepslate block ids on the host client (0.75 synthetic default, then live), a dedicated server (0.5, never updated) and a joiner. `BiomeGenerator.reserve_richness` is gone; `base_rock_at` bakes the fixed `biome::WORLDGEN_RESERVE_RICHNESS = 0.75` (what single-player always baked, so existing worlds show no seam). The old call site in `game_loop.rs` carries a `BRIDGE` comment. **When the reward layer lands, richness-driven deepslate visuals must move to render time** — e.g. a mesher/shader tint or variant pick keyed on the live `reserve.richness` over the canonical baked block — never back into generation, which would desync joiners again. Until then the deepslate variant mix is a fixed per-position pattern and does not track the Reserve.
 
-> **Status (2026-05-20): FULLY DELIVERED.** Phase 3a on `feat/deepslate-visual-variants` (helper + parity test + audit); **Phase 3b on `feat/deepslate-phase-3b`** — BlockDefs registered for ids 61-63, 3 procedural textures (layers 174-176: subtle-blue-speckle THIN → blue-orange-veined HEALTHY → glowing-dense FAT), `texture_count` 174→177, `pick_deepslate_variant` in `biome.rs` with triangular weighting per tier (r=0 → 100% canonical; r=1/3 → 100% THIN; r=2/3 → 100% HEALTHY; r=1 → 100% FAT; smooth mix between), wired into `base_rock_at`. ~~`BiomeGenerator.reserve_richness` synced from `GameState.reserve.richness` at top of `tick()`~~ (removed 2026-10-06, Phase B0 — see the note above). Mine_drop normalises all variants to canonical PURE_DEEPSLATE. 6 new tests (helper-matches-all-four, mine-drop normalisation, picker zero/one/half richness, determinism). PROTOCOL unchanged. Phase 6 = Axolittle playtest.
+> **Status (2026-05-20): FULLY DELIVERED.** Phase 3a on `feat/deepslate-visual-variants` (helper + parity test + audit); **Phase 3b on `feat/deepslate-phase-3b`** — BlockDefs registered for ids 61-63, 3 procedural textures (layers 174-176: subtle-blue-speckle THIN → blue-orange-veined HEALTHY → glowing-dense FAT), `texture_count` 174→177, `pick_deepslate_variant` in `biome.rs` with triangular weighting per tier (r=0 → 100% canonical; r=1/3 → 100% THIN; r=2/3 → 100% HEALTHY; r=1 → 100% FAT; smooth mix between), wired into `base_rock_at`. ~~`BiomeGenerator.reserve_richness` synced from `GameState.reserve.richness` at top of `tick()`~~ (removed 2026-10-06, Phase B0 — see the note above). Mine_drop normalises all variants to canonical PURE_DEEPSLATE. 6 new tests (helper-matches-all-four, mine-drop normalisation, picker zero/one/half richness, determinism). PROTOCOL unchanged. Phase 6 = playtest.
 >
 > **Original Status (2026-05-17): DEFERRED — not blocked.** Phases 2, 4, 5 deliver the protocol + gauge + dialog. Phase 3's value (visual richness in the world itself) is real but the implementation risk is meaningful: a `grep -n PURE_DEEPSLATE` across the engine returns ~20 call sites (mining-break-time, drop tables, tool-tier gates, biome gen, proof-of-play deepslate detection, save format). Adding 4 variants without compromising the mining-mechanic-parity invariant ("strike on Fat tile produces same HMAC roll as strike on Empty tile at same position") requires either: (a) a helper `is_pure_deepslate_any_tier(block)` that every existing site adopts, or (b) a runtime-variant overlay on a single block ID via per-position metadata at mesh time. Both are 1-2 sessions of careful work. Defer until the gameplay-parity test surface is strengthened first.
 >
@@ -281,32 +281,32 @@ Server operator can customise:
 
 ---
 
-## Phase 6 — Axolittle playtest
+## Phase 6 — playtest
 
 ### Goal
 
-Validate the fiction layer. Does an 11-year-old actually read "the rock is full of sats" from the visual treatment? Does the Fund-the-Reserve dialog feel like sponsorship rather than pay-to-win?
+Validate the fiction layer. Does a new player actually read "the rock is full of sats" from the visual treatment? Does the Fund-the-Reserve dialog feel like sponsorship rather than pay-to-win?
 
 ### Pre-playtest setup
 
 - Test server running at varying richness levels (operator manually adjusts pool balance to hit each tier).
 - Test Lightning wallet with ~10K test sats funded for sponsorship attempts.
-- Axolittle in a flow where he's mining for ~15 minutes and sees the deepslate variants in situ.
+- The tester in a flow where they're mining for ~15 minutes and sees the deepslate variants in situ.
 
 ### What to look for
 
-- **Reading the rock.** When the richness changes from "thin" to "fat", does Axolittle notice without being told? Does he change his behaviour (mine more aggressively, or stay in deepslate areas longer)?
-- **Mining-rate intuition.** Does the gauge label ("Healthy", "Fat") match how he describes the mining feel? If the gauge says "Fat" but mining feels slow, the calibration is off.
-- **Funding flow read.** Walk him through the dialog. Does the message land that he's not buying his own sats? Does he understand the per-player vs per-pool distinction?
+- **Reading the rock.** When the richness changes from "thin" to "fat", does the tester notice without being told? Do they change their behaviour (mine more aggressively, or stay in deepslate areas longer)?
+- **Mining-rate intuition.** Does the gauge label ("Healthy", "Fat") match how they describe the mining feel? If the gauge says "Fat" but mining feels slow, the calibration is off.
+- **Funding flow read.** Walk them through the dialog. Does the message land that they're not buying their own sats? Do they understand the per-player vs per-pool distinction?
 - **Aesthetic.** Are the visual tiers distinct enough? Or do "thin" and "healthy" blur together?
-- **Sponsor list.** Does seeing other players named as sponsors make him want to sponsor? Or does it feel like a leaderboard?
+- **Sponsor list.** Does seeing other players named as sponsors make them want to sponsor? Or does it feel like a leaderboard?
 - **Edge cases.** What if richness drops mid-session (server pays out faster than it gets funded)? Does the visual "fade" feel right?
 
 ### Outcome
 
 Tuning notes. Likely follow-ups:
 - Adjust tier boundary thresholds (maybe 0.20/0.40/0.60/0.80 instead of 0.25/0.50/0.75).
-- Iterate the gauge label words (maybe "Quiet/Steady/Rich/Brimming" instead of "Empty/Thin/Healthy/Fat"; ask Axolittle).
+- Iterate the gauge label words (maybe "Quiet/Steady/Rich/Brimming" instead of "Empty/Thin/Healthy/Fat"; ask the tester).
 - Adjust sponsor-public default.
 - Refine dialog copy.
 
@@ -328,7 +328,7 @@ Tuning notes. Likely follow-ups:
 - bitcoin parent controlled — feature opt-in per server, hidden on Bitcoin-disabled servers. ✓
 - shared infra strategy — Reserve-as-visible-pool primitive lifts cross-game. Generic. ✓
 - uk english naming — "Reserve", "Fund", "Sponsor" — UK English. ✓
-- autonomy to playtest boundary — Phases 2–5 solo, Phase 6 = Axolittle. ✓
+- autonomy to playtest boundary — Phases 2–5 solo, Phase 6 = the tester. ✓
 - economies vision — the Reserve fiction is the §11.1 Proof-of-Play floor made visible. ✓
 
 ---

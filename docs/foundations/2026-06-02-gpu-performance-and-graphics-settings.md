@@ -15,8 +15,8 @@ game stays playable on weak GPUs.
 
 ## Why (the trigger)
 
-Axolittle reports that AxeNStax in the browser is **noticeably laggier and less
-enjoyable** than his Java Minecraft world on the same laptop, and that Minecraft
+The tester reports that AxeNStax in the browser is **noticeably laggier and less
+enjoyable** than their Java Minecraft world on the same laptop, and that Minecraft
 "feels richer." Two separable problems hide inside that one observation:
 
 1. **Raw efficiency.** We are doing a large amount of unnecessary per-frame GPU and
@@ -92,7 +92,7 @@ so the build session doesn't have to re-discover them.
    chunk + up to 6 neighbours (`block_interact.rs:17`); a **lighting change rebuilds a
    3×3×3 = up to 27 chunks** (`block_interact.rs:59`); loading one new column meshes up to
    30 sub-chunks (`chunk_stream.rs:99-117`). On WASM this **blocks the browser thread** —
-   this is the stutter Axolittle feels when placing a torch or exploring. Spec 03 §2.7
+   this is the stutter the tester feels when placing a torch or exploring. Spec 03 §2.7
    describes a worker pool / Web Workers; **neither is implemented.**
 
 3. **Per-frame GPU buffer reallocation.** Entity, avatar, viewmodel, wireframe, ghost,
@@ -152,7 +152,7 @@ so the build session doesn't have to re-discover them.
   `localStorage` key (WASM) and a `settings.json` (native).
 - The **F3 perf overlay already exists** on both native and WASM (added for Spec 15) and
   surfaces rolling frame/tick samples — extend it to show **draw-call count** and **culled
-  count** so the wins are visible and Axolittle can read them off during playtest.
+  count** so the wins are visible and the tester can read them off during playtest.
 - The **command system** (`commands/`) can optionally expose dials as `/gfx renderdist 6`
   etc. for quick testing — `commands/builtins/time.rs` is the read-write template.
 
@@ -226,7 +226,7 @@ Selecting a preset fills the dials; touching any dial flips to "Custom".
 
 ## Phasing (suggested build order)
 
-A no-Axolittle session can do almost all of this; only the final feel-tuning needs him.
+A no-tester session can do almost all of this; only the final feel-tuning needs them.
 
 1. **Phase 1 — `GraphicsSettings` struct + persistence + plumb render distance.**
    Create the struct, wire load/save (WASM localStorage + native JSON), unify the two
@@ -242,11 +242,11 @@ A no-Axolittle session can do almost all of this; only the final feel-tuning nee
 6. **Phase 6 — Fog-as-uniform** (fixes the disconnect bug; ties fog to render distance) +
    frame pacing / FPS cap (A3). *Solo.*
 7. **Phase 7 — Bounded/off-thread meshing (A4).** Kills the edit/stream hitches. *Solo to
-   build; needs Axolittle to confirm the stutter is gone.*
+   build; needs the tester to confirm the stutter is gone.*
 8. **Phase 8 — Polish:** water greedy merge (A5), mipmaps+aniso (A6), then u16/packed
    verts (A7) and LOD (A8) as separate follow-ons. *Solo.*
-9. **Phase 9 — Axolittle playtest gate.** Run on his actual laptop. Compare Low/Medium/High
-   against his Java Minecraft. Tune preset values from his feedback. Read F3 numbers.
+9. **Phase 9 — playtest gate.** Run on their actual laptop. Compare Low/Medium/High
+   against their Java Minecraft. Tune preset values from their feedback. Read F3 numbers.
 
 ## Spec maintenance (mandatory per CLAUDE.md)
 

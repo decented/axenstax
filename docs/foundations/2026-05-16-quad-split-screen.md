@@ -1,6 +1,6 @@
 # Quad split-screen — 3 and 4 player local viewports
 
-**Status**: READY TO BUILD. Phases 2–5 are autonomous solo work. Phase 6 (Axolittle 4-player playtest) blocks on his time.
+**Status**: READY TO BUILD. Phases 2–5 are autonomous solo work. Phase 6 (the 4-player playtest) blocks on tester time.
 **Date**: 2026-05-16
 **Branch**: `feat/quad-split-screen` once started; off `main`.
 **Session**: Fresh — implementer should treat this doc as the only brief.
@@ -19,7 +19,7 @@ Scope is small (~600 lines incl. tests). The work is gated `#[cfg(not(target_arc
 ## Why this lives here
 
 - **Architecture is already there.** `GameState.players` is `Vec<PlayerSlot>` (`main.rs:230` doc says "split-screen ready: Vec holds 1-4 PlayerSlots"). Gamepad system tracks N controllers (`gamepad.rs:5`). HostedServer allocates N channel transports per `num_local_players` (`hosted_server.rs:145`). Save format is `Vec<PlayerSaveData>`. Pause menu's leave-buttons loop is `for pi in 0..num_players` (`menu.rs:1339`). The two missing pieces are the layout solver and the join cap.
-- **Axolittle has asked for it implicitly.** AxeNStax targets couch co-op; 4 friends round one TV is the canonical use case. Confirmed scope on 2026-05-16 chat ("split screen needs to handle up to 4 players, with a quad screen").
+- **The tester has asked for it implicitly.** AxeNStax targets couch co-op; 4 friends round one TV is the canonical use case. Confirmed scope on 2026-05-16 chat ("split screen needs to handle up to 4 players, with a quad screen").
 - **Cross-game lift, per shared infra strategy.** `compute_screen_layout()` is engine-generic — once it knows 1/2/3/4, every Decented game that uses the same screen abstraction (other games on the same primitives) inherits 1-4 local players for free. The 3-player asymmetric layout in particular is a reusable primitive — any couch-co-op game that bolts onto the engine gets it.
 - **Lights up the gamepad-only Player 3/4 path.** Today the join code in `game_loop.rs:1029` is `if self.players.len() < 2` — Player 3 and Player 4 never even get a chance to try. The fix is one-line but unblocks an entire input axis.
 
@@ -81,7 +81,7 @@ WASM keeps its single-player local clamp. Lifting that is **out of scope for thi
 | 3 | Raise join cap from 2 to 4; generalise join toast + log | `game_loop.rs` | ~30 | ✓ |
 | 4 | Per-player input routing extended from 2 → 4 (keyboard always P0; gamepads 0-2 → P2-P4) | `game_loop.rs` (intent-collect block), `gamepad.rs` (if any per-player intent helper changes) | ~120 | ✓ |
 | 5 | HUD + crafting legibility verification at 960×540 + 480×270; integration test for 4-player save round-trip | `hud_ui.rs` and/or `craft_ui.rs` (small fitting tweaks if needed), `src/test_integration/save_load.rs` | ~150 | ✓ |
-| 6 | Axolittle 4-player playtest (couch co-op feel; layout-choice validation; layout-switch when a player leaves mid-game) | n/a | 0 | ✗ blocked |
+| 6 | The 4-player playtest (couch co-op feel; layout-choice validation; layout-switch when a player leaves mid-game) | n/a | 0 | ✗ blocked |
 
 **Total**: ~600 lines spec + code + tests. Phase 6 is the playtest gate.
 
@@ -348,7 +348,7 @@ fn four_player_save_round_trip() {
 
 ---
 
-## Phase 6 — Axolittle 4-player playtest
+## Phase 6 — the 4-player playtest
 
 ### Goal
 

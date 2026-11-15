@@ -99,7 +99,7 @@ fine string and strong rope out of the same field.
 - **Unit-testable:** Cotton→String and HempFibre→Rope recipes match; the
   `Wool → String` recipe no longer matches; crop growth stages advance;
   wild scatter places cotton only in warm biomes and hemp only in temperate.
-- **Playtest boundary (Axolittle):** crop spawn density, growth feel, whether
+- **Playtest boundary (the tester):** crop spawn density, growth feel, whether
   the cotton/hemp/wool split reads clearly, and rope's first real use.
 - `check.sh` green; engine + WASM build.
 

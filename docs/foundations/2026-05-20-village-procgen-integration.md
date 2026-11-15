@@ -30,7 +30,7 @@
 | 8 | Plaque placement during procgen. When a plan is built via procgen (not player commission), the Plaque carries the architect's derivation chain + an additional "Sampled by village procgen" line. This is the first real attribution-on-procgen-content the engine has. | `village_gen.rs`, `plan.rs` | ~50 |
 | 9 | Village Bell info dialog. Spec 19's Village Bell already exists; this spec adds a "Houses in this village" tab to the bell's right-click dialog. Each house in the village is listed with its plan name + architect(s) credit + a multi-architect "Tip all" pool button (sums per-architect tip into one transaction that fans out via the helper). | `villager_ui.rs` (or new `village_bell_ui.rs`), `economy.rs` | ~180 |
 | 10 | Tests — registry load (engine-bundled + server-local), category inference, sampling filter (license + size), procgen integration (a village spawn produces houses whose Plaque-chains match registry sources). | `plan_registry.rs::tests`, `village_gen.rs::tests`, `test_integration/village_procgen.rs` | ~150 |
-| 11 | Axolittle playtest — explore a village; right-click houses + workshops to read Plaques; verify architect credit; tip-all-pool from Village Bell; confirm hardcoded fallback still works (drop registry by renaming the assets dir + spawn a village in a debug seed). | – | playtest gate |
+| 11 | playtest — explore a village; right-click houses + workshops to read Plaques; verify architect credit; tip-all-pool from Village Bell; confirm hardcoded fallback still works (drop registry by renaming the assets dir + spawn a village in a debug seed). | – | playtest gate |
 
 **Total**: ~930 LOC across 10 build phases (+ ~200 KB JSON data). The README's ~600 estimate was for code only — the JSON data isn't counted in that bucket. Phase 11 is the playtest gate.
 
@@ -215,7 +215,7 @@ Plus integration test: spawn a village in a deterministic seed; verify the house
 
 ---
 
-## Phase 11 — Axolittle playtest
+## Phase 11 — playtest
 
 - Explore a village. Right-click each house's Plaque + read the credit.
 - Right-click the Village Bell → "Houses" tab. Confirm credits match the Plaques.

@@ -2,7 +2,7 @@
 
 > **Superseded in part, 2026-11-15.** "Species-neutral GreenLog" no longer holds: every species' log mines to its own log block, places as itself, crafts its own planks, and counts as fresh wood on the Drying Rack and as fuel. The species-neutral outputs of the rack (`SeasonedLog`, `KilnDriedLog`) stand. See Spec 05 §2 "Logs keep their tree type".
 
-**Status:** DELIVERED as of 2026-05-21 on main. All 6 wood species (Oak — existing — plus Birch / Spruce / Jungle / Acacia / DarkOak) shipped: 15 new BlockIds (66-80), `WoodSpecies` enum + helpers in `block.rs`, per-species tree shapes in `tree_shapes.rs`, species-neutral planks recipe (any plank species works in crafting), per-species sapling MaterialIds, biome-driven tree distribution via `assign_biome_whittaker`. Phase 11 (Axolittle playtest of feel) is the remaining gate.
+**Status:** DELIVERED as of 2026-05-21 on main. All 6 wood species (Oak — existing — plus Birch / Spruce / Jungle / Acacia / DarkOak) shipped: 15 new BlockIds (66-80), `WoodSpecies` enum + helpers in `block.rs`, per-species tree shapes in `tree_shapes.rs`, species-neutral planks recipe (any plank species works in crafting), per-species sapling MaterialIds, biome-driven tree distribution via `assign_biome_whittaker`. Phase 11 (playtest of feel) is the remaining gate.
 **Branch (when building):** `feat/spec-28b-woods` off `main`.
 **Trigger:** Sub-foundation of [Spec 28 Minecraft-parity content surface](2026-05-20-minecraft-parity-content-surface.md) §2. Depends on 28a Biomes for tree distribution; can independently land the block + recipe layer.
 
@@ -67,7 +67,7 @@ Crafting parity rule: any recipe that needs "planks" accepts planks of any speci
 | 8 | Mine_drop coverage — every species' log drops GreenLog; every species' leaves drops sapling-of-species at 1-2% (sapling materials added) | `block.rs::mine_drop` | ~100 | ✓ |
 | 9 | Saplings as a `MaterialId` per species — OakSapling, BirchSapling, etc. Right-click on dirt plants. | `item.rs`, `block.rs` | ~150 | ⚠ playtest |
 | 10 | Tests — block reg sane, recipe generalisation, sapling planting, tree-shape determinism | `*.rs::tests` | ~120 | ✓ |
-| 11 | Axolittle playtest — chop one of each species, dry, plank, build a 2x3 hut with each colour | — | — | playtest gate |
+| 11 | playtest — chop one of each species, dry, plank, build a 2x3 hut with each colour | — | — | playtest gate |
 
 **Phases 2-5 + 8 + 10 are solo-shippable today.** Phases 6-7-9-11 need playtest.
 
@@ -96,7 +96,7 @@ pub const DARK_OAK_PLANKS: BlockId = 80;
 
 Each gets a `BlockDef` with appropriate colour (per species palette) and the same `solid`/`transparent`/`gravity` semantics as Oak's.
 
-Palette (approximate — final values from Axolittle's preview):
+Palette (approximate — final values from the tester's preview):
 - Birch logs: warm white-cream (0.95, 0.92, 0.82) with dark grey horizontal flecks (texture-only post-alpha).
 - Spruce logs: deep red-brown (0.42, 0.28, 0.18).
 - Jungle logs: green-tinted ochre (0.55, 0.45, 0.25).

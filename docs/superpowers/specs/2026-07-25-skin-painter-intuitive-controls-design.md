@@ -7,9 +7,9 @@ in-Workshop painter delivered by `plans/2026-06-30-skin-paint-in-workshop.md`.
 
 ## Why
 
-Axolittle hit resistance painting his avatar and described it as "the limbs aren't
+The tester hit resistance painting their avatar and described it as "the limbs aren't
 intuitive to turn on and off so you can paint each body part", plus the outer skin
-not being intuitive. Investigation says he is not confused — he hit a wall.
+not being intuitive. Investigation says they are not confused — they hit a wall.
 
 ### Finding 1: ~30% of the skin cannot be painted at all
 
@@ -33,7 +33,7 @@ buried inside a neighbouring box as blocked):
 | `head` ±X | 88% |
 
 **8 of 36 faces are fully unreachable; overall paintable surface is 70.4%.**
-Axo's instinct — separate the limbs — is the correct fix, and no such control exists.
+The tester's instinct — separate the limbs — is the correct fix, and no such control exists.
 
 ### Finding 2: the Workshop hands you no dyes
 
@@ -229,7 +229,7 @@ Three call sites move together, sourced from one place:
 sleeve), `skin_hit.rs:31` (hit-test).
 
 **Side effect to see before it ships:** this visibly thins the jacket and sleeves on
-every skin that already exists, including Axo's current look. It is the correct value
+every skin that already exists, including the tester's current look. It is the correct value
 and it fixes Minecraft-import fidelity, but it changes how existing content renders —
 not just new content.
 
@@ -272,7 +272,7 @@ becomes a reference nobody needs to reach for.
 ## Deferred
 
 Per-part clothes toggles; touch/pinch painting; consolidating the `BOXES` table;
-mannequin feel-knobs pending Axo's playtest.
+mannequin feel-knobs pending the tester's playtest.
 
 ---
 

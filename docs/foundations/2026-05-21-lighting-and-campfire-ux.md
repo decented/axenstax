@@ -1,6 +1,6 @@
 # Lighting system + torch/tall-grass visibility + campfire UX — Spec 30
 
-**Status**: **DELIVERED 2026-05-21** on `feat/spec30-lighting-and-campfire-ux`. All 11 active phases (A–K) shipped; Phase L (Axolittle playtest) is the remaining gate. Bundle 1.72 MiB under 5 MiB gate; 1,206 tests pass (+16 from baseline).
+**Status**: **DELIVERED 2026-05-21** on `feat/spec30-lighting-and-campfire-ux`. All 11 active phases (A–K) shipped; Phase L (playtest) is the remaining gate. Bundle 1.72 MiB under 5 MiB gate; 1,206 tests pass (+16 from baseline).
 **Date**: 2026-05-21
 **Branch**: `feat/spec30-lighting-and-campfire-ux`
 **Parent specs**: Spec 02 §"Lighting" (full BFS design — this is the build), Spec 05 §3.10 (current "Light gate dropped for T1" callout — removed by this spec), Spec 17 (Campfire), Spec 20 (Furnace).
@@ -204,7 +204,7 @@ Rendered each frame the conditions are met. Uses the existing egui overlay infra
 | I | Campfire smoulder state (`CampfireBurnState` or `smoulder_ticks`). Block-id flip back to LIT on relight. Light-emission table reads campfire state. Tests: fuel-exhaust → smoulder → unlit transitions; fuel-during-smoulder = instant relight. | `campfire.rs`, `game_loop.rs` | ✓ |
 | J | Campfire hover label UI — egui floating panel triggered by crosshair-on-campfire within strike distance. Reads CampfireData; pure render. | `campfire_ui.rs` (new), `game_loop.rs` | ✓ |
 | K | Spec doc updates + `./check.sh` ALL GREEN + commit + PR + merge + `cargo build --release`. | docs/spec/02, docs/spec/05, docs/foundations/README.md | ✓ |
-| L | Axolittle playtest — verify torches visible + light caves + campfire smoulders + hover label readable + mobs respect darkness. | – | playtest |
+| L | playtest — verify torches visible + light caves + campfire smoulders + hover label readable + mobs respect darkness. | – | playtest |
 
 **Estimated total**: ~1,500–2,000 LOC including tests, across 11 active phases + 1 playtest gate.
 
@@ -223,9 +223,9 @@ Rendered each frame the conditions are met. Uses the existing egui overlay infra
 
 ## Open design questions
 
-1. **Smoulder duration**: 30 in-game-seconds (600 ticks) — Axolittle's call on whether longer (1 minute = 1,200 ticks) feels right. Locked at 600 for alpha; tunable post-playtest.
+1. **Smoulder duration**: 30 in-game-seconds (600 ticks) — the tester's call on whether longer (1 minute = 1,200 ticks) feels right. Locked at 600 for alpha; tunable post-playtest.
 2. **Initial-light-pass cost on load**: legacy saves with no light data run the full pass. May add 50–500 ms on world load depending on chunk count. Watchable in F3 perf overlay. If slow, defer to first-tick batched pass.
-3. **Hover label range**: ~4 blocks (strike distance). If Axolittle wants a "look from across the room" gesture, easy to widen post-playtest.
+3. **Hover label range**: ~4 blocks (strike distance). If the tester wants a "look from across the room" gesture, easy to widen post-playtest.
 4. **Block-light vs sky-light visual mix**: today's "use max" works. Minecraft uses a per-channel blend with sky tinted by time-of-day. Defer the per-channel tint.
 5. **Cross-game lift**: lighting + campfire-state-aware emission lift to other games on the same primitives (cooking stations, incubator warmth, etc). Tagged in §"Cross-game lift" below.
 

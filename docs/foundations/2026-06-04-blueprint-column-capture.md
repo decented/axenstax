@@ -1,6 +1,6 @@
 # Blueprint Column-Capture — build *on* the paper, stamp it, capture what's connected
 
-**Status: BUILT — engine tests + WASM build green. Awaiting Axolittle playtest.** Reworks the
+**Status: BUILT — engine tests + WASM build green. Awaiting playtest.** Reworks the
 *capture semantics* of the shipped paper-thin blueprint system
 (`docs/foundations/2026-06-04-blueprint-face-attachment.md`). The paper-thin lay / render /
 peel / develop / persist machinery is **done and stays**; only the **capture algorithm** and
@@ -16,7 +16,7 @@ structure you built and nothing else.
 
 ---
 
-## The model (owner + Axo, 2026-06-04)
+## The model (owner + the tester, 2026-06-04)
 
 1. **Lay paper** on a cleared floor → paper-thin `BlueprintBlank` attachments (already built).
 2. **Build directly on it**, 1:1, connected to the ground. Floor, walls, furniture, multi-storey
@@ -130,7 +130,7 @@ fn capture_connected_volume(world, tiles: &[(i32,i32,i32)]) -> Vec<(i32,i32,i32)
 - **Stamp resolution:** pure helper `paper_tile_under(world, clicked) -> Option<(i32,i32,i32)>`
   (scan-down) unit-tested; the right-click wiring is playtest-boundary.
 - **Gate:** `./check.sh` all-green incl. WASM + bundle size.
-- **Playtest (Axo):** does building-on-the-paper + stamp *feel* like a 1:1 drawing; do the
+- **Playtest (the tester):** does building-on-the-paper + stamp *feel* like a 1:1 drawing; do the
   exclusions behave intuitively in real builds.
 
 ## Memory-rule check
@@ -145,7 +145,7 @@ fn capture_connected_volume(world, tiles: &[(i32,i32,i32)]) -> Vec<(i32,i32,i32)
 
 ## Implementation outcome (2026-06-04)
 
-**Status: BUILT — engine tests + WASM build green. Awaiting Axolittle playtest.**
+**Status: BUILT — engine tests + WASM build green. Awaiting playtest.**
 
 ### Capture algorithm
 
@@ -219,5 +219,5 @@ on every captured plan.
 
 The capture logic and Stamp wiring are engine-verified. The **feel** — does building
 directly on the paper + stamping read as a 1:1 drawing; do the exclusions behave
-intuitively in real builds — is the **Axolittle playtest boundary** and has not been
+intuitively in real builds — is the **playtest boundary** and has not been
 solo-verified.

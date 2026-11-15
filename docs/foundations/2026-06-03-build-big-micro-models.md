@@ -3,7 +3,7 @@
 **Status: ✅ DELIVERED 2026-06-03 — Phases A–D merged to `main`.** Flowers
 (CORNFLOWER/FIELD_POPPY/BUTTERCUP) now render as 3D sub-voxel shells instead of flat
 cross-billboards; test sheet `docs/test-sheets/2026-06-03-flower-micro-models.md`
-(Axolittle playtest = open gate — the *look* is the only piece not solo-verifiable,
+(playtest = open gate — the *look* is the only piece not solo-verifiable,
 though it was headlessly rendered + confirmed). Graduated from owner-inbox item **#18**
 (`docs/backlog/owner-inbox.md` §#18). This is the concrete, buildable expansion of that
 note: the bake-to-micro-model pipeline designed against the **real** chunk/mesh/capture

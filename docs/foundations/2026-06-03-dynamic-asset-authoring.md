@@ -7,7 +7,7 @@
 2. **Phase C rung 2 — squash & stretch.** `PartPose` gains `scale: [f32; 3]` (default `[1,1,1]`); the shared transform multiplies each corner's offset-**from-pivot** by `scale` **before** the X rotation, and **skips the multiply entirely** when the scale is identity — so all existing avatar/mob/cart output is byte-identical (pinned by a regression test that recomputes the pre-Phase-C corner maths for three species). New **`AnimClip::Bounce`**: a gentle whole-rig breathe (squash Y / widen X+Z on a sine), the first clip to use the scale channel — and the only one; every rotation clip is asserted to leave `scale` at identity.
 3. **Clip picker in the Rig Studio.** Walk is no longer hardcoded: a **Motion:** row offers **Walk / Idle / Bounce**, and the pick rides on the placed `RigDisplay`. Persistence note: `RigDisplay` is an element of `WorldSave.rigs`, a `Vec` in the *middle* of a positional bincode blob, so appending a field to it would shift every byte after it and corrupt `exhibits`/`composters`/`saved_mobs` in any save that already holds a rig. The clip therefore rides **`WorldSave.rig_clips`**, an index-aligned side table appended at the true end of the blob; a pre-picker save has no side table and every rig loads as `Walk` (tested both ways).
 
-**Still open:** the shared transform now composes pivot → scale → X-rot → yaw, but **parts still pose independently** — Phase C's **segmented bend** (parent-chain composition, the swaying-plant chain) is NOT built, and neither is **Phase D** (animation-frame flipbook). Also still open: the orbit preview, and per-part pivot nudging in the UI. **Feel + the look of an attached shell = Axolittle playtest** (nothing visual here is solo-verifiable). — *Original draft 2026-06-03 below.*
+**Still open:** the shared transform now composes pivot → scale → X-rot → yaw, but **parts still pose independently** — Phase C's **segmented bend** (parent-chain composition, the swaying-plant chain) is NOT built, and neither is **Phase D** (animation-frame flipbook). Also still open: the orbit preview, and per-part pivot nudging in the UI. **Feel + the look of an attached shell = playtest** (nothing visual here is solo-verifiable). — *Original draft 2026-06-03 below.*
 
 **Branches (when built, not now):** fork off `main` (or off the #18 branch if #18 hasn't merged yet — [[feedback_pr_chains_on_spec_branches]]) → `feat/standard-skeletons` (Phase A) → `feat/skeleton-anim-inherit` (Phase B) → `feat/squash-scale-channel` (Phase C) → `feat/anim-frame-flipbook` (Phase D). Bespoke per-creature keyframe authoring is a **separate later spec**, deliberately deferred.
 
@@ -138,7 +138,7 @@ The hard part isn't the maths — it's the in-game UX for "build geometry → ma
 - **Place / nudge pivots** — for each part, accept the skeleton's default pivot or move it (a pivot is one point on a micro-voxel; the owner's "a pivot on one micro-voxel connecting to another"). Default pivots come from the standard skeleton so most authors never touch them.
 - **Bake + preview** — #18 bakes each group; the author sees the rig play its inherited idle/walk loop immediately (reuse the #17 "Your Look" render-to-texture orbit-preview approach, `menu.rs:1863` draw_skin_panel + `egui_integration.rs` register_native_texture).
 
-This UX is the bulk of the effort and the part that **cannot be solo-verified** — it gates on an Axolittle build session ([[feedback_autonomy_to_playtest_boundary]], [[feedback_pretest_check]]).
+This UX is the bulk of the effort and the part that **cannot be solo-verified** — it gates on a tester build session ([[feedback_autonomy_to_playtest_boundary]], [[feedback_pretest_check]]).
 
 ### Performance (owner's recurring concern — answered, same as #18)
 
@@ -154,7 +154,7 @@ The sub-voxel grid (1/8 or 1/16, #18) is **authoring resolution, NOT draw cost.*
 
 ## Phased scope
 
-Each phase is independently shippable behind `./check.sh` and ends at a clear boundary; the **visual/feel/UX** halves gate on an Axolittle playtest. **All of this is BLOCKED until #18 ships** (it produces the baked geometry every phase rigs).
+Each phase is independently shippable behind `./check.sh` and ends at a clear boundary; the **visual/feel/UX** halves gate on a playtest. **All of this is BLOCKED until #18 ships** (it produces the baked geometry every phase rigs).
 
 ### Phase A — standard-skeleton data model + part-attach authoring
 *Goal: a `Skeleton` is data; an author can pick one, build geometry, and attach baked voxel-groups to named parts/pivots. No animation yet — parts render in bind pose.*
@@ -169,7 +169,7 @@ Each phase is independently shippable behind `./check.sh` and ends at a clear bo
 - Unit tests: each standard skeleton has the expected named parts + non-degenerate pivots (mirror `player_model_shape`, `entity_model.rs:1947`, and `every_passive_spawn_mob_has_a_model`, 1923); a `RiggedModel` round-trips through serde; the biped skeleton's part count/pivots match `PLAYER_MODEL`.
 - A `RiggedModel` built from #18 micro-models renders in bind pose through the instanced path (asserted at the vertex-builder level, headless).
 - No protocol/save-format break for existing worlds (new types are additive, `#[serde(default)]` where they touch saved structs — the `PlanData` pattern at `plan.rs:188`).
-- **Playtest boundary:** the attach UX (pick skeleton, select volume, tag part, place pivot) is the irreducibly-interactive part → Axolittle session.
+- **Playtest boundary:** the attach UX (pick skeleton, select volume, tag part, place pivot) is the irreducibly-interactive part → the tester session.
 
 ### Phase B — animation-set inheritance (reuse the existing hierarchical transforms)
 *Goal: a `RiggedModel` automatically inherits its skeleton's built-in animation set (idle/walk/attack/…) — the do-ocracy unlock — by feeding `PartPose`s into the existing transform.*
@@ -182,7 +182,7 @@ Each phase is independently shippable behind `./check.sh` and ends at a clear bo
 - `./check.sh` green (as Phase A).
 - Unit tests: `eval_anim_set(walk, …)` produces alternating-phase swings matching the avatar's today (port `arm_override_replaces_walk_swing`, `entity_model.rs:2110`, and `swing_curve_bounds`, 1957); attack clip routes `swing_angle` to the correct part and overrides walk (mirror the avatar's `arm_override` precedence at `entity_model.rs:912`); a 2-deep parent chain composes (child follows posed parent — assert corner positions differ from the 1-deep case).
 - A biped `RiggedModel` and `PLAYER_MODEL` produce **equivalent gait poses** for the same `t` (regression anchor: the standard skeleton really is the avatar's motion).
-- **Playtest boundary:** "does the inherited walk *read right* on a custom-built creature" is visual → Axolittle.
+- **Playtest boundary:** "does the inherited walk *read right* on a custom-built creature" is visual → the tester.
 
 ### Phase C — squash/stretch + segmented-bend (scale channel)
 *Goal: optional non-uniform scale keyframes (rung 2) and blocky segmented bend (rung 3) as extra channels — opt-in per part, default off.*
@@ -193,7 +193,7 @@ Each phase is independently shippable behind `./check.sh` and ends at a clear bo
 **Acceptance criteria (Phase C):**
 - `./check.sh` green; default `scale = ONE` leaves **all existing mob/avatar output byte-identical** (regression test: a part with `PartPose::default()` is unchanged vs pre-Phase-C — this protects the 1910-test baseline and the live avatar/mobs).
 - Unit tests: non-uniform scale changes corner spread but not the pivot point; a segmented chain with rising per-segment angle bends monotonically (tip displaces more than base).
-- **Playtest boundary:** squash *feel* + sway *look* are visual → Axolittle.
+- **Playtest boundary:** squash *feel* + sway *look* are visual → the tester.
 
 ### Phase D — animation-frame flipbook (3D "sprite swap")
 *Goal: per-part flipbook of baked micro-model frames for non-rigid changes (rung 4).*
@@ -205,7 +205,7 @@ Each phase is independently shippable behind `./check.sh` and ends at a clear bo
 **Acceptance criteria (Phase D):**
 - `./check.sh` green; single-frame parts behave exactly as Phase A-C (regression).
 - Unit tests: frame-index track advances at the clip's rate and wraps; a 2-frame part selects the correct baked mesh per index.
-- **Playtest boundary:** flipbook *reads as motion* (chomp/flap) → Axolittle.
+- **Playtest boundary:** flipbook *reads as motion* (chomp/flap) → the tester.
 
 ### Later (separate spec, DEFERRED) — bespoke per-creature animation
 Author-defined motion curves (custom keyframes per part, not an inherited standard set) and **true vertex skinning** (bones + per-vertex weights for smooth, non-blocky deformation). This is the advanced long tail; the standard-skeleton inheritance (Phases A-D) covers the do-ocracy case. Its own foundation doc when prioritised. Phases A-D are shaped so this is **additive** (a custom `AnimSet` + an optional skinning path), not a rewrite.
@@ -214,11 +214,11 @@ Author-defined motion curves (custom keyframes per part, not an inherited standa
 
 ## Risk / confidence
 
-- **Overall: XL effort, Medium confidence.** The owner-inbox triage (`docs/backlog/owner-inbox.md:39`) rates #19 XL — correct. But the **motion-maths risk is LOW**: rung 1 ships and is tested; rungs 2-4 are small, well-understood additions (a scale mul, a parent-frame compose, a buffer index). The **bake/perf risk is LOW** *conditional on #18* — the instance pattern is proven by plants (`mesh.rs:871`). The **real risk is the authoring UX** (Medium): "build geometry → tag parts → place pivots → preview" is a genuinely new, interaction-heavy surface that **cannot be solo-verified** and will need iteration with Axolittle.
+- **Overall: XL effort, Medium confidence.** The owner-inbox triage (`docs/backlog/owner-inbox.md:39`) rates #19 XL — correct. But the **motion-maths risk is LOW**: rung 1 ships and is tested; rungs 2-4 are small, well-understood additions (a scale mul, a parent-frame compose, a buffer index). The **bake/perf risk is LOW** *conditional on #18* — the instance pattern is proven by plants (`mesh.rs:871`). The **real risk is the authoring UX** (Medium): "build geometry → tag parts → place pivots → preview" is a genuinely new, interaction-heavy surface that **cannot be solo-verified** and will need iteration with the tester.
 - **Hard dependency on #18.** Nothing here is buildable until #18's bake pipeline lands and is playtested. If #18 changes its micro-model representation, `RiggedPart.micro_model` follows. **Don't start #19 before #18 merges** ([[feedback_pr_chains_on_spec_branches]] — branch off #18 if it's not yet on main).
 - **Regression risk to the live avatar/mobs.** Phases B/C touch shared code (`PartPose`, `build_part_vertices`) that drives the *current* player + ~17 mobs. Mitigation: every shared-code change is gated by a **"default pose / default scale = byte-identical output"** regression test, and the biped skeleton is asserted equivalent to `PLAYER_MODEL`'s gait. The 1910-test baseline is the tripwire.
 - **Confidence by phase:** A High (data structuring + reuse of capture), B High (transcribing existing arithmetic into a generic evaluator), C High (tiny transform additions), D Medium (frame-selection plumbing is straightforward; the *authoring* of frames is the unknown), bespoke/skinning Low (deferred for a reason).
-- **Single-player-verifiable up to the playtest boundary.** Vertex-builder + anim-set logic is unit-testable headlessly; everything visual/feel/UX is the Axolittle boundary ([[feedback_autonomy_to_playtest_boundary]]).
+- **Single-player-verifiable up to the playtest boundary.** Vertex-builder + anim-set logic is unit-testable headlessly; everything visual/feel/UX is the tester boundary ([[feedback_autonomy_to_playtest_boundary]]).
 
 ---
 
@@ -256,7 +256,7 @@ Author-defined motion curves (custom keyframes per part, not an inherited standa
 - **[[reference_foundations_queue]] / owner-inbox #19:** this is the foundation doc the inbox calls for ("XL; defer behind #18, own foundation doc later"). Expanded from the note, not beyond it. ✅
 - **Sequencing:** explicitly **behind #18** (static micro-models) and **blocked until #18 ships** — the prerequisite that bakes the geometry this rigs. ✅
 - **[[feedback_merge_to_main_preauthorised]]:** when built, healthy-gate (`check.sh` green) merges to main are pre-authorised; each phase holds the 1910-test / 2.76-MiB baseline. Design-only now — nothing to merge. ✅
-- **[[feedback_autonomy_to_playtest_boundary]] / [[feedback_pretest_check]]:** logic is solo-verifiable; the authoring UX + all visual/feel confirmation is the Axolittle playtest boundary — build to it, then stop cleanly. ✅
+- **[[feedback_autonomy_to_playtest_boundary]] / [[feedback_pretest_check]]:** logic is solo-verifiable; the authoring UX + all visual/feel confirmation is the playtest boundary — build to it, then stop cleanly. ✅
 - **[[project_shared_infra_strategy]]:** skeletons/rigs are generic (biped/quad/bird/fish/plant), ride Stash as per-persona assets like #18 packs, and reuse cross-game primitives (capture, bake, instance, render-to-texture preview) — no AxeNStax-specific assumptions baked into the rig format. ✅
 - **[[project_economies_vision]] / Bitcoin posture:** creator-sold rigged creatures sketched as the deferred payoff (direct Lightning, no marketplace cut, persona-owned) — consistent, not designed here; settlement model stays [[project_settlement_model_decision_parked]]. ✅
 - **[[reference_proof_of_play_is_proof_of_work]]:** any future "creature show" prize ties to Proof-of-Play/spectator economy — deferred, untouched here. ✅

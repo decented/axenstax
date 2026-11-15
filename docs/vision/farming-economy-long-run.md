@@ -2,7 +2,7 @@
 
 **Status**: VISION DOCUMENT — establishes the end-state. Per-tier foundation specs derive from this.
 **Date**: 2026-05-14
-**Author commit**: Captures Axolittle's 2026-05-14 design call ("full farming with a strong, varied economy") and frames it across 8 delivery tiers spanning alpha through long-run.
+**Author commit**: Captures the tester's 2026-05-14 design call ("full farming with a strong, varied economy") and frames it across 8 delivery tiers spanning alpha through long-run.
 **Companions**: `docs/foundations/2026-05-14-farming-system.md` (Tier 1), `docs/foundations/2026-05-14-farming-tier-1.5-processed-economy.md` (Tier 1.5), Spec 5 (gameplay), Spec 6 (Bitcoin economy). The complementary vision doc covering markets, services, combat, PvP, land, knowledge, and spectator economies — i.e. everywhere farming output **goes** — is `docs/vision/economies-long-run.md`.
 **Cross-refs**: Memory axenstax has farming, uk english naming, shared infra strategy, proof of play is proof of work.
 
@@ -80,7 +80,7 @@ Eight tiers from baseline farming to industrial-scale economy. Each tier is ship
 | **T7** | **Buff Foods + Mastery + Quality Grades** | THIS DOC FRAMES IT | Quality grades on harvest (common/fine/exquisite). Buff system — high-tier foods grant temporary effects (speed, jump, regen, night vision, water breathing, fortune). Masterclass recipes. Heirloom seed variants. |
 | **T8** | **Industrial / Automated** | THIS DOC FRAMES IT | Greenhouses (climate-controlled growing). Hydroponics. Industrial Mill / Power Oven (batch processing). Conveyor-fed workstations. Maybe steam/water/wind power for free fuel. |
 
-**Estimated delivery time** (very rough, gates on Axolittle playtest between tiers):
+**Estimated delivery time** (very rough, gates on playtest between tiers):
 - T1: 2-3 weeks (current ready-to-build)
 - T1.5: 4-6 weeks
 - T2: 4-6 weeks
@@ -91,7 +91,7 @@ Eight tiers from baseline farming to industrial-scale economy. Each tier is ship
 - T7: 4-5 weeks
 - T8: 6-10 weeks
 
-Total: roughly 8-12 months of farming-content work, paced by Axolittle's playtest feedback between tiers.
+Total: roughly 8-12 months of farming-content work, paced by the tester's playtest feedback between tiers.
 
 ---
 
@@ -684,7 +684,7 @@ A subset of nutrient-dense foods carry the **Superfood** flag, which feeds into 
   - **Diet** — aggregated `diet_score` from food eaten in the last ~24 real-minutes. Superfoods score high (+3); plain cooked food +1; raw veg 0; sugar-heavy / mono-diet -1 to -2.
   - **Movement** — `activity_score` from sprint-ticks, blocks-mined, combat-hits in the same window. Sedentary play decays this; high activity grows it.
 - **Drift rate** (illustrative, playtest-tuned): ~1 slot per real-minute, so the bars don't visibly flicker. Capacity growth above the current fill doesn't instantly refill — you still have to eat / regen to claim the new space.
-- **Lockstep vs split?** Open question (see below): bars could move together (one capacity number drives both) or independently (eat for hunger, exercise for health). Default proposal: **single capacity number** drives both — keeps the mental model simple for Axolittle's age group. Possible split as a T8+ depth lever.
+- **Lockstep vs split?** Open question (see below): bars could move together (one capacity number drives both) or independently (eat for hunger, exercise for health). Default proposal: **single capacity number** drives both — keeps the mental model simple for new players. Possible split as a T8+ depth lever.
 
 **Superfood roster** (canonical list — code data file owns the authoritative `superfood: bool` flag; §3 catalogue rows do not duplicate the tag, this table is the source of truth in docs):
 
@@ -707,7 +707,7 @@ A subset of nutrient-dense foods carry the **Superfood** flag, which feeds into 
 - **Mid-game pacing**: T1-T4 players run with smaller bars (~6-8); T5+ players with mature trade routes hit 10-12 reliably. Bar size is itself a progression indicator — a wandering trader with 12/12 bars *looks* established.
 - **Combat survivability**: PvE servers see a structural advantage for farmer-fighters — your 12-heart farmer survives the cave dive that one-shots the 4-heart hermit.
 
-**Open design questions** (Axolittle's calls before T7 ships):
+**Open design questions** (the tester's calls before T7 ships):
 
 1. Should bars **shrink visibly** on a mono-diet, or only **fail to grow**? (Punitive vs aspirational framing.)
 2. What counts as "junk" on the negative end? Cake every meal? Pure-sugar diet?
@@ -851,9 +851,9 @@ Until T5 ships, carts run without lubricant penalties (or with a flat default fi
 
 ---
 
-## 11. Open Design Questions (for Axolittle)
+## 11. Open Design Questions (for the tester)
 
-Real TBDs that need his calls before the relevant tier ships:
+Real TBDs that need their calls before the relevant tier ships:
 
 ### Affecting T2 (already from Tier 1 spec)
 1. Plough recipe tier — single iron-tier, or per-tier ladder?
@@ -861,7 +861,7 @@ Real TBDs that need his calls before the relevant tier ships:
 3. Manual plough usable without animal?
 
 ### Affecting T3 (Orchards + Drinks)
-4. Alcohol in a kid-target game — is "beer", "wine", "cider" appropriate, or do we re-frame as "fizzy apple drink", "grape juice", etc.? **Recommendation:** keep the real names; alcohol items are flavour/recipe-only (no drunkenness mechanic); parents can disable on per-server basis if uncomfortable. **Asks Axolittle + Staxolottle.**
+4. Alcohol in a kid-target game — is "beer", "wine", "cider" appropriate, or do we re-frame as "fizzy apple drink", "grape juice", etc.? **Recommendation:** keep the real names; alcohol items are flavour/recipe-only (no drunkenness mechanic); parents can disable on per-server basis if uncomfortable. **Asks the tester + Staxolottle.**
 5. Tree growth timescale — minutes? Hours? Days? An apple tree taking 3 in-game days to mature would matter for orchard planning.
 
 ### Affecting T4 (Preservation + Variety)
@@ -877,7 +877,7 @@ Real TBDs that need his calls before the relevant tier ships:
 
 ### Affecting T7 (Buffs + Mastery + Quality)
 11. Quality grade RNG vs skill-based — should quality be lucky-roll, or earnable via repeated practice (Farming-XP)?
-12. Buff effect strength — should buffs be game-changing (PvE relevant) or just flavour? Pitch is "useful but not game-breaking" — Axolittle's call.
+12. Buff effect strength — should buffs be game-changing (PvE relevant) or just flavour? Pitch is "useful but not game-breaking" — the tester's call.
 
 ### Affecting T8 (Industrial)
 13. Power source for industrial workstations — water wheel? Steam? Wind? All three? Or simplify to "Mechanical Power" as a generic? Has cross-cutting implications for redstone-equivalent.
@@ -898,7 +898,7 @@ Where each tier's implementation contract lives (and when each gets drafted):
 |:---:|---|---|
 | T1 | `docs/foundations/2026-05-14-farming-system.md` | READY TO BUILD |
 | T1.5 | `docs/foundations/2026-05-14-farming-tier-1.5-processed-economy.md` | READY TO BUILD (after T1) |
-| T2 | TBD — sketch lives at bottom of T1 spec | Draft after T1 ships + Axolittle playtest |
+| T2 | TBD — sketch lives at bottom of T1 spec | Draft after T1 ships + playtest |
 | T3 | TBD | Draft after T2 ships + playtest |
 | T4 | TBD | Draft after T3 ships |
 | T5 | TBD | Draft after T4 ships + worldgen-biome spec exists |

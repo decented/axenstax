@@ -1,6 +1,6 @@
 # Tool Repair (Repair Bench) — the economy's first sat sink
 
-**Status:** Phases 2-11 DELIVERED 2026-05-23 on `feat/tool-repair`. Phase N = Axolittle playtest gate (open).
+**Status:** Phases 2-11 DELIVERED 2026-05-23 on `feat/tool-repair`. Phase N = playtest gate (open).
 **Branch:** `feat/tool-repair` off `main`.
 **Trigger:** Goal-driven solo dev cycle, Round 3. Flagged in `docs/vision/sat-flow-and-economy-loops.md` §6 ("Item-decay & repair — deferred") as the natural **sat sink** counterpart to the sat *sources* shipped in Rounds 1-2 (Mob Bounty Board + Tip Jar both *add* sats to the economy; repair *removes* them). The vision: "damaged tools repair at a Furnace by paying sats + a material cost. Repair tax is the sat sink; material cost is the item sink."
 
@@ -162,9 +162,9 @@ Integration tests in `test_integration/repair.rs`:
 | 10 | `./check.sh` ALL GREEN | — | — |
 | 11 | Doc-flip + queue README | docs/ | 0 |
 | 12 | Merge to main --no-ff | — | — |
-| N | Axolittle playtest gate — repair-cost balance + material-cost feel + "is the bench discoverable / does it want furnace-adjacency" | n/a | n/a |
+| N | playtest gate — repair-cost balance + material-cost feel + "is the bench discoverable / does it want furnace-adjacency" | n/a | n/a |
 
-**Phases 2–11 are solo-buildable.** Phase N (playtest) is Axo-gated — the repair-cost + material-cost tuning genuinely needs a kid's economy feel.
+**Phases 2–11 are solo-buildable.** Phase N (playtest) is playtest-gated — the repair-cost + material-cost tuning genuinely needs a player's economy feel.
 
 ---
 

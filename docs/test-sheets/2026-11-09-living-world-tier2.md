@@ -1,6 +1,6 @@
 # Living world v0.2.31: things to try
 
-For Axolittle's play of build 0.2.31. It adds to the v0.2.30 sheet (`2026-11-08-living-world.md`); everything there still applies. The known limits behind the rough bits are in `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §13.
+For the tester's play of build 0.2.31. It adds to the v0.2.30 sheet (`2026-11-08-living-world.md`); everything there still applies. The known limits behind the rough bits are in `docs/superpowers/specs/2026-11-09-living-world-tier2.md` §13.
 
 ```
 Things to try: the living world, part 2 (v0.2.31)

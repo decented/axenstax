@@ -1,6 +1,6 @@
 # Gamepad UI Navigation — slot cursor, menu focus, in-world stubs
 
-**Status: BUILT 2026-06-12** (merged to main same day). Feel/UX = Axolittle
+**Status: BUILT 2026-06-12** (merged to main same day). Feel/UX = the
 playtest boundary — test sheet at `docs/test-sheets/2026-06-12-gamepad-ui.md`.
 
 ## Problem
@@ -81,5 +81,5 @@ rows were wrong; corrected against `state_to_intent`).
 - `check.sh` green pre-merge.
 - `--shot-lobby` headless render confirmed no lobby rendering regression.
 - **Not solo-verifiable**: actual pad-in-hand feel (focus ring visibility at
-  TV distance, d-pad travel speed, X-split discoverability) — Axolittle
+  TV distance, d-pad travel speed, X-split discoverability) — the
   playtest, web + native.

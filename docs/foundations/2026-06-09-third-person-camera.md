@@ -1,6 +1,6 @@
 # Third-Person Camera — the showcase camera (over-the-shoulder, avatar-on-self)
 
-**Status**: ✅ BUILT — Phases 1–6 merged + deployed 2026-06-10 (`camera.rs` `CameraMode`, opt-in F5). Remaining = Axolittle feel-tuning playtest + polish (profile context-selection, gamepad/touch free-look, held-item fade, front-facing mode). Reconciled 2026-06-19.
+**Status**: ✅ BUILT — Phases 1–6 merged + deployed 2026-06-10 (`camera.rs` `CameraMode`, opt-in F5). Remaining = tester feel-tuning playtest + polish (profile context-selection, gamepad/touch free-look, held-item fade, front-facing mode). Reconciled 2026-06-19.
 **Date**: 2026-06-09 (drafted)
 **Branch (when built)**: `feat/third-person-camera` off `main` (in a worktree —
 camera/render files overlap with concurrent Workshop work; see
@@ -55,7 +55,7 @@ The build is unusually cheap because **the hard parts already exist**:
   `camera_occlusion` field, and an avatar-fade render path are **engine-generic**
   primitives that lift to every Decented game. Nothing here hard-codes AxeNStax.
 - Per autonomy to playtest boundary: Phases 1–6 are solo-buildable up to
-  the point where *feel* must be judged in-game; the final phase is an Axolittle
+  the point where *feel* must be judged in-game; the final phase is a
   playtest gate. The camera "feel" cannot be solo-verified.
 - Per uk english naming: UK English throughout (e.g. "centre",
   "behaviour").
@@ -221,7 +221,7 @@ Built on branch `feat/third-person-camera`. Decisions made at build time:
 Built on branch `feat/third-person-camera`. The guiding constraint: the owner **approved
 the Phase-1 feel** ("felt right — proceed"), so **nothing in Phase 5 changes the default
 feel**. Every lever defaults to a no-op; the *enablement* (turning a profile/free-look on
-and tuning its numbers) is the Phase-6 Axolittle playtest.
+and tuning its numbers) is the Phase-6 playtest.
 
 - **All decoupling is render-only — the eye-anchored invariant holds.** Free-look moves a
   new *render* orbit offset (`Camera::orbit_yaw_offset`/`orbit_pitch_offset`); `yaw`/`pitch`
@@ -261,14 +261,14 @@ and tuning its numbers) is the Phase-6 Axolittle playtest.
 - Persist `CameraMode` per player; **1st/3rd toggle**, **auto-centre delay** slider,
   **auto-centre speed** slider, FOV (already present) — added to the existing settings
   panel (`graphics_settings.rs`), honouring XAG 117.
-- **Phase 6 is the Axolittle playtest gate** — orbit distance, shoulder offset,
+- **Phase 6 is the playtest gate** — orbit distance, shoulder offset,
   recenter delay/speed, and per-mode profile values are *feel* numbers that can only be
-  tuned in-game with a real player (and with the kid who'll tell us if it makes him
+  tuned in-game with a real player (and with the tester who'll tell us if it makes them
   queasy). Ship Phases 1–5 solo; tune here.
 
 #### Phase 6 — as built (2026-06-10)
 
-Built solo (Axolittle not available to test). The principle: **wire the mechanism +
+Built solo (the tester not available to test). The principle: **wire the mechanism +
 expose the knobs as live in-game dials, leaving the actual numbers as today's flagged
 placeholders** so the playtest is a slider-drag, not a rebuild. Still default-safe — the
 approved feel is unchanged out of the box.
@@ -299,7 +299,7 @@ approved feel is unchanged out of the box.
   (which scenario auto-picks Build vs Combat) — `BUILD_PROFILE`/`COMBAT_PROFILE`/`set_profile`
   remain tested forward-API (the distance + FOV sliders cover most of that feel meanwhile);
   gamepad/touch free-look bindings; the held-item-fade follow-up. And of course the **number
-  tuning + queasiness check with Axolittle** — the irreducible human gate.
+  tuning + queasiness check with the tester** — the irreducible human gate.
 - check.sh green; no PROTOCOL bump (client-render + input + device-settings only).
 
 ---

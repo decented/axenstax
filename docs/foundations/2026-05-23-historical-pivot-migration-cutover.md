@@ -32,7 +32,7 @@ After this PR ships:
 
 ## Why this lives here
 
-- **Single discrete event.** The vision doc commits to one cutover PR rather than a slow drain, so the playtest after this ships shows a world that's fully historical-pivot. No "did Axo see a Zombie one last time?" weirdness.
+- **Single discrete event.** The vision doc commits to one cutover PR rather than a slow drain, so the playtest after this ships shows a world that's fully historical-pivot. No "did the tester see a Zombie one last time?" weirdness.
 - **Tight surface.** The actual code change is localised to `spawning.rs::tick_mob_spawning` + one game_loop call removal. The narrative weight is bigger than the diff.
 - **Cross-game alignment.** Once this lands, the historical-pivot design contract is fulfilled — sibling games (other games on the same primitives) can adopt the same pattern without inheriting the alpha's fantasy roster.
 
@@ -101,7 +101,7 @@ No EntityKind changes, no save shape changes, no new BlockId. PROTOCOL_VERSION s
 | 3 | Remove `tick_iron_golem_spawn` call from game_loop; add `#[allow(dead_code)]` to the function | `game_loop.rs`, `village_gen.rs` | ~10 |
 | 4 | Update existing spawn tests to match new pool (Brigand-dominant, no Zombie/Skeleton) | `spawning.rs::tests` | ~80 |
 | 5 | Docs: spec → DELIVERED, README flip, vision-doc "Retired fantasy" callout, Spec 5 §3 callout | docs | ~30 |
-| 6 | Axolittle playtest | — | — |
+| 6 | playtest | — | — |
 
 **Total**: ~160 LOC. Tiny PR — the actual code change is one match-block.
 
@@ -162,7 +162,7 @@ No EntityKind changes, no save shape changes, no new BlockId. PROTOCOL_VERSION s
 - New tests: night-spawn produces brigand-family + Bear/Hyena only; never produces a retired fantasy mob.
 - A fresh world after this PR has no Iron Golems near the village (Knights spawn instead).
 - Players who had legacy items (RottenFlesh, etc.) in inventory before the PR still have them after.
-- Phase 6 (playtest): Axolittle confirms the world feels historical now — no fantasy mob has appeared.
+- Phase 6 (playtest): The tester confirms the world feels historical now — no fantasy mob has appeared.
 
 ---
 

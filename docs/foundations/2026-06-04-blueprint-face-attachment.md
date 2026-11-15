@@ -49,7 +49,7 @@ needed, but only wallpaper consumes it:
 
 The blueprint capture system is **cell-based and shipped**: `PlanData` (`plan.rs:167`),
 `DevelopState` (`plan.rs:44`, `Latent { exposure_ticks } → Developed`), sun-development tick
-(`latent_print.rs`), flood-fill capture + animated build (`plan.rs`). Its Axolittle playtest is
+(`latent_print.rs`), flood-fill capture + animated build (`plan.rs`). Its playtest is
 still the only open gate, which is why 2026-06-03 cautioned against re-architecting it.
 
 ## Scope decision (owner, 2026-06-04)
@@ -207,7 +207,7 @@ Wallpaper/Blueprint → decal quad; future Model → baked micro-model.
   save→load round-trip for each attachment kind; legacy-save decode as `Wallpaper`; the
   cube→attachment migration; the develop tick advancing a floor Blueprint attachment under
   sky-light; provenance stamping (mode + integrity tag) at capture; two-stage peel + recover.
-- **Playtest gate (Axolittle):** the *visual/feel* — does it read like paper, does the build sit
+- **Playtest gate (the tester):** the *visual/feel* — does it read like paper, does the build sit
   flush with surrounding terrain, does survival's sun-develop feel right. Not solo-verifiable.
 
 ## Explicitly deferred
@@ -247,7 +247,7 @@ one go. Visual/feel is the only non-solo-verifiable part → playtest gate.
 
 ## Implementation outcome (2026-06-04)
 
-**Status: BUILT — engine tests + WASM build green. Awaiting Axolittle playtest.**
+**Status: BUILT — engine tests + WASM build green. Awaiting playtest.**
 
 ### What shipped vs the design
 

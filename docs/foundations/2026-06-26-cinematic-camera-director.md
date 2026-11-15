@@ -99,4 +99,4 @@ only while the director is active.
 - **On-screen panel** showing mode / target / fly-speed (minimal in Phase 1).
 - **More HUD surfaces** under hide-HUD (Phase 1 gates the main HUD + crosshair +
   rain; toasts / scenario badges still show).
-- Feel tuning (FOV / fly-speed / sprint / easing) — Axolittle playtest.
+- Feel tuning (FOV / fly-speed / sprint / easing) — playtest.

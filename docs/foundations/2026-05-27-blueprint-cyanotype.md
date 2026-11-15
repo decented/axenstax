@@ -4,7 +4,7 @@
 **Status:** BUILT — superseded at the representation layer by
 [`2026-06-04-blueprint-face-attachment.md`](2026-06-04-blueprint-face-attachment.md).
 See note below.
-**Driver:** Staxolottle + Axolittle. Grew out of "make the blueprint blue" →
+**Driver:** Staxolottle + the tester. Grew out of "make the blueprint blue" →
 the real history of *why* blueprints are blue. Text-only design.
 
 > **Representation change — 2026-06-04.** As of the `feat/blueprint-face-attachment`
@@ -107,7 +107,7 @@ re-build, and the Plaque/attribution. This spec **revises the front-end**:
   holding the right blocks with the build intact; develop progresses only under
   full daylight and pauses at night; reaches Developed at the threshold;
   save/load round-trips the new PlanData fields.
-- **Playtest boundary (Axolittle):** the lay/build/lift feel, the ~90 s sun
+- **Playtest boundary (the tester):** the lay/build/lift feel, the ~90 s sun
   timer (drag vs snappy), the "take it to the light" journey, and the blue
   reading like a blueprint.
 - `check.sh` green; engine + WASM build.

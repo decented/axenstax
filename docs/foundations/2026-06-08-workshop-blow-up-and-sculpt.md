@@ -1,6 +1,6 @@
 # The Workshop — blow-up-and-sculpt gesture (aim a real block, inflate it, edit it in-world with dyes)
 
-**Status:** ✅ **BUILT + merged to main** (Bellows / blow-up / paint-sculpt — `workshop.rs` / `workshop_painter.rs`; commits 2151660/ebaecba/53e7eed/7e0b0f1). Owner feel/UX playtest pending. Reconciled 2026-06-19. Brainstormed with Axolittle (gameplay/vibe owner of every decision below).
+**Status:** ✅ **BUILT + merged to main** (Bellows / blow-up / paint-sculpt — `workshop.rs` / `workshop_painter.rs`; commits 2151660/ebaecba/53e7eed/7e0b0f1). Owner feel/UX playtest pending. Reconciled 2026-06-19. Brainstormed with the tester (gameplay/vibe owner of every decision below).
 
 This **evolves the authoring front-end of Spec 40** (the Workshop —
 `docs/foundations/2026-06-04-the-workshop-community-redesign.md`, BUILT). Spec 40's backend
@@ -309,7 +309,7 @@ inventory never bleeds into a normal world. A Bellows in a normal world (which s
 
 ## Phased scope
 
-Each phase is independently `./check.sh`-gated; the **look/feel** is the Axolittle playtest boundary.
+Each phase is independently `./check.sh`-gated; the **look/feel** is the playtest boundary.
 
 ### Phase 1 — sub-block picking + the cage preview (no blow-up yet)
 *Goal: aim a Bellows at a block → a corner-anchored, away-from-you **green/red 4×4×4 cage**; the
@@ -334,7 +334,7 @@ cage-origin/room-check (clear vs each blocked cell); headless screenshot of gree
 
 **Acceptance:** state-machine unit tests (idle → charging(t) → ×2/×3/×4 → locked; release<full →
 ×1; red cage → no state change + message); headless shot mid-swell; `check.sh` green. **Playtest
-boundary:** charge duration, swell rhythm, collapse timing → Axolittle.
+boundary:** charge duration, swell rhythm, collapse timing → the tester.
 
 ### Phase 3 — in-world dye editing + symmetry
 *Goal: paint texels, place/carve coloured microblocks, on the locked ×4 copy, with a dye in hand.*
@@ -345,7 +345,7 @@ boundary:** charge duration, swell rhythm, collapse timing → Axolittle.
 
 **Acceptance:** edit→buffer unit tests (paint sets a cell colour; place adds occupancy+colour; carve
 clears; symmetry mirrors to the right cells); `check.sh` green. **Playtest boundary:** the painting
-*feel* + ¼-block aim comfort → Axolittle.
+*feel* + ¼-block aim comfort → the tester.
 
 ### Phase 4 — Pin bake (the payoff)
 *Goal: working copy → global override, both paths, live.*
@@ -356,7 +356,7 @@ clears; symmetry mirrors to the right cells); `check.sh` green. **Playtest bound
 
 **Acceptance:** a paint-only edit re-textures **every** instance (visual — owner's eyes) and writes
 `AuthoredFaces`; a shape edit makes every instance render the coloured micro-model; block id / saves
-/ behaviour unchanged; `check.sh` green. **Playtest boundary:** the result look → Axolittle.
+/ behaviour unchanged; `check.sh` green. **Playtest boundary:** the result look → the tester.
 
 *(Sharing rides Spec 40 Phase D/E Beacon. Serialising a **coloured** micro-model into the
 `OverrideSet` blob is an extension of the existing wire format — ~~flagged below, not built here~~ **resolved in Phase 5** (v2 blob migration; see §Phase 5 below and `docs/spec/05-gameplay-systems.md §10b`).)*
@@ -372,7 +372,7 @@ change + the Workshop gallery.*
 
 **Acceptance:** library round-trips serde (an old one-design set upgrades clean); set-active swaps
 the worn design live on every instance; "use original" reverts to stock; an over-cap library is
-bounded; `check.sh` green. **Playtest boundary:** the gallery UX → Axolittle.
+bounded; `check.sh` green. **Playtest boundary:** the gallery UX → the tester.
 
 ---
 
@@ -404,7 +404,7 @@ bounded; `check.sh` green. **Playtest boundary:** the gallery UX → Axolittle.
    vs extend `workshop_projects` to store the buffer. Recommend pin-only for v1; revisit if "potter
    across days" on sculpts is wanted.
 3. **Cancel a locked ×4 without pinning.** A deflate/discard gesture (sneak-aim the Bellows? a
-   discard key?) — define with Axolittle.
+   discard key?) — define with the tester.
 4. **Collapse-on-release timing.** How fast the balloon sags back to ×1 — a feel knob.
 5. **Symmetry default + per-block-type sensible default** (uniform blocks default all-sides; already
    the plan, confirm in playtest).
@@ -414,7 +414,7 @@ bounded; `check.sh` green. **Playtest boundary:** the gallery UX → Axolittle.
    adopting another player's design slots it in **inactive** (you opt to wear it) vs auto-wear.
    Recommend a small cap + adopt-inactive.
 8. **Active-selection scope.** Per-world vs one global wardrobe across all your worlds. Recommend
-   **global per player** (your art is yours everywhere); confirm with Axolittle.
+   **global per player** (your art is yours everywhere); confirm with the tester.
 
 ---
 
@@ -448,7 +448,7 @@ block-break charge; re-derives none of them.)*
   AxeNStax's; the *gesture* is shared infra. ✅
 - **`feedback_autonomy_to_playtest_boundary`:** Phase 1 (picking + cage) and the pure-fn state
   machines are solo-buildable + `check.sh`-gated; Phases 2–4 end at a **feel** confirmation
-  (Axolittle) — build to the boundary, stop cleanly. ✅
+  (the tester) — build to the boundary, stop cleanly. ✅
 - **`feedback_merge_to_main_preauthorised`:** healthy-gate merges to main pre-authorised, scoped to
   decented/axenstax. Design-only now — nothing to merge. ✅
 - **`reference_proof_of_play_is_proof_of_work`:** untouched — this is visual authoring, no reward

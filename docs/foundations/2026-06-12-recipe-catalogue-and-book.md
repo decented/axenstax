@@ -2,7 +2,7 @@
 
 **Status: BUILT 2026-06-12.** Catalogue (**250 cards — the full recipe set**)
 + query API + autofill + recipe-book panel all delivered and merged.
-`match_recipe` untouched. The book panel's *look/feel* is the Axolittle
+`match_recipe` untouched. The book panel's *look/feel* is the
 playtest boundary (in-game, not headlessly screenshottable) — test sheet
 `docs/test-sheets/2026-06-12-recipe-book.md`.
 
@@ -195,7 +195,7 @@ rewrite. Explicitly deferred.
   generated + authored cards, query API, the consistency test,
   `craftable_now`/`search` unit tests.
 - **Done (to playtest boundary):** recipe-book egui panel, pad/mouse/touch,
-  click-to-autofill. Feel/UX = Axolittle + owner.
+  click-to-autofill. Feel/UX = the tester + owner.
 - **Coverage:** **250 cards — the full recipe set** the two thorough matcher
   passes enumerated (127 parametric + 67 generated literals + 56 authored
   literals). Every grid validated by the consistency test against the live

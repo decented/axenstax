@@ -1,10 +1,10 @@
 # Farming system — Tier 1 (Minecraft-baseline) + Tier 2 sketch (AxeNStax-native plough + draft animals)
 
-**Status**: Tier 1 DELIVERED on main (2026-05-18). Tilled Soil (id 30) + 12 crop-stage blocks (ids 31-42) + Hoe across all 5 tiers + WheatSeeds/Wheat/Bread/Carrot/Potato materials + till/plant/growth (10s per stage, water-adjacency 2x) + harvest + bread recipe + /give parser extensions. Spec 5 §3.9 + §6.2 updated. Phase 11 (Axolittle UX playtest) remains the validation gate. Tier 2 (plough + draft animals) still DESIGN-LOCKED, future spec.
+**Status**: Tier 1 DELIVERED on main (2026-05-18). Tilled Soil (id 30) + 12 crop-stage blocks (ids 31-42) + Hoe across all 5 tiers + WheatSeeds/Wheat/Bread/Carrot/Potato materials + till/plant/growth (10s per stage, water-adjacency 2x) + harvest + bread recipe + /give parser extensions. Spec 5 §3.9 + §6.2 updated. Phase 11 (tester UX playtest) remains the validation gate. Tier 2 (plough + draft animals) still DESIGN-LOCKED, future spec.
 **Date**: 2026-05-14
 **Branch**: `feat/farming-tier-1` once started; off `main`.
 **Session**: Fresh — implementer should treat this doc as the only brief.
-**Trigger**: Spec-code drift audit on 2026-05-14 surfaced the Hoe in Spec 5 §3.8 + §5.2 with no `ToolType::Hoe` in code. Asked Axolittle whether to delete-from-spec or build-it; he picked build-it, then expanded the design substantially over the same session. Memory: axenstax has farming.
+**Trigger**: Spec-code drift audit on 2026-05-14 surfaced the Hoe in Spec 5 §3.8 + §5.2 with no `ToolType::Hoe` in code. Asked the tester whether to delete-from-spec or build-it; they picked build-it, then expanded the design substantially over the same session. Memory: axenstax has farming.
 
 ---
 
@@ -22,8 +22,8 @@ Total scope **for this spec (Tier 1 only)**: ~1900 lines (spec → blocks → to
 
 ## Why this lives here
 
-- **Axolittle's design call is fresh and substantive** (2026-05-14). The window for capturing it accurately is now; if not specced, it fades and the design has to be re-extracted later. Per memory pretest check and the spec-maintenance rule in CLAUDE.md ("the specs are what survive rebuilds"), banked design > remembered design.
-- **Resolves a documented spec-code drift cleanly.** The Hoe references in Spec 5 §3.8 + §5.2 were flagged as drift in the 2026-05-14 audit. Axolittle's "yes, full farming" turned them from drift into intentional anticipation. This spec makes the spec true again.
+- **The tester's design call is fresh and substantive** (2026-05-14). The window for capturing it accurately is now; if not specced, it fades and the design has to be re-extracted later. Per memory pretest check and the spec-maintenance rule in CLAUDE.md ("the specs are what survive rebuilds"), banked design > remembered design.
+- **Resolves a documented spec-code drift cleanly.** The Hoe references in Spec 5 §3.8 + §5.2 were flagged as drift in the 2026-05-14 audit. The tester's "yes, full farming" turned them from drift into intentional anticipation. This spec makes the spec true again.
 - **Cross-game lift, per shared infra strategy**:
   - The growth-tick-with-stages pattern lifts to any game that wants procedural progression (planet evolution, egg incubation, etc).
   - The crop-as-block + harvest-yields-item pattern is the standard voxel-farming shape; reusable.
@@ -56,7 +56,7 @@ Total scope **for this spec (Tier 1 only)**: ~1900 lines (spec → blocks → to
 
 ### Memory pointers
 
-- axenstax has farming — full design from Axolittle, including Tier 2 four-animal table.
+- axenstax has farming — full design from the tester, including Tier 2 four-animal table.
 - signet boundary — N/A here, but a reminder: nothing in farming touches Signet/identity.
 
 ### What does NOT exist yet (and Tier 1 doesn't need)
@@ -83,7 +83,7 @@ Total scope **for this spec (Tier 1 only)**: ~1900 lines (spec → blocks → to
 | 8 | Per-tier Hoe ladder (Stone, Iron, Diamond, Satori). Durability + till-speed differentiation. Recipes follow existing pickaxe pattern | `crafting.rs`, tests | ~150 | ✓ |
 | 9 | `/give` command extensions for new items (seeds, crops, bread, hoes) so playtesters can spawn-and-test without survival grind | `commands/builtins/give.rs`, tests | ~80 | ✓ |
 | 10 | Spec 5 update — add tilled soil + crop blocks to block-list section; flesh out food table with bread + crop entries; deferred markers updated; tool tier table notes Hoe lacks attack damage (it's a utility tool) | `docs/spec/05-gameplay-systems.md` | ~80 | ✓ |
-| 11 | Axolittle playtest — feel of growth pacing, harvest reward, recipe values | n/a | 0 | ✗ blocked |
+| 11 | playtest — feel of growth pacing, harvest reward, recipe values | n/a | 0 | ✗ blocked |
 
 **Total**: ~1900 lines spec + code + tests for Tier 1. Phase 11 is the playtest gate — tune from there.
 
@@ -436,9 +436,9 @@ Bring `docs/spec/05-gameplay-systems.md` in line with what shipped. The Hoe refe
 
 ---
 
-## Phase 11 — Axolittle playtest (BLOCKED on his time)
+## Phase 11 — playtest (BLOCKED on tester time)
 
-### What he's evaluating
+### What they're evaluating
 
 - **Growth pacing**: 30 seconds sprout-to-mature feels fun? Too slow? Too fast? (Tunable via `CROP_GROWTH_TICKS_PER_STAGE`.)
 - **Yield balance**: 1-3 wheat seeds + 1 wheat per harvest — grindy or generous? 1-4 carrots/potatoes — same question.
@@ -450,13 +450,13 @@ Bring `docs/spec/05-gameplay-systems.md` in line with what shipped. The Hoe refe
 
 ### Outputs
 
-Memory entries capturing his calls. Spec 5 + this foundation doc updated as needed. New foundation spec for Tier 2 if green-lit.
+Memory entries capturing their calls. Spec 5 + this foundation doc updated as needed. New foundation spec for Tier 2 if green-lit.
 
 ---
 
 ## Tier 2 sketch (future foundation spec)
 
-**Status**: DESIGN-LOCKED at the high level (per Axolittle 2026-05-14). Needs its own foundation spec covering the substantial new mechanics. Not in this spec's implementation scope.
+**Status**: DESIGN-LOCKED at the high level (per tester 2026-05-14). Needs its own foundation spec covering the substantial new mechanics. Not in this spec's implementation scope.
 
 ### What Tier 2 adds
 
@@ -507,8 +507,8 @@ Tier 2 needs Tier 1's tilled-soil block and crop-system to mean anything (a plou
 
 ### When to spec Tier 2
 
-Recommended order: **deliver Tier 1 first**, get Axolittle's playtest feedback, THEN draft Tier 2. Reasons:
-- Axolittle's Tier-2 design might shift after he tries Tier 1 (he might want different yields, faster growth, etc., that change Tier 2's balance).
+Recommended order: **deliver Tier 1 first**, get the tester's playtest feedback, THEN draft Tier 2. Reasons:
+- The tester's Tier-2 design might shift after they try Tier 1 (they might want different yields, faster growth, etc., that change Tier 2's balance).
 - The breeding system + new mobs are substantial work; better to bank Tier 1 as a complete shippable unit first.
 - Tier 2 has many open design questions that benefit from Tier-1-in-hand context.
 
@@ -519,7 +519,7 @@ Recommended order: **deliver Tier 1 first**, get Axolittle's playtest feedback, 
 - All 11 phases complete or explicitly blocked (Phase 11 = playtest gate).
 - `./check.sh` ALL GREEN throughout — no phase ships with regressions.
 - Spec 5 reflects what shipped; drift audit re-run finds nothing new.
-- Axolittle's gameplay loop works end-to-end on a single dev box: till → plant → wait → harvest → bake bread → eat.
+- The tester's gameplay loop works end-to-end on a single dev box: till → plant → wait → harvest → bake bread → eat.
 - Memory entry axenstax has farming updated with "Tier 1 DELIVERED <commit>" status line; Open Questions narrowed.
 - This foundation doc gets a status flip from READY TO BUILD → DELIVERED at the top with commit links.
 
@@ -529,8 +529,8 @@ Recommended order: **deliver Tier 1 first**, get Axolittle's playtest feedback, 
 
 Per CLAUDE.md "Spec Maintenance" rule:
 - All design decisions in this doc that change during implementation get reflected back into Spec 5 (and any other relevant spec) — not just in git history.
-- The Tier 2 sketch in this doc gets promoted to its own foundation spec when Tier 1 ships and Axolittle green-lights starting Tier 2 work. This doc updates with a "Tier 2 spec: <link>" pointer at that time.
-- The axenstax has farming memory file is the long-term home for Axolittle's design calls. Any new design input from him during implementation goes there first, then propagates to spec.
+- The Tier 2 sketch in this doc gets promoted to its own foundation spec when Tier 1 ships and the tester green-lights starting Tier 2 work. This doc updates with a "Tier 2 spec: <link>" pointer at that time.
+- The axenstax has farming memory file is the long-term home for the tester's design calls. Any new design input from them during implementation goes there first, then propagates to spec.
 
 ---
 
@@ -540,4 +540,4 @@ Per CLAUDE.md "Spec Maintenance" rule:
 - **shared infra strategy**: ✓ — growth-tick + breeding + crop-as-block are cross-game-friendly patterns. Don't hard-code AxeNStax assumptions into the growth tick (e.g., "bread restores 5 HP" lives in `food_value`, not in growth).
 - **pretest check**: implementer should re-verify each phase's claims against actual code state before starting (the existing block-ID count, the texture-layer count, the variant indices) — these may have shifted since this spec was written.
 - **axenstax has farming**: this foundation spec is the implementation contract for the design banked there. Keep them in sync.
-- **alpha launch posture**: farming is **post-alpha-launch** in priority. Doesn't gate the alpha. Spec'd now while Axolittle's design is fresh; built when Tier 1 floats to the top of the queue.
+- **alpha launch posture**: farming is **post-alpha-launch** in priority. Doesn't gate the alpha. Spec'd now while the tester's design is fresh; built when Tier 1 floats to the top of the queue.

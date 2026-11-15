@@ -77,7 +77,7 @@ The engine already does its half. `wasm_save.rs::pack_world(meta, save, world) -
 | 7 | **Download / restore** | `blossom.js`, `lobby.js`, `unpack_world` reuse | ~150 | Manifest → fetch by hash → decrypt → unpack → hydrate. Enables cross-device restore. |
 | 8 | **World-list merge + sync state** | `lobby.js`, `world_store.js` | ~200 | Merge local + cloud entries; show per-world state (local-only / synced / cloud-only); last-write-wins by `last_saved` with a guard against clobbering a newer local copy. **npub, never hex, in any user-facing label** (npub only display). |
 | 9 | **Sync orchestration + "Save to cloud" affordance** | `lobby.js`, game-site UI | ~150 | On reconnect: push dirty local worlds, pull cloud-only worlds. User-visible control reads "Save to cloud" — **never "Blossom"** (`roadmap.md:39`: that's implementation detail). Offline → controls inert/greyed, no nags. |
-| 10 | **Playtest gate (Axolittle)** | n/a | 0 | Build offline → go online → confirm backup; clear cache / second browser → confirm restore; sync-state labels legible. |
+| 10 | **Playtest gate (the tester)** | n/a | 0 | Build offline → go online → confirm backup; clear cache / second browser → confirm restore; sync-state labels legible. |
 
 **Total:** ~1,400 LOC, ~90% JS/Python/infra, thin engine touch. Phases 2–9 autonomous; Phase 10 is the playtest gate.
 
@@ -140,7 +140,7 @@ An audit after the phases-2–3 merge found the feature is a tested *skeleton*, 
 1. **Nothing calls it.** No code invokes `window.Blossom.upload/download`. (Phase 5.)
 2. **Not loaded in `/game`.** `blossom.js` + the `cloud-save` meta tag live only in the lobby (`/`); the engine page (`game/engine/index.html` → `dist/`) loads neither, so `window.Blossom` is `undefined` where the engine runs. The engine save path (`save.rs::save_world`/`autosave_world`) writes IndexedDB only — no cloud call. **This is why it cannot have run end-to-end.** (Phase 5.)
 3. **Blossom `config.yml` schema is UNVERIFIED** against the real image (no Docker on the build host). The auth model (single-pubkey allow-list via `owners:` + `requirePubkeyInList`) is best-guess; uploads may be open to any valid signature if those keys are wrong. Loopback-only binding is the compensating control. **Must verify against the pinned image before trusting.** (C2/C3 from the audit.)
-4. **No encryption** (Phase 4), **no manifest** (Phase 6 — upload returns the hash but nothing persists per-pubkey ownership), **no download ownership check** (any signed-in user can fetch any hash they know — documented BRIDGE), **no world-list merge / sync UI / "Save to cloud" affordance** (Phases 7–9), **no Axolittle playtest** (Phase 10).
+4. **No encryption** (Phase 4), **no manifest** (Phase 6 — upload returns the hash but nothing persists per-pubkey ownership), **no download ownership check** (any signed-in user can fetch any hash they know — documented BRIDGE), **no world-list merge / sync UI / "Save to cloud" affordance** (Phases 7–9), **no playtest** (Phase 10).
 
 ### To actually ship cloud save, next session
 Verify `config.yml` against the pinned image with Docker → run the end-to-end round-trip (Task 8 of the plan) → then build Phase 5 (load `blossom.js` in `/game` + wire the WASM save flow to call upload after the IndexedDB write) → Phase 6 manifest → Phases 7–9 UI. Destination tier (player-key signing + NIP-44) stays blocked on upstream Signet (`docs/foundations/2026-05-14-engine-signing-bridge.md`).

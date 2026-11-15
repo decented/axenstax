@@ -1,6 +1,6 @@
 # Living world v0.2.30: things to try
 
-For Axolittle's play of build 0.2.30 (main 46b5717f). The known limits behind the rough bits are in `docs/superpowers/specs/2026-11-08-living-world-tier1.md` §6.3.
+For the tester's play of build 0.2.30 (main 46b5717f). The known limits behind the rough bits are in `docs/superpowers/specs/2026-11-08-living-world-tier1.md` §6.3.
 
 ```
 Things to try: the living world (v0.2.30)

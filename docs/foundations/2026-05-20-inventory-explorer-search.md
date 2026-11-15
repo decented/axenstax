@@ -12,7 +12,7 @@ New full-screen pane separate from the hotbar + crafting inventory that shows **
 
 Opens via the **`B` key** (currently unbound). Esc closes.
 
-**Scope:** ~700 LOC across 6 phases. Phase 7 is the Axolittle playtest.
+**Scope:** ~700 LOC across 6 phases. Phase 7 is the playtest.
 
 ---
 
@@ -64,7 +64,7 @@ Opens via the **`B` key** (currently unbound). Esc closes.
 | 5 | Wire-up — `B` key intent, `PlayerSlot.open_explorer` field, render hook in `game_loop.rs`, menu-open gate. Esc closes. | `input.rs`, `player_intent.rs`, `player_slot.rs`, `game_loop.rs` | ~120 | ✓ |
 | 6 | Click handlers — Creative: `/give 1 of clicked entry` to hotbar. Survival: tooltip shows "You have: N" with N counted from `inventory.slots_iter()`. | `game_loop.rs`, `inventory.rs` (read-only helper) | ~80 | ✓ |
 | 7 | Tests — `enumerate_all_items` count, filter substring match, filter category exclusion, ExplorerCategory exhaustiveness. | `inventory_explorer.rs::tests` | ~80 | ✓ |
-| 8 | Axolittle playtest — open explorer with B, search "iron" → see iron ore + ingot + tools + block; click a Diamond Pickaxe in creative → it's in your hotbar; in survival open explorer → confirm "you have N" overlay shows correct counts. | — | — | playtest gate |
+| 8 | playtest — open explorer with B, search "iron" → see iron ore + ingot + tools + block; click a Diamond Pickaxe in creative → it's in your hotbar; in survival open explorer → confirm "you have N" overlay shows correct counts. | — | — | playtest gate |
 
 **Total Phases 2-7:** ~760 LOC. Phase 8 is the playtest gate.
 
@@ -243,7 +243,7 @@ fn empty_query_returns_all_in_category() {
 
 ---
 
-## §8 — Axolittle playtest
+## §8 — playtest
 
 Run-through:
 

@@ -589,7 +589,7 @@ Chunk-area atmospheric overlay (fog, lighting, skybox tint) needs a renderer-lev
 | 24 | Server admin config — `[mods.glimkin]` config section, verifier list, manifestation rates, visibility mode | Yes |
 | 25 | Cross-mod isolation hardening — explicit refusal hooks in Vendor Block, crafting, anti-cheat, combat (Mode B creatures un-hittable) | Yes |
 | 26 | Charter age-policy inheritance — guardian-flag-driven mode (under-13 sees glimpses + Mode B; forge HTTP gated by guardian) | Yes |
-| 27 | Axolittle playtest gate — both Mode A discovery and Mode B personal-realm | No — playtest |
+| 27 | playtest gate — both Mode A discovery and Mode B personal-realm | No — playtest |
 
 **Total:** 27 phases, ~7000 LOC mod-side + ~3500 LOC for the three engine prerequisites. Heavier than v1 of this spec because Mode B is a major addition, but Mode B's emotional payoff justifies the work and most of its infrastructure (verifier journal fetch, per-pubkey perceptual layer, ambient entity behaviour) is reusable across Decented games.
 
@@ -684,7 +684,7 @@ Mitigation: ship MVP with heuristics; flag the limitation in journal entries (`[
 
 A chunk-area atmospheric retexture touches lighting, fog, skybox, and ambient audio. On WASM and low-tier GPUs this could stutter. The `overlay_active_chunks = 4` limit in the capability manifest is the hard ceiling.
 
-Mitigation: pre-bake HDRI environment maps for MVP visions rather than real-time shader-based ones. Profile on Axolittle's hardware before phase 12 lands.
+Mitigation: pre-bake HDRI environment maps for MVP visions rather than real-time shader-based ones. Profile on the tester's hardware before phase 12 lands.
 
 ### 18.5 Brand drift risk
 
@@ -736,7 +736,7 @@ This document is design only. **No engine code is to be written from this spec u
 3. The engine signing bridge foundation (`2026-05-14-engine-signing-bridge.md`) is queued or in-flight
 4. Glikkin's verifier infrastructure has a confirmed canonical endpoint
 
-Until then, this spec is the brief. It will be revised based on feedback from both Staxolottle and Axolittle before any code is written.
+Until then, this spec is the brief. It will be revised based on feedback from both Staxolottle and the tester before any code is written.
 
 ---
 
@@ -1030,7 +1030,7 @@ Each Decented game runs its own theatrical interpretation; the underlying combat
 
 ### 24.6 Scope flag
 
-Arenas are **out of v0.1 scope** (see §19). v0.2 ships them once Mode B is playtested by Axolittle and Glimkin's combat-resolution API is stable enough to be a remote dependency. The v0.1 build does not preclude them — the Vision overlay primitive (§14.4) and the Mode B creature spawn machinery (§23) are exactly the infrastructure arenas need.
+Arenas are **out of v0.1 scope** (see §19). v0.2 ships them once Mode B is playtested by the tester and Glimkin's combat-resolution API is stable enough to be a remote dependency. The v0.1 build does not preclude them — the Vision overlay primitive (§14.4) and the Mode B creature spawn machinery (§23) are exactly the infrastructure arenas need.
 
 ### 24.7 Where battles fit in the player journey
 

@@ -150,7 +150,7 @@ Fork is a potentially slow operation (copying 20-30 MB of chunk files). Show a b
 4. **Delete Forever** button — **disabled** until the typed text matches the display name exactly (case-sensitive)
 5. **Cancel** button
 
-This pattern prevents accidental deletion. It's intentionally harder than a yes/no dialog — especially important given Axolittle's age. Muscle memory can't delete a world.
+This pattern prevents accidental deletion. It's intentionally harder than a yes/no dialog — especially important for new players. Muscle memory can't delete a world.
 
 On confirm: `fs::remove_dir_all` the world directory. Return to world list (which re-scans).
 

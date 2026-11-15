@@ -38,7 +38,7 @@ Pure helper `dedupe_world_name(name, existing: &[String]) -> String`: if `name` 
 
 ## Verification
 - **Unit-testable (engine):** `dedupe_world_name` collisions; `pack_world` → `unpack_world` round-trip integrity (likely already covered — extend if not).
-- **Playtest boundary:** the actual browser download + file-picker UX is not solo-verifiable — Axolittle confirms (download a world, clear cache, restore it). Same boundary as the rest of the PWA work.
+- **Playtest boundary:** the actual browser download + file-picker UX is not solo-verifiable — the tester confirms (download a world, clear cache, restore it). Same boundary as the rest of the PWA work.
 - `check.sh` green; engine + WASM build.
 
 ## Memory-rule check

@@ -35,7 +35,7 @@ provisioned in the Workshop): right-click inflates the nearest parked project (m
 sneak + right-click deflates. Headless shots: `--shot-painter`, `--shot-workshop`. The `/ws` command
 (place / edit / paint / pump / deflate / play / pin / reshape / list / reset) drives everything.
 **Only the inflate/paint/reshape _feel_** (pump rate, scale ceiling, brush ergonomics, the look) is the
-**Axolittle playtest tune** — the features are built. Distribution (Phase D/E) is owner-scoped-out.
+**Playtest tune** — the features are built. Distribution (Phase D/E) is owner-scoped-out.
 
 ---
 
@@ -58,7 +58,7 @@ about creating new items" — that next phase is **parked** ("a good problem to 
 → `feat/workshop-space-bellows` (Phase B) → `feat/workshop-face-painter` (Phase C) →
 `feat/workshop-stash-share` (Phase D) → `feat/workshop-adoption` (Phase E) →
 `feat/workshop-reshape` (Phase F). Each phase is independently `check.sh`-gated; the **look**
-is a playtest-boundary check the owner/Axolittle runs.
+is a playtest-boundary check the owner/tester runs.
 
 ---
 
@@ -339,7 +339,7 @@ persisted across sessions, many at once.** No painting yet — the rig + the wor
 with each restored to its exact prior state** (offset, inflation, mode, partial paint); headless
 screenshot of an inflated block (lobby-screenshot tooling, per `reference_lobby_screenshot_tool`);
 `check.sh` green. **Playtest boundary:** the bellows/pin *feel* + the "potter across days" workflow
-→ Axolittle.
+→ the tester.
 
 ### Phase C — Mode A face-painter → reskin (first real consumer)
 *Goal: paint an inflated asset's faces at 16×16 and pin it into a global override. Blocks AND mobs.*
@@ -352,7 +352,7 @@ screenshot of an inflated block (lobby-screenshot tooling, per `reference_lobby_
 **Acceptance:** painting a flower's faces and pinning makes **all** flowers render the new texture
 (visual — owner's eyes); a repainted cow re-textures every cow; block id / mob type / saves /
 behaviour unchanged (render-only); `check.sh` green. **Playtest boundary:** the painter UX + the
-look → Axolittle. *This is the headline deliverable — community reskin works end-to-end, locally.*
+look → the tester. *This is the headline deliverable — community reskin works end-to-end, locally.*
 
 ### Phase D — Beacon: publish + discover + adopt override sets ✅ BUILT (2026-06-05)
 *Goal: publish your overrides to the world and adopt others' — on `@forgesworn/beacon`.*
@@ -406,7 +406,7 @@ step:** the live bake against the real official npub + wiring `window.__axenstax
 
 **Acceptance:** rebuilding a flower's shape in the Workshop and pinning makes all flowers render the
 new 3D micro-model (visual — owner's eyes); single-block exact-build enforced (multi-block refused
-cleanly); `check.sh` green. **Playtest boundary:** the reshape look → Axolittle.
+cleanly); `check.sh` green. **Playtest boundary:** the reshape look → the tester.
 
 ---
 
@@ -442,7 +442,7 @@ cleanly); `check.sh` green. **Playtest boundary:** the reshape look → Axolittl
   layers + re-meshing on apply). Bounded, and Spec 03 already specifies the shape; the block
   re-mesh reuses the existing dirty-chunk path.
 - **Authoring UX is the soft spot** (as in #18/#19): the face-painter + bellows/pin *feel* can't be
-  solo-verified → Axolittle playtests gate Phases B/C/F.
+  solo-verified → playtests gate Phases B/C/F.
 - **Stash is "built but unproven"** (`project_cloud_save_bridge_on_main`): the transport exists but
   has never run end-to-end and only knows worlds. Phase D adds the *asset* shape; the live round-trip
   is an owner step (no Docker on host).
@@ -467,7 +467,7 @@ cleanly); `check.sh` green. **Playtest boundary:** the reshape look → Axolittl
    layers on override-replace (don't leak layers); honour the same array-limit care the cosmetics
    native-crash note flagged (`project_player_cosmetics_plan`).
 4. **Where the bellows/pin lives** — a held tool vs a Workshop-only mode interaction. Tool is more
-   discoverable; decide with Axolittle.
+   discoverable; decide with the tester.
 5. **Mannequin source** — spawn a non-AI mob instance vs a dedicated "display" entity. Non-AI
    instance is cheapest; confirm it animates for the "play" preview without AI ticking.
 6. **One Workshop or many?** v1: a single per-player Workshop world holding **many parked projects**
@@ -509,7 +509,7 @@ forward-compat pattern. Reuses #18's bake + capture; does not re-derive either.)
   AxeNStax's; the *pipeline* is shared infra. ✅
 - **`feedback_autonomy_to_playtest_boundary`:** Phase A + the registry/Stash logic are
   solo-buildable + `check.sh`-gated; Phases B/C/F end at a **look/feel** confirmation
-  (Axolittle/owner) — build to the boundary, stop cleanly. ✅
+  (the tester/owner) — build to the boundary, stop cleanly. ✅
 - **`feedback_merge_to_main_preauthorised`:** healthy-gate merges to main pre-authorised, scoped to
   decented/axenstax. Design-only now — nothing to merge. ✅
 - **`project_economies_vision` / Knowledge & Creator economy:** community-authored visual content is

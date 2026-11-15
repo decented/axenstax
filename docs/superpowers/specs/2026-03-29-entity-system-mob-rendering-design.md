@@ -1,7 +1,7 @@
 # Step 7 — Entity System & Mob Rendering
 
 **Date:** 2026-03-29
-**Source:** Staxolottle directive + Axolittle feedback (rounds 1-3)
+**Source:** Staxolottle directive + the tester feedback (rounds 1-3)
 
 ## Context
 

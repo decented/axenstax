@@ -100,7 +100,7 @@ Reuses the villager mesh (bipedal human) with `MobDef.color = steel grey`. Same 
 | 6 | Entity model — Knight maps to `villager_model` with steel-grey tint via TOML | `entity_model.rs` | ~10 |
 | 7 | Tests (mob def + drops + defender filter + spawn at threshold + multi-spawn cap + Knight-takes-hostile-damage in golem-combat) | various `*::tests` | ~150 |
 | 8 | Docs (HP-4 spec → DELIVERED, README flip, Spec 5 §3 mobs append) | docs | ~20 |
-| 9 | Axolittle playtest | — | — |
+| 9 | playtest | — | — |
 
 **Total**: ~480 LOC. Single PR. Light on engine surface — most of the work is the spawn-tick + the combat-function generalisation.
 
@@ -142,7 +142,7 @@ Reuses the villager mesh (bipedal human) with `MobDef.color = steel grey`. Same 
 - Adding a second Iron Golem doesn't block Knight spawning (and vice versa).
 - A Knight in melee range of a Brigand applies 8 damage per `GOLEM_ATTACK_COOLDOWN`.
 - A Knight ignores Villagers + players (passive category).
-- Phase 9 (playtest): Axolittle confirms the village feels defended; Knight is visually distinct from Iron Golem and from Villager.
+- Phase 9 (playtest): The tester confirms the village feels defended; Knight is visually distinct from Iron Golem and from Villager.
 
 ---
 

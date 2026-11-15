@@ -2,9 +2,9 @@
 
 > **Superseded in part, 2026-11-15.** Logs keep their tree type: mining any species' log now drops that species' log block, and every log block counts as fresh (green) wood (rack, fuel, recipes); `GreenLog` is a legacy stack only and nothing drops it. A log block burns as green wood (30 s, smoky), replacing the old 60 s oak-log arm. Every log breaks in oak's 4.5 s by hand. The log materials draw as a tinted log icon. The three-tier ladder (green, seasoned, kiln-dried) and the Drying Rack stand. See Spec 05 §2 "Logs keep their tree type".
 
-**Status:** READY TO BUILD as of 2026-05-19. Phases 2-8 are autonomous; Phase 9 = Axolittle playtest gate.
+**Status:** READY TO BUILD as of 2026-05-19. Phases 2-8 are autonomous; Phase 9 = playtest gate.
 **Branch:** `feat/log-seasoning` off `main`.
-**Trigger:** 2026-05-19 chat — Axolittle floated "season your logs for the furnace and campfires." Designed up from a one-liner into a full deep-economy lane: green wood burns poorly + smokes, seasoned wood burns clean, kiln-dried (future) burns premium. New block-entity workstation (Drying Rack) closes the loop.
+**Trigger:** 2026-05-19 chat — the tester floated "season your logs for the furnace and campfires." Designed up from a one-liner into a full deep-economy lane: green wood burns poorly + smokes, seasoned wood burns clean, kiln-dried (future) burns premium. New block-entity workstation (Drying Rack) closes the loop.
 
 ---
 
@@ -51,7 +51,7 @@ Small engine change so log materials act as placeable OAK_LOG block-items: the r
 
 ## Why this lives here
 
-- **Closes a deep-economy lane Axolittle reached for.** "Season your logs" is the natural next half-step in a survival kid's mental model. Land it now while the fuel system is fresh (post-campfire + pre-furnace) — there's only one fuel-ladder caller to migrate.
+- **Closes a deep-economy lane the tester reached for.** "Season your logs" is the natural next half-step in a new player's mental model. Land it now while the fuel system is fresh (post-campfire + pre-furnace) — there's only one fuel-ladder caller to migrate.
 - **Survival-progression smoke beacon.** Wave 28 already ships the smoke-pillar mechanic for leaves. Green logs riding the same primitive ties day-1 fires to a visible drawback (mob-drawing smoke + visible-from-far) and seasoning becomes a tangible upgrade. Re-uses code, deepens gameplay, costs no extra renderer work.
 - **Lifts cross-game.** The dryness-state-machine pattern (raw → cured-via-time → premium-via-workstation) generalises. aging fish at the smoker, curing dried herbs — same primitive, wherever it's used. The block-entity tick + air-above-gate is engine-generic. Game-specific data (fuel values, recipe yields) lives in tables.
 - **Pre-Spec-20 placement.** Spec 20 Furnace is the next major block-entity ship and introduces the `BlockEntityData` enum framework. This spec ships its drying-rack state as a parallel map (campfire pattern); when Spec 20 lands, the migration is a one-variant fold-in. Doing seasoning *before* Spec 20 keeps the furnace spec from being yet another "while we're here" omnibus.
@@ -148,7 +148,7 @@ Small engine change so log materials act as placeable OAK_LOG block-items: the r
 | 6 | DryingRack right-click interactions + recipe | `game_loop.rs` (right-click branch), `crafting.rs` (4-sticks recipe), tests | ~100 | ✓ |
 | 7 | Save/load + `/give` aliases + protocol bump + spill-on-mine | `save.rs` (SavedDryingRack), `commands/builtins/give.rs`, `block.rs` (DRYING_RACK mine_drop spills slots), `protocol.rs`, tests | ~100 | ✓ |
 | 8 | Spec 5 update — new §3.11 Drying Rack + §3.10 Campfire fuel-ladder amendment + §5.5 hint about seasoning | `docs/spec/05-gameplay-systems.md` | ~80 | ✓ |
-| 9 | Axolittle playtest — first-night feel, drying-rack-build moment, seasoning-pacing, smoke-pillar drawback intuition, kiln-dried curiosity | n/a | 0 | ✗ blocked |
+| 9 | playtest — first-night feel, drying-rack-build moment, seasoning-pacing, smoke-pillar drawback intuition, kiln-dried curiosity | n/a | 0 | ✗ blocked |
 
 **Total**: ~700 LOC including tests. Phases 2-8 autonomous. Phase 9 is the playtest gate.
 
@@ -634,23 +634,23 @@ Spec 5 reflects what shipped. New §3.11 Drying Rack. §3.10 Campfire amended wi
 
 ---
 
-## Phase 9 — Axolittle playtest (BLOCKED on his time)
+## Phase 9 — playtest (BLOCKED on tester time)
 
-### What he's evaluating
+### What they're evaluating
 
 - **First-night feel** — chop tree → green logs → friction-fire with stick → burn 30 s green-log fires + smoke pillar visible across the map. Does it feel like real-life campfire intuition?
 - **Smoke-pillar drawback** — does the green-log smoke beacon meaningfully draw mobs and feel like a survival drawback? Or is it just visual noise?
 - **Drying-rack-build moment** — does building the first drying rack feel like a "I made my workshop better" beat? Or does the 4-sticks recipe feel too cheap to matter?
 - **Seasoning pacing** — 5 real min per slot, 8 slots in parallel. Walk-away friendly. Too fast (trivialises the loop)? Too slow (frustrating)? Tune at 6000 ticks ± 50%.
 - **Air-above gate** — does the spatial decision (where to put your rack so it gets airflow) feel meaningful? Or do players just put it anywhere and ignore?
-- **Kiln-dried curiosity** — when he `/give kiln_dried_log` and burns one, does the 2× burn time feel premium-enough to want a kiln workstation built next?
+- **Kiln-dried curiosity** — when they `/give kiln_dried_log` and burn one, does the 2× burn time feel premium-enough to want a kiln workstation built next?
 - **Back-compat smoothness** — old save with OAK_LOG blocks in inventory loads cleanly; existing log-as-fuel paths still work.
-- **Plank recipe** — do plank yields feel unchanged from his POV? (They should — uniform 4 yield regardless of log type.)
+- **Plank recipe** — do plank yields feel unchanged from their POV? (They should — uniform 4 yield regardless of log type.)
 - **Building** — right-click with green log places an oak-log block, feels identical to old "right-click with oak log block" placement.
 
 ### Outputs
 
-Memory entries on his calls. Tuning patch with adjusted constants if needed (seasoning time, smoke-tick scale, fuel-burn ratios). Spec 5 amended for any design changes.
+Memory entries on their calls. Tuning patch with adjusted constants if needed (seasoning time, smoke-tick scale, fuel-burn ratios). Spec 5 amended for any design changes.
 
 ---
 

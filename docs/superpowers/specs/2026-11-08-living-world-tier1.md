@@ -1,7 +1,7 @@
 # Living World, Tier 1: bloom, the Feast, Commons, the Grey Quarry, the Tally
 
 Status: BUILD SPEC, 2026-11-08. The owner ratified the living-world direction on 2026-11-08 and asked for Tier 0 and the whole
-of Tier 1 in one playable build for Axolittle. Breadth over polish: every piece present and playable; tuning follows the
+of Tier 1 in one playable build for the tester. Breadth over polish: every piece present and playable; tuning follows the
 playtest.
 
 Sources (internal repo, private): `docs/vision/living-world-long-run.md` §3, §4, §5, §9, §11, §14–§16, and

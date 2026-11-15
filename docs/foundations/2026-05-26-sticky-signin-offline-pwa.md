@@ -1,6 +1,6 @@
 # Sticky Sign-In + Offline-Launch PWA — "sign in once, then play offline"
 
-**Status:** **Phase A + Phase B DELIVERED 2026-05-27** on `main` — Phase A (sticky 90-day sliding session + `axenstax_session_until` marker) via merge `6ad5885`; Phase B (service worker + manifest + offline boot) via merge `208b2c5`. **Phase 10 (Axolittle in-browser airplane-mode playtest) is the open gate** — the offline launch itself is built but not solo-verifiable. Deferred within Phase B: branded PWA icons (manifest ships `icons: []` until `branding/logo-favicons` merges → then installable).
+**Status:** **Phase A + Phase B DELIVERED 2026-05-27** on `main` — Phase A (sticky 90-day sliding session + `axenstax_session_until` marker) via merge `6ad5885`; Phase B (service worker + manifest + offline boot) via merge `208b2c5`. **Phase 10 (the tester in-browser airplane-mode playtest) is the open gate** — the offline launch itself is built but not solo-verifiable. Deferred within Phase B: branded PWA icons (manifest ships `icons: []` until `branding/logo-favicons` merges → then installable).
 **Branch:** delivered (`feat/sticky-session`, `feat/offline-pwa`, both merged + deleted).
 **Trigger:** The 2026-05-26 decision: **Signet sign-in is required up front, but once you've signed in you can effectively play offline.** Two capabilities make that true, and neither exists today: (1) the session must *persist* (today it's 4 hours), and (2) the app must *launch and run with no network* after the first sign-in (today it isn't a real PWA — no service worker, bundle served `no-cache`, gate validated server-side).
 
@@ -76,7 +76,7 @@ Two groupings. **Phase A (sticky session)** is small, low-risk, and arguably alp
 | 7 | **Offline `/game` gate via the SW** | `sw.js`, `auth.js` | ~80 | Offline, the SW serves the cached `/game` (the server-side 302 gate is simply never reached). The client-side boot path (Phase 6) is what enforces "signed in?" offline, per the soft-gate model above. |
 | 8 | **Sign-out + expiry UX** | `auth.js`, `lobby.js` | ~80 | Sign-out clears `axenstax_pubkey` + `axenstax_session_until` (forces re-auth) but keeps the cached bundle (it's just code). Expired session while online → silent re-auth via the SDK (`restoreSession`) or a prompt; expired while offline → a friendly "reconnect to sign in again" screen, not a broken redirect loop. |
 | 9 | **Update/refresh strategy** | `sw.js` | ~60 | SW versioning so a new WASM build invalidates the cache when the device is next online — don't strand kids on a stale bundle. Standard "new version available, reload" pattern. |
-| 10 | **Playtest gate (Axolittle)** | n/a | 0 | Install the PWA; sign in; airplane-mode; relaunch and play a solo world; sign out clears; ship a new build and confirm it updates on reconnect. |
+| 10 | **Playtest gate (the tester)** | n/a | 0 | Install the PWA; sign in; airplane-mode; relaunch and play a solo world; sign out clears; ship a new build and confirm it updates on reconnect. |
 
 **Total:** ~870 LOC, entirely website/JS/Python — **zero engine code.** Phases 2–9 autonomous; Phase 10 is the playtest gate. Phase A (2–3) is independently shippable before any of Phase B.
 

@@ -9,7 +9,7 @@ Test Lab world + Satoshi's in-world mission dialogue reusing them. P3
 covers every mission. See §8 for what shipped.
 **Owner ask:** "I need test mode, where Satoshi asks you to test a specific
 thing. We can still use `/bug` to report it works, or the test list in the
-lobby. Axo is not testing, as it is boring."
+lobby. The tester is not testing, as it is boring."
 
 Related: [[project_guided_onboarding_satoshi]] (Satoshi guide),
 `2026-06-23-satoshi-onboarding-v2-design.md`, the daily build→test workflow
@@ -22,8 +22,8 @@ relay-retention runbook ([[project_feedback_relay_retention_runbook]]).
 ## 1. The problem, stated honestly
 
 The current test loop is a **markdown test sheet a human reads and works
-through**. Axolottle finds it boring — and per our own research that's a real
-signal, not something to paper over ([[feedback_axolittle_coerced_not_fun_signal]]):
+through**. The tester finds it boring — and per our own research that's a real
+signal, not something to paper over ([[feedback_coerced_play_not_fun_signal]]):
 a coerced tester is a *bug oracle*, not a *fun oracle*. So this feature is **not**
 "trick a bored kid into testing." It is: **make a voluntary tester's session
 both more playful and structured**, so the feedback we get is actionable and the
@@ -175,5 +175,5 @@ can glance at the lobby for the full list; Satoshi walks them through it in-worl
 
 If a mission can only land as a chore, don't ship it — cut it or make the
 underlying feature more fun first. Missions structure *voluntary* testers'
-feedback; they are not a lever to make an unfun thing feel fun. "Axo's bored"
+feedback; they are not a lever to make an unfun thing feel fun. "the tester's bored"
 remains a signal we listen to, not one we engineer around.

@@ -1,6 +1,6 @@
 # NPC Builder Profession — Foundation D of Build Schematics
 
-**Status:** **PHASES 2-14 DELIVERED 2026-05-22** on `feat/spec-26-builder-commission`. Phases 2-4 shipped 2026-05-20 (`Profession::Builder` + DRAFTING_TABLE block id 65 + crafting recipe + gossip + label). **Phases 5-14 shipped 2026-05-22**: commission dialog UI (`commission_ui.rs`), Pick-build-site flow (reuses Spec 24 `GhostState`), `BuilderCommission` data struct + status machine (`builder.rs`), Builder NPC pathfind override via `process_builder_commissions` driver, animated half-rate build via `pace_divider`+`pace_counter` on `ConstructionAnchorData`, Plaque crediting via new `BuilderCredit` field on `ArchitectPlaqueData`, fee formula (base 100 + 2 sats/cell + 20 sats/premium-block, tier discount 0/10/25 %), `PayoutKind::BuilderCommission` settlement to `world.village_treasuries`, edge-case refund flow (path-timeout / cancel / player-offline pause), and a `test_integration/builder.rs` end-to-end suite. Right-click entry path: BOTH the Builder villager AND the DRAFTING_TABLE block open the dialog (Builder villager dispatches before the regular quest dialogue when a workstation is claimed). 30 unit tests + 5 commission-UI tests + 6 integration tests; full suite 1355 passing. **Phase 15 (Axolittle playtest) stays open**.
+**Status:** **PHASES 2-14 DELIVERED 2026-05-22** on `feat/spec-26-builder-commission`. Phases 2-4 shipped 2026-05-20 (`Profession::Builder` + DRAFTING_TABLE block id 65 + crafting recipe + gossip + label). **Phases 5-14 shipped 2026-05-22**: commission dialog UI (`commission_ui.rs`), Pick-build-site flow (reuses Spec 24 `GhostState`), `BuilderCommission` data struct + status machine (`builder.rs`), Builder NPC pathfind override via `process_builder_commissions` driver, animated half-rate build via `pace_divider`+`pace_counter` on `ConstructionAnchorData`, Plaque crediting via new `BuilderCredit` field on `ArchitectPlaqueData`, fee formula (base 100 + 2 sats/cell + 20 sats/premium-block, tier discount 0/10/25 %), `PayoutKind::BuilderCommission` settlement to `world.village_treasuries`, edge-case refund flow (path-timeout / cancel / player-offline pause), and a `test_integration/builder.rs` end-to-end suite. Right-click entry path: BOTH the Builder villager AND the DRAFTING_TABLE block open the dialog (Builder villager dispatches before the regular quest dialogue when a workstation is claimed). 30 unit tests + 5 commission-UI tests + 6 integration tests; full suite 1355 passing. **Phase 15 (playtest) stays open**.
 **Branch:** `feat/npc-builder-profession` off `main` (after Specs 19 + 21 + 24 + 25 all merge).
 **Trigger:** Foundation **D** of the Build Schematics economy (`docs/vision/build-schematics-long-run.md`). Implements Phase 5 (NPC Builder commission) of the vision doc's lifecycle. First service-economy lane: pay a villager to build a plan for you while you're off doing something else.
 
@@ -34,7 +34,7 @@ A new 6th villager profession (`Profession::Builder`) claims a new `DRAFTING_TAB
 | 12 | Sats settlement via `apply_server_tax_and_payout` (Spec 20/21 helper). Fee debited from player; tax split + remainder routes to the village treasury (or NPC's pubkey-derived address if v2 wants per-NPC wallets — v1 = village treasury). | `builder.rs`, `economy.rs` | ~50 |
 | 13 | Edge cases — refund flow if the NPC can't reach the site (lost pathfind), if the materials are stolen mid-commission (player can re-slot), if the player logs off mid-commission (build pauses + resumes when player returns). | `builder.rs::tests` | ~60 |
 | 14 | Tests — full commission cycle (workstation claim, dialog round-trip, NPC pathfind, build at half-rate, Plaque with Builder credit, fee paid to village treasury). Integration test driven by `TestHost`. | `builder.rs::tests`, `test_integration/builder.rs` | ~150 |
-| 15 | Axolittle playtest — full commission of a 16×16 house plan; verify pace feels right; rep-discount visible in fee preview; charter-disabled child sees read-only Builder; village treasury credit logged. | – | playtest gate |
+| 15 | playtest — full commission of a 16×16 house plan; verify pace feels right; rep-discount visible in fee preview; charter-disabled child sees read-only Builder; village treasury credit logged. | – | playtest gate |
 
 **Total**: ~1,330 LOC across 14 build phases. Bigger than the README's ~800 estimate because the commission UI + NPC pathfinding + fee calculation each need real wiring. Phase 15 is the playtest gate.
 
@@ -109,7 +109,7 @@ fee *= reputation_discount   // 1.0 / 0.9 / 0.75 by tier
 
 Premium blocks: `Diamond`, `IronIngot`, `IronBlock`, `DiamondBlock`, `CoalBlock`, `Satori`, `SatoriBlock`. Crafted-material premiums (e.g. baked goods) are NOT premium for v1 — they're easy to source.
 
-Tunable in playtest. The defaults (100 / 2 / 20 / 0%/10%/25%) are starting points; Axolittle playtest tells us whether the kid's willing to pay them.
+Tunable in playtest. The defaults (100 / 2 / 20 / 0%/10%/25%) are starting points; playtest tells us whether players are willing to pay them.
 
 ---
 

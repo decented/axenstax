@@ -132,7 +132,7 @@ With 20 mobs per loaded area, `EntityUpdate` at ~24 bytes each, per-tick delta �
 
 ### Deferred V2 fields (not in this spec)
 
-- `falling_events: Vec<FallingEvent>` — the multiplayer-first framing proposed this for mid-air transient rendering. Deferred: `BlockChange` for `(src→AIR, dst→block)` pairs already renders correctly via existing dirty-chunk mesh rebuild. Add only if Axolittle reports the visual as jank.
+- `falling_events: Vec<FallingEvent>` — the multiplayer-first framing proposed this for mid-air transient rendering. Deferred: `BlockChange` for `(src→AIR, dst→block)` pairs already renders correctly via existing dirty-chunk mesh rebuild. Add only if the tester reports the visual as jank.
 - Per-player HUD delta — current snapshot already carries enough. Add when inventory is multi-slot networked.
 - Bitpacked presence masks — Phase 2 optimisation.
 
@@ -222,7 +222,7 @@ On `StateUpdatePacket` arrival with `last_acked_input = S` and server's authorit
 - `game/engine/src/server.rs::build_state_snapshot` — drain `dirty_blocks` into `StateUpdatePacket.block_changes` (already exists).
 
 **Scope**:
-- **Do not** introduce `FallingEvent` packet (deferred). A fallen block appears on the client as two `BlockChange`s, same frame. Looks "snap" rather than "drop" — acceptable for now; Axolittle feedback will drive whether we need the mid-air transient later.
+- **Do not** introduce `FallingEvent` packet (deferred). A fallen block appears on the client as two `BlockChange`s, same frame. Looks "snap" rather than "drop" — acceptable for now; the tester feedback will drive whether we need the mid-air transient later.
 - **Do not** introduce `ChunkMeshManager` as a separate module. The existing dirty-chunk loop in `game_loop.rs` is the decoupling point; it stays.
 - Batching cap: if `dirty_blocks` exceeds 2048 in one tick, spill remaining into `overflow_dirty: VecDeque<BlockChange>` on `GameServer` for the next tick. Realistic max with 16-block radius: < 500 per tick; cap is safety net.
 
@@ -299,7 +299,7 @@ Concretely today: leave the file layout alone; when a method is extracted, place
 Each task follows `docs/workflow/daily-build-test.md`:
 
 1. **Build**: implement behind the task's scope. `./check.sh --release --smoke` must pass before commit.
-2. **Test sheet**: generate `docs/test-sheets/2026-04-18-task{1a,1b,1c,1d}-{name}.md` with checklist + questions for Axolittle. Include smoke-test screenshot evidence.
+2. **Test sheet**: generate `docs/test-sheets/2026-04-18-task{1a,1b,1c,1d}-{name}.md` with checklist + questions for the tester. Include smoke-test screenshot evidence.
 3. **Commit**: `feat(server-auth): task {N} — {title}` with motivating context in the body.
 4. **Spec update**: if spec 01/05/02 drifted (schema, field shape, order), update in same commit.
 
@@ -334,6 +334,6 @@ All four tasks (1a, 1b, 1c, 1d) complete. Measured against local dev environment
 - `cargo test` green: `player_tick_determinism`, `protocol_v1_to_v2_roundtrip`, `mob_spawn_timing`.
 - Spec 01, 05, 02 updated where behaviour shifted.
 - CLAUDE.md "Known technical debt" section updated: the three BRIDGE items moved to "Resolved technical debt".
-- Test sheets with Axolittle-ready checklists for each task live under `docs/test-sheets/`.
+- Test sheets with tester-ready checklists for each task live under `docs/test-sheets/`.
 
 After that: Phase 2 (data-driven refactors) becomes unblocked — mob definitions, recipes, loot tables move to data files without wrestling with the simulation-leak problems this spec fixes.

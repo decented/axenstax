@@ -13,13 +13,13 @@ Add a `Biome` enum + a biome-assignment function that runs alongside the existin
 
 **Eight launch biomes:** Plains, Forest, Birch Forest, Taiga, Jungle, Savanna, Desert, Snowy Tundra. (No Nether / End / Mushroom Island / Mesa — those are out of scope per the master spec.) Each is single-purpose: one dominant feel, not 30 micro-variants.
 
-**Scope:** ~1,800 LOC + ~12 textures across 10 phases. Phase 10 is the Axolittle playtest gate.
+**Scope:** ~1,800 LOC + ~12 textures across 10 phases. Phase 10 is the playtest gate.
 
 ---
 
 ## Why this lives here
 
-- Axolittle's feedback (2026-05-20 conversation): a typical Minecrafter expects more than one ecosystem. The current world is "Plains, every block". This is the single biggest tell that AxeNStax feels less complete than Minecraft, even with everything else in place.
+- The tester's feedback (2026-05-20 conversation): a typical Minecrafter expects more than one ecosystem. The current world is "Plains, every block". This is the single biggest tell that AxeNStax feels less complete than Minecraft, even with everything else in place.
 - Biomes precede woods (28b) because tree species selection is a *consequence* of biome, not an independent system. Building woods first then back-fitting biomes would mean rewriting tree placement twice.
 - Mixed forests are an emergent property of biome blending — no special-case code needed. The boundary band sees neighbouring biome weights and samples from a union pool.
 - Cross-game lift: the biome-assignment-then-feature-overlay pattern is engine-generic. Any voxel game with terrain wants this shape.
@@ -64,7 +64,7 @@ Add a `Biome` enum + a biome-assignment function that runs alongside the existin
 | 7 | Mob spawning reads biome weights — extend `spawning::tick_mob_spawning` to multiply the existing per-mob rate by the local biome's weight for that mob | `spawning.rs` | ~120 | ⚠ playtest |
 | 8 | Tests — biome assignment determinism for fixed seed, blend at biome boundary returns multi-weight, tree pool union across mixed boundary, default mob weights sum to 1.0 | `biome.rs::tests` | ~150 | ✓ |
 | 9 | Player Guide page — `tools/sites/docs/content/player-guide/biomes.md` listing the 8 biomes + what to expect | docs | ~80 | ✓ |
-| 10 | Axolittle playtest — fly around with `/time speed 64` + `/tp` to confirm: (a) Desert looks like desert, (b) Snowy Tundra has snow + spruce, (c) Jungle is dense, (d) mixed Forest/Birch boundary shows both tree species | — | — | playtest gate |
+| 10 | playtest — fly around with `/time speed 64` + `/tp` to confirm: (a) Desert looks like desert, (b) Snowy Tundra has snow + spruce, (c) Jungle is dense, (d) mixed Forest/Birch boundary shows both tree species | — | — | playtest gate |
 
 **Total Phases 2-9:** ~1,070 LOC + ~80 lines of docs. Phase 10 is the gate.
 

@@ -1,7 +1,7 @@
-# Playtest fixes — 2026-05-30 (Axolittle)
+# Playtest fixes — 2026-05-30 (the tester)
 
-**Status**: DELIVERED on branch `fix/playtest-2026-05-30-batch`. `check.sh` ALL GREEN; 1854 engine tests pass (0 fail). Two items need Axolittle's eyes next playtest (flagged below).
-**Source**: Axolittle's playtest feedback list (lag, creative HUD, keyboard trap, worldgen, mobs, `/time`, world delete).
+**Status**: DELIVERED on branch `fix/playtest-2026-05-30-batch`. `check.sh` ALL GREEN; 1854 engine tests pass (0 fail). Two items need the tester's eyes next playtest (flagged below).
+**Source**: The tester's playtest feedback list (lag, creative HUD, keyboard trap, worldgen, mobs, `/time`, world delete).
 
 These are the conventions + root causes that must survive an engine rebuild. Each fix also carries a dated comment at its code site.
 

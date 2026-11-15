@@ -1,12 +1,12 @@
 # Step 6 — Flowing Water & Leaf Decay
 
 **Date:** 2026-03-29
-**Source:** Axolittle playtest transcript 2026-03-29 via Games Master voice session
+**Source:** playtest transcript 2026-03-29 via Games Master voice session
 **Priority:** Water flow 8/10, Leaf decay 6/10
 
 ## Context
 
-Axolittle tested the infinite world build (step 3-5). Chunk loading is smooth, no stutter, no frame drops. Two missing features stood out:
+The tester tested the infinite world build (step 3-5). Chunk loading is smooth, no stutter, no frame drops. Two missing features stood out:
 
 1. Water doesn't flow — it stays where generated. Should spread like Minecraft Java.
 2. Leaves don't decay when logs are removed — should break up like Minecraft.
@@ -74,7 +74,7 @@ When a water source is removed (block broken or replaced):
 ### Speed
 
 - Support check runs at **5 Hz** alongside water spread.
-- Decay delay: random **5.4–21.6 seconds** per leaf after determined unsupported (tuned from Axolittle playtesting — original 0.6-2.4s felt too fast).
+- Decay delay: random **5.4–21.6 seconds** per leaf after determined unsupported (tuned from playtesting — original 0.6-2.4s felt too fast).
 - Leaves decay one at a time (not all at once) for the Minecraft visual feel.
 
 ### Algorithm

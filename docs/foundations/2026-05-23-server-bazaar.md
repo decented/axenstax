@@ -1,6 +1,6 @@
 # Server Bazaar (v1) — the trade-value sell-floor
 
-**Status:** Phases 2-9 DELIVERED 2026-05-23 on `feat/server-bazaar`. Phase N = Axolittle playtest gate (open).
+**Status:** Phases 2-9 DELIVERED 2026-05-23 on `feat/server-bazaar`. Phase N = playtest gate (open).
 **Branch:** `feat/server-bazaar` off `main`.
 **Trigger:** Goal-driven solo dev cycle, Round 9. From `docs/vision/economies-long-run.md` §4.6 — "Server Bazaar / NPC Merchants". The market-of-last-resort: gives **every** item guaranteed liquidity at its `trade_value` floor, so nothing is ever truly worthless. The cleanest remaining new self-contained block — server-run (no owner), stateless (no block-entity), reuses the shipped `trade_value` ladder + `apply_sats_payout` pipeline.
 
@@ -90,7 +90,7 @@ Pure (`bazaar.rs`): `sell_quote` = trade_value × count; None for AIR; scales wi
 | 8 | Integration tests | ~80 |
 | 9 | check.sh + doc-flip + README | 0 |
 | 10 | Merge | — |
-| N | Axolittle playtest — does the floor feel right, is sell-only enough, is the held-stack sell intuitive |
+| N | playtest — does the floor feel right, is sell-only enough, is the held-stack sell intuitive |
 
 **Phases 2–9 solo-buildable.** Phase N = playtest.
 

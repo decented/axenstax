@@ -1,6 +1,6 @@
 # Bulk / Wholesale Vendor mode (v1)
 
-**Status:** READY TO BUILD 2026-05-23 (spec only — build has a refactor prerequisite, see below). Phase N = Axolittle playtest gate.
+**Status:** READY TO BUILD 2026-05-23 (spec only — build has a refactor prerequisite, see below). Phase N = playtest gate.
 **Branch (when built):** `feat/bulk-vendor` off `main`.
 **Trigger:** Goal-driven solo dev cycle, Round 10. From `docs/vision/economies-long-run.md` §4.4 — "Bulk / Wholesale (T4)". A high-volume Vendor variant: lower per-unit price, larger minimum buy. Written spec-only because the build has a clean prerequisite (extract the inline vendor-buy logic into a pure `vendor::try_buy` helper) that's best done as its own first phase rather than tangled into a feature at the tail of a long session.
 
@@ -68,7 +68,7 @@ Bulk mode adds a second "buy a quantity at a price" path. Rather than copy-paste
 | 6 | Tests (try_buy unit + Bulk + integration) | |
 | 7 | check.sh + doc-flip + README | |
 | 8 | Merge | |
-| N | Axolittle playtest — lot sizes, bulk pricing feel | |
+| N | playtest — lot sizes, bulk pricing feel | |
 
 ---
 

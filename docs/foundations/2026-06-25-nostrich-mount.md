@@ -67,7 +67,7 @@ usual bundled-challenge invariants (parses, names resolve, has Satoshi voice, no
 
 ## Deferred / ideas
 
-- Tune-by-feel pass (Axo playtest): speed cap, drift amount, water threshold, the surface-skim
+- Tune-by-feel pass (the playtest): speed cap, drift amount, water threshold, the surface-skim
   snap (currently a hard pin; could be a softer spring for a bouncier bob).
 - A Nostrich-only "drift gate" slalom or a water-crossing race trial once it feels right.
 - Mount only a *tamed* Nostrich? (Today any Nostrich is mountable, matching horses.)

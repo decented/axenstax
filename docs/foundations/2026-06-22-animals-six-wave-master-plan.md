@@ -179,6 +179,6 @@ block / save field (per the Wave-2 lesson: +N trailing bytes shifts those tests)
 Pure-function cores (genetics breed, husbandry cadence, schooling/panic, shark
 target-selection, sensor logic) are unit-tested off a bare `hecs::World`.
 `check.sh` (native + wasm + bundle) green before every merge. Hand-authored
-creature **models + feel-tuning (danger levels, cadences, yields) = Axolittle
+creature **models + feel-tuning (danger levels, cadences, yields) = the
 playtest boundary**; ship clean proc-model placeholders so each wave is testable.
 Per-wave test sheets under `docs/test-sheets/`.

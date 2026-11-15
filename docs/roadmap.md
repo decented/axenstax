@@ -149,7 +149,7 @@ Everything here needs a person, a second machine or a real device, or a decision
 
 **Decisions and sessions**
 - Flipping new worlds to terrain generator v4 (dry caves) is an owner call; until then new worlds get v3.
-- The default flip for single-player lending its world (D3, below) waits on a session with Axolittle.
+- The default flip for single-player lending its world (D3, below) waits on a session with the tester.
 - The owner session for shared steed packs (D2c-2).
 - Three behaviours from the Keep slices need an owner view: a rejoin re-arms the 15-second spawn shield at the exact spot, a joiner more than about 128 blocks from a lending host lands at spawn, and natural lava rims now flow within minutes.
 
@@ -160,7 +160,7 @@ Everything here needs a person, a second machine or a real device, or a decision
 Only items that block building further on top.
 
 - **Planned dependency migrations** (held back from Dependabot on purpose): bincode 1 → 3 (changes the save and wire encoding, so it needs a migration with legacy-save tests) and wgpu/naga 29 → 30 (renderer API change; needs a visual check on real GPUs, native and WebGPU).
-- **Route single-player through the server.** A host already lends its world to its embedded server (D1), so a hosting game no longer runs two simulations. Single-player still runs its own by default: D3 (single-player lends too, behind `--solo-hosted`) is built, and flipping the default waits on a session with Axolittle. D4 slices 2 to 5 (clock and weather, mob simulation, the death sweep, machines) have moved into the server tick; chest auto-collection and the NPC Builder commission lifecycle are what remain client-only. The `--no-lend` escape hatch and its second world copy go one release after D1 ships.
+- **Route single-player through the server.** A host already lends its world to its embedded server (D1), so a hosting game no longer runs two simulations. Single-player still runs its own by default: D3 (single-player lends too, behind `--solo-hosted`) is built, and flipping the default waits on a session with the tester. D4 slices 2 to 5 (clock and weather, mob simulation, the death sweep, machines) have moved into the server tick; chest auto-collection and the NPC Builder commission lifecycle are what remain client-only. The `--no-lend` escape hatch and its second world copy go one release after D1 ships.
 - **Server-owned joiner inventory, enforcement.** The server keeps a copy of each joiner's inventory, but the default Mirror mode still believes bounded claims. Strict enforcement is partly built and parked: it is selectable only internally and no operator flag is exposed.
 - **`ServerPlayer` / `PlayerSlot` duplication.** The save path uses raw server-player fields while the client uses slots. They will drift; unify when saving becomes server-authoritative.
 - **Comms ceiling raising.** The local policy file can only lower a player's chat ceiling. Raising it waits on a real capability boundary (a Charter comms clause or a Signet guardian attestation).

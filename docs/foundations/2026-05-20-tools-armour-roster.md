@@ -1,6 +1,6 @@
 # Tools + Armour Roster — Spec 28e
 
-**Status:** DELIVERED as of 2026-05-22. Armour data layer + crafting recipes shipped on main (commit `2a9a04b`, PR #41) — `Item::Armour` variant + `armour.rs` module + Leather/Iron/Diamond/Satori/Chainmail tiers with Helmet/Chestplate/Leggings/Boots slots. Shears + Fishing Rod shipped on main (commit `bb4f270`, PR #42). Pickaxe/Axe/Sword/Shovel/Hoe ladder is complete Wood→Satori. Per-tier Bow extension (Stone/Iron/Diamond/Satori) shipped under chunk 9 (PR #59). Armour-slot UI (vertical column in inventory overlay) + per-piece durability + `take_damage_with_armour` wiring through mob attacks + creeper blasts + HUD total-points badge shipped 2026-05-22 (`feat/spec-28e-armour-ui`). Phase 10 Axolittle playtest is the only remaining gate.
+**Status:** DELIVERED as of 2026-05-22. Armour data layer + crafting recipes shipped on main (commit `2a9a04b`, PR #41) — `Item::Armour` variant + `armour.rs` module + Leather/Iron/Diamond/Satori/Chainmail tiers with Helmet/Chestplate/Leggings/Boots slots. Shears + Fishing Rod shipped on main (commit `bb4f270`, PR #42). Pickaxe/Axe/Sword/Shovel/Hoe ladder is complete Wood→Satori. Per-tier Bow extension (Stone/Iron/Diamond/Satori) shipped under chunk 9 (PR #59). Armour-slot UI (vertical column in inventory overlay) + per-piece durability + `take_damage_with_armour` wiring through mob attacks + creeper blasts + HUD total-points badge shipped 2026-05-22 (`feat/spec-28e-armour-ui`). Phase 10 playtest is the only remaining gate.
 **Branch (when building):** `feat/spec-28e-armour` off `main` for the armour layer.
 **Trigger:** Sub-foundation of [Spec 28 Minecraft-parity content surface](2026-05-20-minecraft-parity-content-surface.md) §5. Depends on 28c Materials for Bronze/Copper interactions (cosmetic only); independent at the type-system level.
 
@@ -18,7 +18,7 @@ The tool ladder is **already complete** — every species × tier exists in the 
 
 ## Why this lives here
 
-- Combat without armour is binary: full HP or dead. Armour is the difference between "I survived two skeleton arrows" and "the world hated me". Axolittle's playtest confirms this is the missing slice from the combat loop.
+- Combat without armour is binary: full HP or dead. Armour is the difference between "I survived two skeleton arrows" and "the world hated me". The tester's playtest confirms this is the missing slice from the combat loop.
 - Tools are mostly done — 28e mostly leans on what's there. The new tool additions (Shears, Fishing Rod) are point fixes.
 - Cross-game lift: armour slots + tier-based damage reduction is engine-generic; sister games consume by registering different tier values.
 
@@ -64,7 +64,7 @@ The tool ladder is **already complete** — every species × tier exists in the 
 | 7 | Combat hookup — `take_damage_with_armour` on PlayerSlot runs `damage_after_armour` before `combat.health -=`; mob-attack + creeper-blast paths route through it. Wears 1 durability per piece per landed hit; broken pieces unequip silently. | `combat.rs`, `player_slot.rs` | ~120 | ✓ | DELIVERED 2026-05-22 |
 | 8 | HUD armour readout — small egui badge near the hearts showing total armour points (suppressed when zero). | `hud_ui.rs` | ~40 | ✓ | DELIVERED 2026-05-22 |
 | 9 | Tests — armour reduction maths, equipment slot picks correct, durability decrements on hit, mismatched-slot no-op, save round-trip | `*.rs::tests`, `test_integration::save_load` | ~300 | ✓ | DELIVERED 2026-05-22 |
-| 10 | Axolittle playtest — craft full Iron set, fight a zombie/skeleton, confirm survives where bare would die; durability ticks down on hits | — | — | playtest gate | OPEN |
+| 10 | playtest — craft full Iron set, fight a zombie/skeleton, confirm survives where bare would die; durability ticks down on hits | — | — | playtest gate | OPEN |
 
 **Total Phases 2-9:** ~1,450 LOC delivered. Phase 10 is the gate.
 

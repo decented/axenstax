@@ -33,7 +33,7 @@ Leaves are the cheapest smoke fuel — short burn, big plume. Useful as a delibe
 | 7 | `AiState::InvestigateCampfire` + nearest-lit-campfire scan | `mob_ai.rs`, `campfire.rs` | ~80 |
 | 8 | Heat-radius gating + player-priority override | `mob_ai.rs` | ~60 |
 | 9 | `/give` extensions + Spec 5 update + foundations README | various | ~30 |
-| 10 | Axolittle playtest gate | – | – |
+| 10 | playtest gate | – | – |
 
 **Total:** ~370 LOC across ~9 build phases.
 
@@ -160,9 +160,9 @@ The "mob can't enter heat zone" is enforced purely by their AI — they walk to 
 - Spec 5 §6.2.1 — add the two baked food values.
 - Foundations README — mark Spec 18 DELIVERED.
 
-### Phase 10 — Axolittle playtest
+### Phase 10 — playtest
 
-Open questions for Axolittle to answer:
+Open questions for the tester to answer:
 - Does the smoke pillar feel readable as a "find me!" signal? Is 6 blocks tall enough?
 - Is the heat-radius mechanic legible — can you "see" why mobs hold at the edge?
 - Big-fire vs small-fire: does the trade-off actually feel like a real choice, or is "always make a big fire" the obvious winner?

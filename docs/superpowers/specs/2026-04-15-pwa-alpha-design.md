@@ -17,7 +17,7 @@ The engine is mature enough for alpha testing (mining, crafting, combat, mobs, w
 
 **Goal**: Any alpha tester opens a browser, scans a QR code with their phone, and plays — with their worlds persisting across sessions and devices. No install, no account creation, no passwords.
 
-**Primary users**: Children (age 8-12) on Chromebooks, tablets, and shared PCs. Axolittle and friends.
+**Primary users**: Children on Chromebooks, tablets, and shared PCs.
 
 ---
 
@@ -485,12 +485,12 @@ Build order follows dependency arrows top-to-bottom.
 - **Exit criteria**: Create world → play → close tab → reopen → world loads from Blossom
 
 ### Phase D: Polish and test
-- Test on Chromebook (Axolittle's device)
+- Test on Chromebook (the tester's device)
 - Test on tablet (touch controls)
 - Test on desktop Chrome (keyboard/mouse)
 - Performance profiling (WASM bundle size, load time, save/upload time)
 - Error handling (network failures, Blossom downtime, auth timeout)
-- **Exit criteria**: Axolittle can play on his Chromebook, world persists
+- **Exit criteria**: The tester can play on their Chromebook, world persists
 
 ---
 

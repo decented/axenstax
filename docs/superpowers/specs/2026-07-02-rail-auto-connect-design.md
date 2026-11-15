@@ -7,7 +7,7 @@
 
 ## Problem
 
-Player report (Axolittle, build 0.2.0): *"when you join tracks blocks, they all
+Player report (the tester, build 0.2.0): *"when you join tracks blocks, they all
 appear as straights in one direction. they should align and also create bends
 where appropriate. The minecraft way will be a good foundation."*
 
@@ -164,7 +164,7 @@ the chunk mesher rather than the generic path. (No `BlockShape::Rail`,
   curved-corner texture is a post-playtest polish option, not required to fix the
   reported bug.
 - Corner-leg overlap/elbow and the exact look are the **visual-judgment** part —
-  expect an Axolittle playtest to confirm the bend reads correctly (see Risks).
+  expect a playtest to confirm the bend reads correctly (see Risks).
 
 ## Carts — unchanged
 
@@ -210,7 +210,7 @@ No changes to `block_shape.rs`, `save.rs`, `protocol.rs`, `cart.rs` movement, or
 
 - **Visual correctness of the corner mesh + texture** is the only real risk and is
   a look-at-it judgment: the auto-connect logic is verified by unit tests, but
-  "does the bend look right / align cleanly with the straights" needs an Axolittle
+  "does the bend look right / align cleanly with the straights" needs a
   playtest. Ship behind `check.sh` green, then playtest the visuals.
 - **Bit-order sanity**: `connection_mask` uses N=−Z, S=+Z, W=−X, E=+X — the shape
   table above is written against that exact convention; verify no axis flip when

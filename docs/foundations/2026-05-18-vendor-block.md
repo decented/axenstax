@@ -1,6 +1,6 @@
 # Vendor Block — placeable player-run shop primitive
 
-**Status:** **DELIVERED 2026-05-20** on `feat/vendor-block`. Phases 2-9 + Phase 10 (docs) shipped solo. Phases 11-14 (multi-slot conversion, reputation gating + trade-value floors, stale-shop expiry, raid-supplies highlight) **DEFERRED** post-playtest — the meta-economy review added them after the original 9-phase scope; the v1 single-slot shape with Charter gating + Buy/Sell/Barter modes is enough to validate the markets-economy lane. Phase 15 = Axolittle playtest gate.
+**Status:** **DELIVERED 2026-05-20** on `feat/vendor-block`. Phases 2-9 + Phase 10 (docs) shipped solo. Phases 11-14 (multi-slot conversion, reputation gating + trade-value floors, stale-shop expiry, raid-supplies highlight) **DEFERRED** post-playtest — the meta-economy review added them after the original 9-phase scope; the v1 single-slot shape with Charter gating + Buy/Sell/Barter modes is enough to validate the markets-economy lane. Phase 15 = playtest gate.
 
 ## TL;DR
 
@@ -180,7 +180,7 @@ When a buyer purchases from your shop while you're online, do you get a notifica
 | 12 | Reputation gating + trade-value floor hints. Buyer-side UI reads `players[pidx].reputation.tier(vid)`; Hostile blocks; Wary/Friendly/Beloved multiply the displayed price; Beloved unlocks a special slot category. Trade-value hint displays in both owner and buyer UI. | `vendor_ui.rs`, `reputation.rs` (uses the existing `reward_multiplier`) | ~250 | ✓ |
 | 13 | Stale-shop expiry — `VendorData.last_txn_tick` field; UI shows "Closed" if `now - last_txn_tick > 7 in-game days`. Owner right-click unfreezes. | `vendor.rs`, `vendor_ui.rs` | ~100 | ✓ |
 | 14 | Raid-supplies highlight — 🛡️ tag on Vendor Blocks within 32 blocks of a warned-or-active raid where the item is on the raid-supplies whitelist. | `vendor_ui.rs`, reads `world.active_raids` (from Raid Defence side-table) | ~80 | ✓ |
-| 15 | Axolittle playtest — kid sets up a 3-slot shop with wheat/bread/iron; friend (P2 split-screen) buys; rep-Hostile prevents purchase from an enemy village's vendor; stale shop turns "Closed" after a saved-then-resumed long break; the village's pending raid lights up the 🛡️ tag on bread + arrow vendors. Confirm Barter mode works on a guardian-disabled session with the trade-value hint visible. | – | – | playtest gate |
+| 15 | playtest — the tester sets up a 3-slot shop with wheat/bread/iron; friend (P2 split-screen) buys; rep-Hostile prevents purchase from an enemy village's vendor; stale shop turns "Closed" after a saved-then-resumed long break; the village's pending raid lights up the 🛡️ tag on bread + arrow vendors. Confirm Barter mode works on a guardian-disabled session with the trade-value hint visible. | – | – | playtest gate |
 
 **Total Phases 2-14:** ~2,160 LOC across 13 build phases (was 9 + ~1,530; meta-economy review added multi-slot conversion + reputation gating + trade-value hints + stale-shop expiry + raid-supplies highlight).
 

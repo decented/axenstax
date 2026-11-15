@@ -1,16 +1,16 @@
-# Furnace UX refinement — Axolittle playtest feedback 2026-05-21
+# Furnace UX refinement — playtest feedback 2026-05-21
 
-**Status**: **DELIVERED 2026-05-21** on `feat/spec29-furnace-ux-refinement`. All three asks shipped: 'E'/Esc closes (no Close button), three clickable slot-buttons with Single/Stack click modes, ore-only smelting (raw-meat arms removed). Legacy meat in v1 saves ejects into `world.pending_legacy_meat_drops` and spawns as ItemEntities on first post-load tick (drain wired into both `GameState::tick` and `GameServer::tick`). Phase 8 (Axolittle playtest gate) is the remaining gate.
+**Status**: **DELIVERED 2026-05-21** on `feat/spec29-furnace-ux-refinement`. All three asks shipped: 'E'/Esc closes (no Close button), three clickable slot-buttons with Single/Stack click modes, ore-only smelting (raw-meat arms removed). Legacy meat in v1 saves ejects into `world.pending_legacy_meat_drops` and spawns as ItemEntities on first post-load tick (drain wired into both `GameState::tick` and `GameServer::tick`). Phase 8 (playtest gate) is the remaining gate.
 **Date**: 2026-05-21
 **Parent spec**: `docs/foundations/2026-05-18-furnace.md` (Spec 20, DELIVERED 2026-05-20)
 **Sibling spec**: `docs/foundations/2026-05-18-campfire.md` (Spec 17 — cooking primitive stays here)
-**Tester**: Axolittle (live playtest 2026-05-21)
+**Tester**: The tester (live playtest 2026-05-21)
 
 ---
 
 ## TL;DR
 
-Axolittle has played the v1 furnace and made three calls that bring it closer to Minecraft's mental model:
+The tester has played the v1 furnace and made three calls that bring it closer to Minecraft's mental model:
 
 1. **'E' closes the furnace UI** (not a Close button). Match inventory close-key behaviour.
 2. **Slot-based drag/drop UI** when right-clicking the furnace — three slots (input / fuel / output), exactly like Minecraft's furnace screen. Replace the current "right-click with item held to insert" pattern.
@@ -24,7 +24,7 @@ Net effect: the furnace becomes Minecraft-recognisable on three dimensions a kid
 
 Spec 20 v1 chose right-click-to-insert because slot-drag UI is a meatier engineering job and the v1 ship pressure favoured a working furnace over a polished one. The deprecation arms (food cooking on furnace) were a transitional convenience — Spec 17 added the proper Campfire cooking primitive but Spec 20 still accepted raw meat to keep the grid-smelt migration smooth.
 
-Both shortcuts are now visible to the player and clash with the Minecraft mental model Axolittle expects. The campfire IS the cook-station; the furnace IS the smelter. Splitting them cleanly clarifies the workstation roster and frees the furnace UI to be a proper menu.
+Both shortcuts are now visible to the player and clash with the Minecraft mental model the tester expects. The campfire IS the cook-station; the furnace IS the smelter. Splitting them cleanly clarifies the workstation roster and frees the furnace UI to be a proper menu.
 
 ---
 
@@ -87,7 +87,7 @@ The campfire (`campfire.rs::tick_one`) already cooks all four raw meats — no m
 
 ## Scope (what's out — deferred)
 
-- **Shift-click chains** (shift-click from inventory → auto-route to correct furnace slot). Nice-to-have but not blocking. Phase 2 if Axolittle asks.
+- **Shift-click chains** (shift-click from inventory → auto-route to correct furnace slot). Nice-to-have but not blocking. Phase 2 if the tester asks.
 - **Hopper-style auto-insertion** from adjacent inventory blocks. Future T2+ farming/transport spec.
 - **Multi-slot inputs/fuels** (Minecraft has one of each; we match). Not deferred to "future" — explicitly not adding.
 - **Furnace v2 textures** — the v1 lit/unlit pair stays.
@@ -106,7 +106,7 @@ The campfire (`campfire.rs::tick_one`) already cooks all four raw meats — no m
 | 5 | Remove the right-click-with-item-to-insert handler for furnaces in `game_loop.rs` (campfire's stays). Test: right-clicking a furnace with raw iron held opens the UI but does NOT insert. Test: slot-click insertion still works. | `game_loop.rs`, `test_integration/furnace_ui.rs` | ~100 | ✓ |
 | 6 | Spec doc updates per §D above. | `docs/spec/05-gameplay-systems.md`, `docs/foundations/2026-05-18-furnace.md`, `docs/foundations/2026-05-18-campfire.md` | ~50 | ✓ |
 | 7 | `./check.sh` ALL GREEN. Texture-gen audit: confirm the furnace textures still match the v1 lit/unlit pair. | – | – | ✓ |
-| 8 | Axolittle playtest gate (next session). Open a furnace, drop iron ore into Input via click-drag, watch it smelt to Iron Ingot, take the ingot out, press 'E' to close. Try raw beef on the furnace — refuses. Take the beef back to the campfire — cooks fine. | – | – | playtest |
+| 8 | playtest gate (next session). Open a furnace, drop iron ore into Input via click-drag, watch it smelt to Iron Ingot, take the ingot out, press 'E' to close. Try raw beef on the furnace — refuses. Take the beef back to the campfire — cooks fine. | – | – | playtest |
 
 **Total Phases 1-7:** ~660 LOC (mostly tests + UI plumbing; recipe-table narrowing is tiny).
 
@@ -119,7 +119,7 @@ The campfire (`campfire.rs::tick_one`) already cooks all four raw meats — no m
 - Furnace v1 saves load cleanly (raw meat ejected as loose entity, no panic).
 - Spec 20 doc has a v2 status section pointing at this spec.
 - Spec 5 furnace surface description reads "ore only" — no raw-meat references.
-- Axolittle confirms: 'E' closes the furnace, slot-click works, food won't smelt.
+- The tester confirms: 'E' closes the furnace, slot-click works, food won't smelt.
 
 ---
 

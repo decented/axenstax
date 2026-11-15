@@ -177,7 +177,7 @@ aim box always matches the pose actually on screen.
 
 #### 6.5a "Base is never transparent" is an INVARIANT, not just an eraser rule (bug fixed 2026-07-31)
 
-**Bug (Axolittle, 2026-07-31):** "the back of the arms on the skins are
+**Bug (the tester, 2026-07-31):** "the back of the arms on the skins are
 trasparent" — a see-through hole in a painted body.
 
 **Root cause:** the rule above was enforced only on the *eraser* path. The

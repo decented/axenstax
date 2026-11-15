@@ -19,7 +19,7 @@
 > for the full design rationale (cyanotype process — Herschel 1842 +
 > Anna Atkins 1843).
 
-**Status:** **DELIVERED 2026-05-20** across three branches (`feat/build-schematics-core` → `feat/build-schematics-phase-5` → `feat/build-schematics-phase-8`). All solo phases (1-16) green; Phase 17 = Axolittle playtest gate. Final close-out branch flips Phase 6 (Save-As derivation — content-hash + 50%-block match + Master-only guard, dialog checkbox, derivation-chain prepend) and Phase 8 (Wireframe ghost preview + Q/E rotation + tri-state colour tint + raycast anchor + left-click commit + right-click cancel) from deferred to done.
+**Status:** **DELIVERED 2026-05-20** across three branches (`feat/build-schematics-core` → `feat/build-schematics-phase-5` → `feat/build-schematics-phase-8`). All solo phases (1-16) green; Phase 17 = playtest gate. Final close-out branch flips Phase 6 (Save-As derivation — content-hash + 50%-block match + Master-only guard, dialog checkbox, derivation-chain prepend) and Phase 8 (Wireframe ghost preview + Q/E rotation + tri-state colour tint + raycast anchor + left-click commit + right-click cancel) from deferred to done.
 **Branch:** `feat/build-schematics-core` off `main` (post-Spec-23).
 **Trigger:** Foundation **B** of the Build Schematics economy (`docs/vision/build-schematics-long-run.md`). Implements Phases 1, 2, and 4 of the vision doc's six-phase lifecycle (Author / Inspect / Player-Self-Build) — no trade economy yet (Spec 25), no NPC commission (Spec 26), no procgen (Spec 27).
 
@@ -53,7 +53,7 @@ A player lays Plan Tiles around a building, right-clicks any tile with empty han
 | 14 | `/give` debug aliases — plan_tile / construction_anchor / architect_plaque / debug plan | `commands/builtins/give.rs` | ~40 |
 | 15 | PROTOCOL_VERSION 16 → 17 with history note | `protocol.rs`, `test_integration/handshake.rs` | ~10 |
 | 16 | Spec 5 §3.13 Build Schematics subsection + foundations README + vision doc flip | `docs/spec/05-gameplay-systems.md`, `docs/foundations/README.md`, `docs/vision/build-schematics-long-run.md` | ~80 |
-| 17 | Axolittle playtest — capture → place → animated build → plaque round-trip; Save-As derivation; multi-licence scenarios | n/a | 0 |
+| 17 | playtest — capture → place → animated build → plaque round-trip; Save-As derivation; multi-licence scenarios | n/a | 0 |
 
 **Total**: ~2,000 LOC including tests. Phases 2-16 autonomous. Phase 17 is the playtest gate.
 
@@ -66,7 +66,7 @@ Recommended order: 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 →
 - **Largest single piece of the Build Schematics economy.** Specs 25/26/27 all consume what this spec ships (Plan item, Plaque, capture). This is the meaningful first ship — players can capture + self-build + derive + plaque-credit with no economy yet.
 - **Closes the vision-doc lifecycle Phases 1, 2, and 4.** Author / Inspect / Player-Self-Build complete. Trade (Phase 3) is Spec 25, NPC (Phase 5) is Spec 26, procgen (Phase 6) is Spec 27 — each shipping independently after this.
 - **Cross-game lift, per shared infra strategy.** Plan-item + connectivity-flood-fill capture + Master/Licence/Derivative tier model + CC-licence enum + Plaque derivation chain + ghost preview + animated builder — all engine-generic. The specific recipe (1 stick + 1 paper → 4 tiles), the licence default (CC-BY-SA), and the build cadence (2/tick) are AxeNStax-specific data.
-- **Foundation for the kid-creator economy.** Once shipped, Axolittle can capture his own builds and replay them anywhere. The Plaque carries his attribution forever. Even pre-sats, that's a real creative tool.
+- **Foundation for the kid-creator economy.** Once shipped, the tester can capture their own builds and replay them anywhere. The Plaque carries their attribution forever. Even pre-sats, that's a real creative tool.
 
 ---
 
@@ -118,7 +118,7 @@ A plan is a template, not a teleport. The survival player must still gather ever
 - `game/engine/src/save.rs::WorldMeta`
   - `#[serde(default)] pub has_seen_license_onboarding: bool` — first-time-modal trigger. **(2026-06-22 fix)** The source of truth moved to `GraphicsSettings::has_seen_license_onboarding` (per-device, cross-platform persisted — localStorage on web, `settings.json` native) because the per-world meta flag was **never persisted on WASM**, so the CC-BY-SA modal re-blocked the capture dialog every web session ("i can't save any blueprints"). Load now reads `meta.has_seen_license_onboarding || graphics.has_seen_license_onboarding` (native legacy worlds still honoured); dismiss writes the graphics flag (both platforms) and keeps the meta flag in sync on native.
 - `game/engine/src/player_slot.rs::PlayerSlot`
-  - `pub last_chosen_license: Option<PlanLicense>` (transient, not persisted — alpha-tunable to per-save persistence if Axolittle wants it sticky across sessions).
+  - `pub last_chosen_license: Option<PlanLicense>` (transient, not persisted — alpha-tunable to per-save persistence if the tester wants it sticky across sessions).
 - `game/engine/src/protocol.rs`
   - `PROTOCOL_VERSION 16 → 17`. Version-history entry.
 - `game/engine/src/game_loop.rs`
@@ -772,9 +772,9 @@ Drift-audit re-read finds no contradictions.
 
 ---
 
-## Phase 17 — Axolittle playtest (BLOCKED on his time)
+## Phase 17 — playtest (BLOCKED on tester time)
 
-### What he's evaluating
+### What they're evaluating
 
 - **Capture round-trip** — lay tiles, build on top, right-click empty hand → plan in inventory. Feels intuitive?
 - **License picker** — does the CC-BY-SA default feel right? Does the onboarding modal land?

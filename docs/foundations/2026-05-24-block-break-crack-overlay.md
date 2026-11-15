@@ -2,7 +2,7 @@
 
 **Status: DELIVERED — 2026-05-24** (engine + specs on main; pending owner visual
 check). 1732 tests (+9: 7 `crack_stage`, 2 texture). `check.sh` ALL GREEN.
-**Owner ask:** Axolittle/Staxolottle noticed survival mining gives *no* visual
+**Owner ask:** the tester/Staxolottle noticed survival mining gives *no* visual
 feedback — blocks take multiple hits but look untouched until they vanish.
 Minecraft shows a crack pattern that deepens until the block breaks. Spec 05
 §2.2 already requires a 10-stage crack overlay; the mechanic exists, only the

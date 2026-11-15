@@ -1,7 +1,7 @@
 # Loading Screen Overhaul — Design
 
 **Date:** 2026-06-17
-**Status:** BUILT 2026-06-17 (branch `feat/loading-screen-overhaul`, 6 tasks, 2723 engine tests green; awaiting Axolittle feel playtest). Approved (owner: "smash it all", 2026-06-17)
+**Status:** BUILT 2026-06-17 (branch `feat/loading-screen-overhaul`, 6 tasks, 2723 engine tests green; awaiting the tester feel playtest). Approved (owner: "smash it all", 2026-06-17)
 
 **Build deltas vs. design:**
 - `begin_load()` takes no params (load centre derived from the restored/placed
@@ -139,7 +139,7 @@ All easy to adjust in playtest.
   - JSON parse — the bundled `loading_tips.json` parses into ≥1 card and every
     card has non-empty title/body and a valid `kind`.
 - **Feel** (voxel art, animation smoothness, whether 5s/6s feel right, queasiness)
-  is the **Axolittle playtest boundary** — can't be verified solo.
+  is the **playtest boundary** — can't be verified solo.
 
 ## Risk
 

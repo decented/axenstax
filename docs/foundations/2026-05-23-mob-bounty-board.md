@@ -1,6 +1,6 @@
 # Mob Bounty Board — first combat economy primitive
 
-**Status:** Phases 2-12 DELIVERED 2026-05-23 on `feat/mob-bounty-board`. Phase N = Axolittle playtest gate (open). Includes reviewer-pass fix persisting `kill_counter` + `bounties_claimed` so bounty progress survives save+quit.
+**Status:** Phases 2-12 DELIVERED 2026-05-23 on `feat/mob-bounty-board`. Phase N = playtest gate (open). Includes reviewer-pass fix persisting `kill_counter` + `bounties_claimed` so bounty progress survives save+quit.
 **Branch:** `feat/mob-bounty-board` off `main`.
 **Trigger:** Goal-driven solo dev cycle. Picked from `docs/vision/economies-long-run.md` §6.1 — "Mob Bounty Board (T2 — first combat economy spec)" — as the smallest, most self-contained, highest-leverage opener for the combat economy lane. Sits parallel to (and uses) the just-shipped last-attacker kill attribution (merge `7f6de9d`).
 
@@ -212,9 +212,9 @@ Integration tests in `test_integration/bounty.rs`:
 | 11 | PROTOCOL_VERSION 30 → 31 + handshake history line | `protocol.rs`, `test_integration/handshake.rs` | ~10 |
 | 12 | Integration tests (5 in `test_integration/bounty.rs`) | new `test_integration/bounty.rs`, `test_integration/mod.rs` | ~180 |
 | 13 | Doc-flip + queue README row | `docs/foundations/2026-05-23-mob-bounty-board.md`, `docs/foundations/README.md` | 0 (docs) |
-| N | Axolittle playtest gate — bounty discoverability + claim feel + reward balance | n/a | n/a |
+| N | playtest gate — bounty discoverability + claim feel + reward balance | n/a | n/a |
 
-**Phases 2–12 are solo-buildable.** Phase N (playtest) is Axo-gated and stops the build.
+**Phases 2–12 are solo-buildable.** Phase N (playtest) is playtest-gated and stops the build.
 
 ---
 

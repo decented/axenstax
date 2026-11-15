@@ -160,7 +160,7 @@ All three reuse the existing Villager mesh — only the colour palette differs. 
 | 9 | Entity model tier palettes + banner texture | `entity_model.rs`, `texture_gen.rs` | ~120 |
 | 10 | Tests (per-tier drops + flee gate + day-aggressive gate + hideout layout deterministic + village-distance gate + stockpile loot range + repopulation cooldown) | various `*::tests` modules | ~280 |
 | 11 | Docs (HP-3 spec → DELIVERED, README flip, Spec 5 §3 mobs section append for the three new tiers) | docs | ~30 |
-| 12 | Axolittle playtest | — | — |
+| 12 | playtest | — | — |
 
 **Total**: ~1,780 LOC across 10 build phases + 1 playtest gate. Single PR.
 
@@ -225,7 +225,7 @@ All three reuse the existing Villager mesh — only the colour palette differs. 
 - Berserkers chase in daylight.
 - Killing the Berserker drops `BrigandChieftainTrophy` 100 % of the time; the `Item::name` reads "Brigand Chieftain Trophy" and renders in the inventory.
 - Population decrements as brigands die; after the 24 000-tick cooldown the hideout respawns missing mobs.
-- Phase 12: Axolittle playtest confirms the encounter loop — hideouts are findable, satisfying to clear, and the Berserker fight feels distinct from a Marauder fight.
+- Phase 12: playtest confirms the encounter loop — hideouts are findable, satisfying to clear, and the Berserker fight feels distinct from a Marauder fight.
 
 ---
 
@@ -241,7 +241,7 @@ All three reuse the existing Villager mesh — only the colour palette differs. 
 
 ## v2 polish round (DELIVERED 2026-05-23 on main)
 
-Five PRs landed as a polish round after the HP-6 cutover, lifting items from the original Out-of-scope list. They share a single test gate (1530 tests total post-round) — Phase 12 (Axolittle playtest) covers the lot.
+Five PRs landed as a polish round after the HP-6 cutover, lifting items from the original Out-of-scope list. They share a single test gate (1530 tests total post-round) — Phase 12 (playtest) covers the lot.
 
 - **PR #94 (df3a8f1)** — Day/night chase gating (see tier table). Brigand + Marauder skip the chase-promotion arm during daytime; Berserker bypasses. `is_night_at(world_time)` reuses the 0.3 brightness threshold from `spawning`.
 - **PR #95 (b76ccbe)** — Not strictly HP-3, but lands here for context: `entity::scatter_mobs_in_column` now reads `mob::biome_passive_spawn_weights` instead of a hardcoded Cow/Sheep/Pig/Chicken table, so Spec 28d's passive roster + HP-2's Bear/Hyena + 28d.nostrich's Nostrich actually spawn in fresh worlds. Squid water gate + Hyena pack-spawn + Nostrich family group all wire through the same pure picker.

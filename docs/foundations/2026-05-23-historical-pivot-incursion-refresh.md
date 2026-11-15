@@ -98,7 +98,7 @@ Wave composition is server-side data; mob discriminants already on the wire from
 | 5 | Update existing Spec 22 composition tests to match the new mob mixes | `raid.rs::tests` | ~80 |
 | 6 | New tests: tier-content checks (each kind has expected mob mixes), totals still match `total_mobs`, no fantasy MobTypes in composition | `raid.rs::tests` | ~70 |
 | 7 | Docs (HP-5 spec → DELIVERED, README flip, vision doc spec 22 callout) | docs | ~20 |
-| 8 | Axolittle playtest | — | — |
+| 8 | playtest | — | — |
 
 **Total**: ~300 LOC. Tiny PR.
 
@@ -157,7 +157,7 @@ Wave composition is server-side data; mob discriminants already on the wire from
 - A test-world raid produces brigand mobs (Brigand/Marauder/Berserker), no fantasy mobs.
 - Wave totals still match `WaveKind::total_mobs` (5 / 10 / 20).
 - A wave-spawned Brigand at low HP keeps chasing (no `HomeHideout`-stall path).
-- Phase 8 (playtest): Axolittle confirms the raid feels human now — brigands feel different to fight than the fantasy mobs did; Berserker-led pushes have weight.
+- Phase 8 (playtest): The tester confirms the raid feels human now — brigands feel different to fight than the fantasy mobs did; Berserker-led pushes have weight.
 
 ---
 
@@ -174,7 +174,7 @@ Wave composition is server-side data; mob discriminants already on the wire from
 
 - Raid spawn origin shifting from village perimeter to nearest Brigand Hideout — v2.
 - Multi-round raids — Spec 22 explicitly deferred this; HP-5 doesn't change that.
-- Per-tier raid composition tuning post-playtest — adjust the table once Axo's seen waves play out.
+- Per-tier raid composition tuning post-playtest — adjust the table once the tester's seen waves play out.
 - Renaming `raid.rs` to `incursion.rs` — code-history continuity > display naming.
 
 ---

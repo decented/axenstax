@@ -14,7 +14,7 @@ sun-printed cyanotype (separate spec, `2026-05-27-blueprint-cyanotype.md`).
 PWA/WASM + native.
 
 **Playtest bugfix 2026-05-28 — flowers were too big and couldn't be picked.**
-Two latent bugs surfaced the moment Axolittle tried to harvest a wild flower:
+Two latent bugs surfaced the moment the tester tried to harvest a wild flower:
 
 1. **Sizing.** `mesh::non_solid_shape_for` had no bespoke entry for the
    flowers — they fell through to the catch-all default `(0.12..0.88, 0..1.0,
@@ -34,7 +34,7 @@ Two latent bugs surfaced the moment Axolittle tried to harvest a wild flower:
 
 Regression tests pin both behaviours: `raycast::tests::ray_hits_flower_block`,
 `raycast::tests::ray_passes_through_water`, `mesh::tests::wild_flowers_have_compact_shape`.
-**Driver:** Axolittle. **Captured by:** Staxolottle's call to "do all the
+**Driver:** the tester. **Captured by:** Staxolottle's call to "do all the
 colours we'll need" but via *primary colours you mix*, not a flower per
 colour. Text-only design (no visual companion) per owner, 2026-05-27.
 
@@ -42,7 +42,7 @@ colour. Text-only design (no visual companion) per owner, 2026-05-27.
 
 This fell out of the Build Schematics work. We wanted the captured **Plan**
 ("blueprint") to read blue like a real blueprint, but recolouring ancient
-papyrus blue is an anachronism. Axolittle's instinct fixed it: **you should
+papyrus blue is an anachronism. The tester's instinct fixed it: **you should
 get a flower, craft it into dye, then use the dye** — and rather than a
 separate flower for every colour, grow a few **primary** flowers and **mix**
 them. That earns the blue in-world (you dyed the paper) and opens a whole
@@ -199,7 +199,7 @@ So Phase 2's dye consumers point at **coloured paper + décor**, not at Plans.
   matches and the two paths to each secondary agree; quantity conservation;
   the full 16-colour set is reachable from the 5 base dyes; Blue-Dye+papyrus
   → blue Plan grade.
-- **Playtest boundary (Axolittle):** flower spawn density/feel, dye colours
+- **Playtest boundary (the tester):** flower spawn density/feel, dye colours
   reading right, the blue blueprint looking like a blueprint, and whether the
   mixing chart is intuitive without a recipe book.
 - `check.sh` green; engine + WASM build.

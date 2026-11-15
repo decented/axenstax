@@ -333,4 +333,4 @@ Target 3 tests.
 - The headless harness is reusable by Spec 1 and Spec 2 implementers — they don't build their own.
 - `./check.sh` still under 30 seconds.
 - CLAUDE.md has a "Testing" note pointing at `src/test_integration/` (and the per-module `#[cfg(test)] mod tests` blocks) as the onboarding for new tests. The `tests/common/` layout from the original spec sketch was replaced by in-bin `#[cfg(test)]` modules per the "Structural reality" note above.
-- Future refactors (starting with Spec 2) have a safety net: break a subsystem, a test fires, you know before Axolittle does.
+- Future refactors (starting with Spec 2) have a safety net: break a subsystem, a test fires, you know before the tester does.

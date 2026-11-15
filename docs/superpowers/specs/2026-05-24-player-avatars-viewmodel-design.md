@@ -225,7 +225,7 @@ green before any merge. **The *feel* cannot be verified solo:** animation
 smoothness, swing timing, viewmodel placement/scale, avatar readability, and
 multiplayer behaviour all need eyes on a running client (and ideally a second
 client / split-screen). Per the standing autonomy boundary, the build stops at that
-point with a **test sheet** (`docs/test-sheets/`) enumerating what Axolittle should
+point with a **test sheet** (`docs/test-sheets/`) enumerating what the tester should
 check, rather than claiming visual success.
 
 ---

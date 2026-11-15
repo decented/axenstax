@@ -126,7 +126,7 @@ The MVP is **Tasks A, B, C** (and optionally D if the insertions are one-edit-cl
 6. **No save/protocol drift:** `save.rs` `WorldMeta` is unchanged; existing save round-trip tests still pass; no protocol version bump.
 
 **Requires the voluntary-player fun test (NON-negotiable gate — north-star §8):**
-7. **The theme reads as enrichment, not gating** — a non-coerced player (ideally a non-family kid) still has fun mining/building, *and* the founding framing lands as "cool, my world has a story" rather than confusing or preachy. This is a *vibe* check, not a unit test, and it is the gate before any Phase B/C cathedral work. (See `feedback_axolittle_coerced_not_fun_signal` — a coerced tester is a bug oracle, not a fun oracle.)
+7. **The theme reads as enrichment, not gating** — a non-coerced player (ideally a non-family kid) still has fun mining/building, *and* the founding framing lands as "cool, my world has a story" rather than confusing or preachy. This is a *vibe* check, not a unit test, and it is the gate before any Phase B/C cathedral work. (See `feedback_coerced_play_not_fun_signal` — a coerced tester is a bug oracle, not a fun oracle.)
 
 ---
 

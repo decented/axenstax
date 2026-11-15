@@ -11,7 +11,7 @@
 
 ### Honest risks of doing this now
 
-1. **The game might change significantly.** Axolittle hasn't tested split-screen yet. His feedback could trigger big refactors. Porting to web before the gameplay stabilises means porting twice.
+1. **The game might change significantly.** the tester hasn't tested split-screen yet. Their feedback could trigger big refactors. Porting to web before the gameplay stabilises means porting twice.
 
 2. **Maintenance burden doubles.** Every engine change needs testing on both native and web. Touch controls are a separate input path that needs maintaining.
 
@@ -21,7 +21,7 @@
 
 ### Honest reasons to do it now anyway
 
-1. **The alpha tester can't play.** Her Chromebook doesn't support Crostini. Without the web build, she has no access. Broken feedback loop for half the test team.
+1. **The alpha tester can't play.** Their Chromebook doesn't support Crostini. Without the web build, they have no access. Broken feedback loop for half the test team.
 
 2. **The codebase is surprisingly web-ready.** After auditing:
    - Filesystem access is ONLY in `save.rs` — one file to stub
@@ -41,7 +41,7 @@
 
 ### Verdict: Do it, but MINIMAL viable web build
 
-Don't build the full Phase 4 web client (asset streaming, WebRTC multiplayer, PWA, offline mode). Build the minimum that gets her playing:
+Don't build the full Phase 4 web client (asset streaming, WebRTC multiplayer, PWA, offline mode). Build the minimum that gets them playing:
 
 - Engine renders in Chrome via WebGPU
 - Touch controls work (move, look, break, place, jump)
@@ -257,9 +257,9 @@ The website at `https://192.168.1.10:8094` could serve the web build directly �
 
 ---
 
-## What She Gets (MVP)
+## What They Get (MVP)
 
-- Opens Chrome on her Chromebook
+- Opens Chrome on their Chromebook
 - Goes to `https://192.168.1.10:8094/play`
 - Game loads in the browser (no install)
 - Touch controls: virtual joystick to move, drag to look, tap to break/place
@@ -307,15 +307,15 @@ That's enough to play, test, and give feedback. Save, audio, and multiplayer com
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| WebGPU not available on her Chrome | Low (Chrome 113+ has it) | Blocks entirely | Check `chrome://gpu` first |
+| WebGPU not available on their Chrome | Low (Chrome 113+ has it) | Blocks entirely | Check `chrome://gpu` first |
 | Chromebook GPU too weak | Medium | Poor framerate | Reduce render distance, lower resolution |
-| Touch controls feel bad | Medium | She won't play | Iterate based on her feedback — she's the tester |
+| Touch controls feel bad | Medium | They won't play | Iterate based on their feedback — they're the tester |
 | wgpu WASM build has bugs | Low-Medium | Build fails | wgpu WASM is well-tested, large community |
 | Game changes break web build | Low | Re-test needed | CI can run `cargo check --target wasm32-unknown-unknown` |
 
 ### Pre-flight check (before building)
 
-On her Chromebook, open Chrome and go to `chrome://gpu`. Look for:
+On their Chromebook, open Chrome and go to `chrome://gpu`. Look for:
 - **WebGPU**: should say "Enabled" or "Hardware accelerated"
 - **Graphics Backend**: should show the GPU model
 
@@ -329,11 +329,11 @@ If the GPU is listed as "Software only" — the Chromebook's GPU is too weak and
 
 **Do the MVP web build.** It's ~570 lines, 6 sessions, and it unblocks the alpha tester. The engine is already 95% web-compatible — only the edges need gating. Don't build Phase 4 features (PWA, save, audio, multiplayer). Just get the game rendering in Chrome with touch controls.
 
-**But do it AFTER Axolittle tests split-screen.** His feedback might change the game loop, input system, or HUD — all of which affect the web build. Let him test first (native, on his Linux Mint), incorporate his feedback, then port to web for her.
+**But do it AFTER the tester tests split-screen.** Their feedback might change the game loop, input system, or HUD — all of which affect the web build. Let them test first (native, on their Linux Mint), incorporate their feedback, then port to web for them.
 
 **Sequence:**
-1. Axolittle tests split-screen on Linux Mint (now)
-2. Fix anything he finds (next session)
+1. The tester tests split-screen on Linux Mint (now)
+2. Fix anything they find (next session)
 3. Build WASM MVP (session after that)
-4. She tests on Chromebook (immediately after)
-5. Iterate on touch controls based on her feedback
+4. They test on Chromebook (immediately after)
+5. Iterate on touch controls based on their feedback

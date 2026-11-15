@@ -208,7 +208,7 @@ economy are what's left of Phase 3.
   hasn't yet been run for real between two separate homes. See
   **[Play with a friend online](play-with-a-friend-online.md)**.
 - **Single-player → server unification** — single-player still runs a slightly different
-  simulation path from multiplayer. Merging them is a high-risk refactor that wants Axolittle
+  simulation path from multiplayer. Merging them is a high-risk refactor that wants a tester
   present for phase-by-phase regression.
 - **Real-money layer** — not built, and not promised. Nothing in the game converts to money.
   Satori veins use a real Proof-of-Play hash, and the Genesis Block is live, as educational

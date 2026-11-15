@@ -79,7 +79,7 @@ These ride inside `WorldSave`/`WorldMeta`, so they persist on reload **and trave
 1. **Feature A** → check.sh green → deploy. (Round-trip test is the key gate.)
 2. **Feature B** → check.sh green → deploy. (Generation unit tests per ground type; meta round-trip test.)
 
-Each ships independently. Feel/UX (does the dialog read well for a kid, does a water canvas feel right) is the Axolittle playtest boundary.
+Each ships independently. Feel/UX (does the dialog read well for a kid, does a water canvas feel right) is the playtest boundary.
 
 ## Out of scope / deferred (YAGNI for v1)
 - Finite platform size / custom sky colour / configurable water-bottom block.

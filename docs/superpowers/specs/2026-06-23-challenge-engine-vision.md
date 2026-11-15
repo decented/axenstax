@@ -14,9 +14,9 @@ rethink where this lives in the app — **get rid of the "test" column**, give
 **experiences** their own discovery flow, and give **challenges** their own
 column with a **better name than "Lab."**
 
-Builds on the validated signal: **Hash Dash got Axo the most engaged** of
+Builds on the validated signal: **Hash Dash got the tester the most engaged** of
 anything we've shipped — un-coerced. Speed works. ([[project_play_modes_shipped]],
-the `scenario` system, and [[feedback_axolittle_coerced_not_fun_signal]]: the
+the `scenario` system, and [[feedback_coerced_play_not_fun_signal]]: the
 only real fun-signal is unprompted replay, which Hash Dash got.)
 
 ---
@@ -28,7 +28,7 @@ every run fuzzes the engine. So we never *ask* a kid to test — we make genuine
 fun challenges that, as a by-product, exercise the systems we need exercised,
 and we **harvest** the signal (completions, crashes, timings, frame-time, which
 features got touched) rather than demand a verdict. Testing becomes exhaust, not
-homework. This is what stops it burning Axo out and lets us pull the **fun
+homework. This is what stops it burning the tester out and lets us pull the **fun
 lever** to bring other kids in — most of whom don't care about sovereignty yet
 because they haven't been burned. Fun is the acquisition lever; **ownership** is
 the retention lever; **sovereignty** is the meaning that reveals itself once
@@ -184,7 +184,7 @@ we never lecture it.
 - **Phase 1 — prove the loop (smallest fun thing).** A ⚡ Race trial on the
   existing `ScenarioDef`: fixed Adventure arena, par-time, **personal best +
   your-own-ghost**. No sharing, no votes, no verdict. Ship it; watch one
-  non-Axo kid. If they replay to shave a second, the thesis holds.
+  player who isn't the tester. If they replay to shave a second, the thesis holds.
   - **P1 COMPLETE 2026-06-23** (origin/main `df66efcc`): `/trial [list|<id>|off]`
     launches a Race — teleports you to the start, plants a bright finish beacon,
     times the run, saves a **personal best that persists per-device** (native

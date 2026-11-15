@@ -1,6 +1,6 @@
 # Historical Pivot — Sub-Foundation 7: Miller / Baker / Brewer Professions
 
-**Status:** DELIVERED 2026-05-23 on `feat/historical-pivot-sub7-miller-baker-brewer`. Phase 9 (Axolittle playtest gate) is the remaining open task. **Prerequisite:** none beyond HP-0 (Naming Pass — provides `Profession::Scribe` rename which this sub matches in style). **Independent** of HP-2/3/4/5/6 — touches `villager.rs` + `quest.rs` + `plan_registry.rs` + `village_gen.rs` only.
+**Status:** DELIVERED 2026-05-23 on `feat/historical-pivot-sub7-miller-baker-brewer`. Phase 9 (playtest gate) is the remaining open task. **Prerequisite:** none beyond HP-0 (Naming Pass — provides `Profession::Scribe` rename which this sub matches in style). **Independent** of HP-2/3/4/5/6 — touches `villager.rs` + `quest.rs` + `plan_registry.rs` + `village_gen.rs` only.
 **Branch:** `feat/historical-pivot-sub7-miller-baker-brewer` off `main`.
 **Trigger:** Sub-foundation **7** of the [Historical Pivot Long-Run](../vision/historical-pivot-long-run.md). Adds vocational depth to villages by giving the existing Mill / Oven / Aging Rack workstations dedicated professions.
 
@@ -176,7 +176,7 @@ Place these BEFORE the existing `FURNACE` / `CAMPFIRE` / `TILLED_SOIL` arms in p
 | 6 | Spec 27 `infer_category` 3 new arms + 3 new unit tests | `plan_registry.rs` | ~40 |
 | 7 | Tests (per-profession claim/display/gossip; quest_pool_for returns Some for each; procgen sampling produces all 3) | various | ~80 |
 | 8 | Docs (HP-7 spec → DELIVERED, README HP-7 row flip) | docs | ~25 |
-| 9 | Axolittle playtest gate (visit a village with a Mill/Oven/Aging Rack; right-click villager; verify profession + quest + gossip work) | — | — |
+| 9 | playtest gate (visit a village with a Mill/Oven/Aging Rack; right-click villager; verify profession + quest + gossip work) | — | — |
 
 **Total**: ~275 LOC across 7 build phases + 1 playtest gate. Single PR.
 
@@ -188,7 +188,7 @@ Place these BEFORE the existing `FURNACE` / `CAMPFIRE` / `TILLED_SOIL` arms in p
 - Doesn't add new mobs, animals, or threat types.
 - Doesn't touch HP-2/3/4/5 surfaces (Bears, Hyenas, Brigands, Knights, Wave Refresh).
 - Doesn't fix `scatter_mobs_in_column` broader passive-mob spawn issue.
-- Doesn't add workstation-proximity gating for Make quests (same deferral as Spec 19 Phase 9 / Spec 20 Phase 9 — needs Axolittle UX air for radius + duration tuning).
+- Doesn't add workstation-proximity gating for Make quests (same deferral as Spec 19 Phase 9 / Spec 20 Phase 9 — needs tester UX air for radius + duration tuning).
 - Doesn't add Cooper / Tanner / Fletcher / Mason — those are possible Sub 8+ additions if a future foundation needs them.
 - Doesn't add per-profession unique recipes — Miller doesn't unlock new milling recipes, just claims the Mill.
 - Doesn't add profession-specific clothing/skins — visual polish; defer.

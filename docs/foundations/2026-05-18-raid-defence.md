@@ -1,6 +1,6 @@
 # Raid Defence (T3) — village raid encounters + defender bounties
 
-**Status:** **Phases 2-13 DELIVERED 2026-05-22** on `feat/spec-22-raid-defence`. Phase 7's smoke-pillar visual red-shift (the originally-deferred half) **DELIVERED 2026-05-22** on `feat/spec-22-smoke-redshift`. **Phases 15-18 DELIVERED 2026-05-22** on `feat/spec-22-enhancements` (pre-raid villager gossip override, rare-loot tiered drops per wave kind, Vendor Block raid-supplies 🛡 badge, per-village per-player raid-kill leaderboard with save/load). Phase 14 (multi-wave MVP) remains deferred per the controller's "single-round MVP only" call. Phase 19 = Axolittle playtest gate. **Prerequisite:** Spec 19 Villages & Villagers (DELIVERED 2026-05-18 + playtest pending).
+**Status:** **Phases 2-13 DELIVERED 2026-05-22** on `feat/spec-22-raid-defence`. Phase 7's smoke-pillar visual red-shift (the originally-deferred half) **DELIVERED 2026-05-22** on `feat/spec-22-smoke-redshift`. **Phases 15-18 DELIVERED 2026-05-22** on `feat/spec-22-enhancements` (pre-raid villager gossip override, rare-loot tiered drops per wave kind, Vendor Block raid-supplies 🛡 badge, per-village per-player raid-kill leaderboard with save/load). Phase 14 (multi-wave MVP) remains deferred per the controller's "single-round MVP only" call. Phase 19 = playtest gate. **Prerequisite:** Spec 19 Villages & Villagers (DELIVERED 2026-05-18 + playtest pending).
 
 > **2026-07-12 — kill-attribution verified live + dead helper removed.** The
 > wave-hardening backlog (2026-07-07) carried "raid kill-attribution + bounty
@@ -188,7 +188,7 @@ A village with >= 3 villagers + >= 5 houses spawns iron golems automatically. Th
 | 16 | Rare-loot tiered drops per wave kind. Small / Medium / Large drop tables. Items always; sats are an extra in Bitcoin mode. | `raid.rs`, `mob.rs` (extend `drops_for` for raid context) | ~120 | ✓ |
 | 17 | Vendor Block raid-supplies hook. When a raid is warned, every Vendor Block within 32 blocks of the anchor with a whitelisted item gets the 🛡️ tag in the buyer UI. Spec'd as Phase 14 of the Vendor Block spec — this Raid Defence spec just exposes `world.active_raids` cleanly so Vendor Block can read it. | `raid.rs` (expose query function), Vendor Block spec consumes | ~30 | ✓ |
 | 18 | Raid leaderboard at the village (small social hook). Per-village per-player kill-count side-table; villager dialogue exposes top-3 defenders. | `raid.rs`, `villager_ui.rs` | ~80 | ✓ |
-| 19 | Axolittle playtest — accumulate village treasury via quests (kid sees 80 % to wallet, 20 % to village); wait for a raid roll to fire 1-2 days ahead via a villager's gossip line; defend the 2 waves; claim items + rep + sats bounty; verify rep tier shifted; check the leaderboard shows the kid's kill contribution. | – | – | playtest gate |
+| 19 | playtest — accumulate village treasury via quests (the tester sees 80 % to wallet, 20 % to village); wait for a raid roll to fire 1-2 days ahead via a villager's gossip line; defend the 2 waves; claim items + rep + sats bounty; verify rep tier shifted; check the leaderboard shows the tester's kill contribution. | – | – | playtest gate |
 
 **Total Phases 2-18:** ~2,020 LOC across 17 build phases (was 11 + ~1,510; meta-economy review added treasury inflow rules, multi-wave MVP, pre-raid rumours, rare-loot tiers, Vendor Block hook surface, raid leaderboard).
 

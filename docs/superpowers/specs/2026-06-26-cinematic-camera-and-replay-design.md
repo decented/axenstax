@@ -1,12 +1,12 @@
 # Cinematic Camera & Replay — design
 
 **Date:** 2026-06-26
-**Status:** Design approved (owner + Axolittle). No code until a build phase is green-lit.
+**Status:** Design approved (owner + the tester). No code until a build phase is green-lit.
 **Codename:** TBD ("Reel" / "Cinema" / "Director" — open item).
 
 ## Why
 
-The near-term opportunity is **getting AxeNStax in front of YouTubers / content creators**. To make that real we need first-class tools for capturing good footage — the equivalent of Minecraft's Freecam / Replay Mod, but built in rather than bolted on. Beyond outreach, a downloadable, re-directable multiplayer replay is **content-engine fuel**: highlight reels, tournament VODs, "watch the match from any angle" — which feeds straight into the Showcase / Challenge-Engine UGC direction. Axolittle's framing: *"every multiplayer game is recordable footage anyone can re-cut."*
+The near-term opportunity is **getting AxeNStax in front of YouTubers / content creators**. To make that real we need first-class tools for capturing good footage — the equivalent of Minecraft's Freecam / Replay Mod, but built in rather than bolted on. Beyond outreach, a downloadable, re-directable multiplayer replay is **content-engine fuel**: highlight reels, tournament VODs, "watch the match from any angle" — which feeds straight into the Showcase / Challenge-Engine UGC direction. The tester's framing: *"every multiplayer game is recordable footage anyone can re-cut."*
 
 ### Why this is a differentiator (not a me-too)
 
@@ -120,7 +120,7 @@ The replay **file format is source-agnostic**: an initial snapshot + a timeline 
 - **Multiplayer, client-side** — tee the inbound `StateUpdate` stream the client already receives. Zero server cost, but only captures **what was streamed to you** (your view distance).
 - **Multiplayer, server-side (the headline)** — the server logs the authoritative full session and makes it downloadable. This is what delivers "follow anyone, anywhere." Heavier (storage + a download path + operator opt-in).
 
-**Record-live / direct-after** (Axolittle's framing): recording is a passive capture during live play; *all* the heavy direction happens offline against the file. This is what makes MP replay tractable — the client/server is already producing this data; recording just keeps a copy.
+**Record-live / direct-after** (the tester's framing): recording is a passive capture during live play; *all* the heavy direction happens offline against the file. This is what makes MP replay tractable — the client/server is already producing this data; recording just keeps a copy.
 
 ## Use cases (what people actually do with it)
 

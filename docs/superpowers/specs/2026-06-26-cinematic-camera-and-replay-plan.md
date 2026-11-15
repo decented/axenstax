@@ -163,7 +163,7 @@ Four phases. Phase 1 is fully self-contained and green-able unattended. Each pha
 
 **Phase 1 files:** `camera_path.rs` (new), `director.rs` (new), `main.rs`, `input.rs`, `game_loop.rs` (2913-2957, 6196-6217, ~8064, 11719-11743, 14828-14851), `camera.rs` (`as_render_camera` builds on `Camera::new`/`render_eye`), `docs/foundations/2026-06-26-cinematic-camera-director.md` (new).
 
-**Boundary:** none required to land. **[BOUNDARY]** Axolittle feel-playtest of camera modes / FOV / fly-speed (tuning only, post-merge).
+**Boundary:** none required to land. **[BOUNDARY]** the tester feel-playtest of camera modes / FOV / fly-speed (tuning only, post-merge).
 
 ---
 
@@ -199,7 +199,7 @@ Four phases. Phase 1 is fully self-contained and green-able unattended. Each pha
 ### Step 2.9 — Gate **[SOLO]**
 - `./check.sh` green. Record a SP session → load → scrub → drive the cinematic camera over it, all unattended.
 
-**Phase 2 boundary:** **[BOUNDARY]** feel/UX of slow-mo + cinematic paths (Axolittle playtest); a real GPU only matters for *feel*, not for green.
+**Phase 2 boundary:** **[BOUNDARY]** feel/UX of slow-mo + cinematic paths (playtest); a real GPU only matters for *feel*, not for green.
 
 ---
 

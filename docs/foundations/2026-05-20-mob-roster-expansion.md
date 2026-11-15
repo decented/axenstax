@@ -1,6 +1,6 @@
 # Mob Roster Expansion — Spec 28d
 
-**Status:** PARTIALLY DELIVERED. Wolves shipped 2026-05-21 (see `2026-05-20-wolves-tameable-companion.md`). **2026-05-27:** Horse, Goat, Rabbit, Bee, Squid (plus Nostrich, which already had AI) had spawn logic + AI but **no render model**, so they spawned invisible — a playtest found only cow/pig/chicken were ever seen. All seven now have box models in `entity_model.rs` (reusing existing coat textures; bespoke per-species textures — esp. bee-yellow + squid-blue — are a deferred polish pass). Guarded by `every_passive_spawn_mob_has_a_model`. **Remaining:** hostile additions (Skeleton archer / Wither Skeleton) + the texture polish pass + per-species AI tuning after Axolittle's playtest.
+**Status:** PARTIALLY DELIVERED. Wolves shipped 2026-05-21 (see `2026-05-20-wolves-tameable-companion.md`). **2026-05-27:** Horse, Goat, Rabbit, Bee, Squid (plus Nostrich, which already had AI) had spawn logic + AI but **no render model**, so they spawned invisible — a playtest found only cow/pig/chicken were ever seen. All seven now have box models in `entity_model.rs` (reusing existing coat textures; bespoke per-species textures — esp. bee-yellow + squid-blue — are a deferred polish pass). Guarded by `every_passive_spawn_mob_has_a_model`. **Remaining:** hostile additions (Skeleton archer / Wither Skeleton) + the texture polish pass + per-species AI tuning after the tester's playtest.
 **Branch (when building):** one PR per mob species — `feat/spec-28d-{species}` off `main`.
 **Trigger:** Sub-foundation of [Spec 28 Minecraft-parity content surface](2026-05-20-minecraft-parity-content-surface.md) §4. Independent of 28a-c at the type-system level; depends on 28a for biome-specific spawn weighting.
 
@@ -23,7 +23,7 @@ Add 7 new mob species to fill the roster gap:
 
 ## Why this lives here
 
-- Axolittle's check: "Minecraft has ~30 mobs; AxeNStax has ~12". The roster gap is felt every time the player goes for a walk and sees the same 4 things. This is gameplay-affecting, not cosmetic.
+- The tester's check: "Minecraft has ~30 mobs; AxeNStax has ~12". The roster gap is felt every time the player goes for a walk and sees the same 4 things. This is gameplay-affecting, not cosmetic.
 - Per-species PRs because mob AI is the most playtest-sensitive surface — bee pollination feels nothing like rabbit hopping; we don't want to bundle them.
 - Cross-game lift: the per-species AI pattern via `MobAi::tick(mob, world, players) -> MobAction` is engine-generic. Sister games consume by registering different species in their MobRegistry.
 
@@ -68,7 +68,7 @@ Each species follows the same shape; here's the template, applied 7 times:
 | D | drops_for + loot table | `mob.rs::drops_for` | +20 | ✓ |
 | E | Biome spawn weights — update 28a's table to include the new species | `biome.rs::BIOMES` | +15 | ✓ |
 | F | Tests — spawning produces this species in the expected biome, drops fire, AI doesn't infinite-loop | `*.rs::tests` | +80 | ✓ |
-| G | Axolittle playtest — find one in the wild, observe behaviour, kill one, confirm drops | — | — | playtest gate |
+| G | playtest — find one in the wild, observe behaviour, kill one, confirm drops | — | — | playtest gate |
 
 **Total per species:** ~320 LOC + playtest. Build slow; playtest-gate each one before moving to the next.
 
@@ -159,7 +159,7 @@ fn squid_only_spawns_in_water() {
 
 ---
 
-## §5 — Axolittle playtest checklist (per species)
+## §5 — playtest checklist (per species)
 
 For each new species:
 1. `/tp` to its preferred biome.

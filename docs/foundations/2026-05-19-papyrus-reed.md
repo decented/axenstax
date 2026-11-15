@@ -1,6 +1,6 @@
 # Papyrus Reed — water-adjacent T1 plant + first paper source
 
-**Status:** Phases 2-9 DELIVERED 2026-05-19 on `feat/papyrus-reed`. Phase 10 = Axolittle playtest gate (blocked on his time).
+**Status:** Phases 2-9 DELIVERED 2026-05-19 on `feat/papyrus-reed`. Phase 10 = playtest gate (blocked on tester time).
 **Branch:** `feat/papyrus-reed` off `main`.
 **Trigger:** Foundation **A** of the Build Schematics economy (`docs/vision/build-schematics-long-run.md`). Spec 24 (Build Schematics Core) needs **paper** for the Plan Tile recipe; this spec ships the first paper source (Papyrus Sheet) plus the T1 plant that produces it. Sequenced ahead of every other Build Schematics foundation per the vision doc §10 ordering rule.
 
@@ -162,7 +162,7 @@ Wheat / carrot / potato remain wheat-style — they're tilled-soil crops where t
 | 7 | `/give` aliases for materials + block stages | `commands/builtins/give.rs`, tests | ~30 | ✓ |
 | 8 | `PROTOCOL_VERSION` bump 15 → 16 + history note | `protocol.rs`, tests | ~10 | ✓ |
 | 9 | Spec 5 §3.9 touch + README flip (Spec 23 status to DELIVERED) + economies/vision cross-refs | `docs/spec/05-gameplay-systems.md`, `docs/foundations/README.md` | ~30 | ✓ |
-| 10 | Axolittle playtest — water-adjacency intuition, harvest pacing, recipe yield feel, paper-as-foundational-material moment | n/a | 0 | ✗ blocked |
+| 10 | playtest — water-adjacency intuition, harvest pacing, recipe yield feel, paper-as-foundational-material moment | n/a | 0 | ✗ blocked |
 
 **Total**: ~450 LOC spec + code + tests. Phases 2-9 autonomous. Phase 10 is the playtest gate.
 
@@ -332,7 +332,7 @@ Players holding `PapyrusReed` material can right-click sand / dirt / grass block
 - `game_loop.rs` (right-click-place handler):
   - Locate the existing `Item::Material(...)` arm that handles `material_as_placeable_block` (Wave 29 log path).
   - Add a parallel arm for `PapyrusReed`: instead of routing through `material_as_placeable_block` (which would place an OAK_LOG), call `papyrus::try_plant_papyrus(&mut world, target_x, target_y, target_z)`. On `true`: consume 1 reed; play_place audio; respect the existing cooldown.
-  - On `false`: fall through to the default no-op. No toast in v1 — the wireframe already tells the player they're aimed at a place they can't plant. (Add a toast in Phase 10 if Axolittle's playtest reveals confusion.)
+  - On `false`: fall through to the default no-op. No toast in v1 — the wireframe already tells the player they're aimed at a place they can't plant. (Add a toast in Phase 10 if the tester's playtest reveals confusion.)
 
 ### Tests (in `papyrus.rs`)
 
@@ -589,21 +589,21 @@ PROTOCOL_VERSION change forces stale-client rejection on multiplayer connect. No
 
 ---
 
-## Phase 10 — Axolittle playtest (BLOCKED on his time)
+## Phase 10 — playtest (BLOCKED on tester time)
 
-### What he's evaluating
+### What they're evaluating
 
-- **Water-adjacency intuition** — does the "needs water nearby" rule feel obvious from the placement failure / success pattern? Or does he need a toast saying "needs water"?
+- **Water-adjacency intuition** — does the "needs water nearby" rule feel obvious from the placement failure / success pattern? Or do they need a toast saying "needs water"?
 - **Harvest pacing** — 20 s sprout → mature feels right? Too fast (no real loop)? Too slow (boring)?
 - **Recipe yield** — 3 reeds → 3 sheets at the crafting table. Does this feel like enough for the Spec 24 Plan Tile recipe (which then converts 1 sheet → 4 tiles)?
-- **Paper-as-foundational moment** — when he crafts his first sheet, does it land as "I just made paper" or does it feel like just another material?
-- **Replanting friction** — sugarcane-style auto-regrow vs wheat-style replant. Does the difference register, or does he expect wheat-style?
+- **Paper-as-foundational moment** — when they craft their first sheet, does it land as "I just made paper" or does it feel like just another material?
+- **Replanting friction** — sugarcane-style auto-regrow vs wheat-style replant. Does the difference register, or do they expect wheat-style?
 - **Riverbank harvest loop** — running along a river chopping reeds. Does it feel natural? Smooth movement? Or do the non-solid plant tiles cause weird collision feedback?
-- **Visual progression** — can he tell stage 0 from stage 3 at a glance from a few blocks away?
+- **Visual progression** — can they tell stage 0 from stage 3 at a glance from a few blocks away?
 
 ### Outputs
 
-Memory entries on his calls. Tuning patch with adjusted constants if needed (growth rate, drop count range, harvest yield, recipe yield). Spec 5 amended for any design changes.
+Memory entries on their calls. Tuning patch with adjusted constants if needed (growth rate, drop count range, harvest yield, recipe yield). Spec 5 amended for any design changes.
 
 ---
 

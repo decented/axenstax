@@ -1,6 +1,6 @@
 # Historical Pivot — Sub-Foundation 2: Wild Animals + Chest
 
-**Status:** DELIVERED 2026-05-22 on `feat/historical-pivot-sub2-wild-animals`. Phase 11 (Axolittle playtest) still outstanding. **Prerequisite:** Sub 1 (Drop-Economy Migration) merged first — Sub 1 reserved the `BrigandChieftainTrophy` MaterialId and added Wool→String, which this sub assumes is live.
+**Status:** DELIVERED 2026-05-22 on `feat/historical-pivot-sub2-wild-animals`. Phase 11 (playtest) still outstanding. **Prerequisite:** Sub 1 (Drop-Economy Migration) merged first — Sub 1 reserved the `BrigandChieftainTrophy` MaterialId and added Wool→String, which this sub assumes is live.
 **Branch:** `feat/historical-pivot-sub2-wild-animals` off `main`.
 **Trigger:** Sub-foundation **2** of the [Historical Pivot Long-Run](../vision/historical-pivot-long-run.md). Adds the wild-animal threat track + the Chest storage primitive that Sub 3 (Brigand Hideouts) will inherit.
 
@@ -101,7 +101,7 @@ Per the README's previously-flagged solo gap ("`scatter_mobs_in_column` is hardc
 | 8 | Wolf bone-drop addition (one-line `drops_for` change + test) | `mob.rs` or `wolf.rs` | ~10 |
 | 9 | Tests (per-species AI + chest round-trip + bear-eats-crop + bear-raids-chest-leaves-intact + pack-boost-fires + wolf-now-drops-bone) | various `*::tests` modules | ~200 |
 | 10 | Docs (HP-2 spec → DELIVERED, README flip, Spec 5 §3 mob section update) | docs | ~30 |
-| 11 | Axolittle playtest | — | — |
+| 11 | playtest | — | — |
 
 **Total**: ~1,200 LOC across 10 build phases + 1 playtest gate. Single PR. Larger than original HP-2 estimate (vision doc said ~600 LOC for just animals); the +600 LOC is the Chest block + UI + save which we agreed to fold in.
 
@@ -205,7 +205,7 @@ fn wolf_now_drops_bone() {
 - Bear-eats-crop visibly works (place a crop near a Bear in the test, watch it disappear and Bear become sated).
 - Bear-raids-chest works (place a Chest with bread near a Bear, watch the bread disappear and Bear become sated; chest stays intact).
 - Wolves now drop Bone (≥1 in test runs across seeds).
-- Phase 11: Axolittle playtest confirms the gameplay feel — bears feel threatening but defeatable; hyenas feel like a pack; fence works to keep bears out.
+- Phase 11: playtest confirms the gameplay feel — bears feel threatening but defeatable; hyenas feel like a pack; fence works to keep bears out.
 
 ---
 

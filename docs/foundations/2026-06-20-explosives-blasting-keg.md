@@ -1,10 +1,10 @@
 # Explosives — Black Powder & the Blasting Keg
 
 **Date:** 2026-06-20
-**Status:** **DELIVERED 2026-06-20** (solo, to the Axolittle playtest boundary).
+**Status:** **DELIVERED 2026-06-20** (solo, to the playtest boundary).
 Built on branch `worktree-spec-49-explosives` across 11 phases, `check.sh` green
 (native + WASM) at every commit; **3156 tests**. Protocol **54 → 55**. Remaining
-= the **Axolittle "boom" feel playtest** (test sheet
+= the **tester "boom" feel playtest** (test sheet
 `docs/test-sheets/2026-06-20-explosives.md`) + a native rebuild/deploy (owner —
 metered). **What shipped vs. spec** (deviations, all small):
 - **Compost is a real `MaterialId`** (158) — the Composter's intermediate output;
@@ -37,7 +37,7 @@ Owner-approved direction (2026-06-20, "go with your recommendations"): **~4-bloc
 Mine **and** farm the saltpetre in v1; the industrial (ANFO) route is a later
 tier. PWA/WASM + native.
 **Driver:** Staxolottle (`/remote-control`, 2026-06-20). Came out of the "where
-are we at with TNT?" question. Axolittle's note was the seed: in Minecraft TNT
+are we at with TNT?" question. The tester's note was the seed: in Minecraft TNT
 traces back to **creeper** gunpowder — and **we removed creepers** in the
 fantasy-roster excision (2026-05-24), taking gunpowder and the whole explosion
 code path with them. So explosives need their own honest, mineable supply chain
@@ -347,7 +347,7 @@ the owner's "industrial is the later route" call:
    behaviour, all guard-tested.
 10. Save/load fields + round-trip integration test.
 11. Test sweep — pure helpers + integration (`test_integration/explosives.rs`).
-12. **Axolittle playtest gate** (feel: fuse length, blast size, "boom").
+12. **Playtest gate** (feel: fuse length, blast size, "boom").
 
 ---
 
@@ -363,7 +363,7 @@ the owner's "industrial is the later route" call:
   the fuse **exactly once** (edge not level — a held-on wire doesn't re-fire); a
   Plunger pulse detonates a cable-wired keg; one pulse **fans out** to multiple
   kegs; save/load round-trip with a primed keg + a loaded composter.
-- **Playtest boundary (Axolittle):** fuse length feel, blast radius feel, the
+- **Playtest boundary (the tester):** fuse length feel, blast radius feel, the
   audio/particle "boom", how findable Brimstone/Nitre are, whether the Composter
   path feels worth it vs mining.
 - `check.sh` ALL GREEN at every phase commit; engine + WASM build.
@@ -421,7 +421,7 @@ the owner's "industrial is the later route" call:
 **None — resolved 2026-06-20** (owner: "go with your recommendations"):
 
 1. **Blast radius + fuse feel** → **~4-block spherical radius, ~4 s (80-tick)
-   fuse** for v1. Both stay tunable consts; Axolittle's playtest tunes the final
+   fuse** for v1. Both stay tunable consts; the tester's playtest tunes the final
    numbers (this is the feel gate, not a build blocker).
 2. **Blasted-block drops** → blasted blocks **drop nothing** (protects
    Proof-of-Play). Ore never drops from a blast regardless. Cosmetic rubble is a

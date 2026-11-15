@@ -93,10 +93,10 @@ Current `MaterialId` has 44 variants. Target ~115. The gap is **raw drops + craf
 2. Mob-drop wiring — link new mob types (§4) to their drops via `mob::loot_for`.
 3. Plant-drop wiring — leaves drop saplings + apples; bamboo + sugarcane + cocoa drop their materials.
 4. Cooking arms — `furnace::smelt_recipe_for_input` adds the new raw → cooked pairs.
-5. `/give` aliases for every new material so Axolittle can spawn-test.
+5. `/give` aliases for every new material so the tester can spawn-test.
 6. Texture pack — ~70 new procedural item-icon textures (procedural so we don't ship binary assets).
 7. Tests — `MaterialId` count assertion, recipe lookup tests per new arm, leather-drop probability test.
-8. Axolittle playtest — does each new material spawn / drop / get used as expected.
+8. Playtest — does each new material spawn / drop / get used as expected.
 
 ---
 
@@ -137,7 +137,7 @@ The per-position species pick uses a new helper `biome::tree_species_at(x, z, bi
 3. `tree_species_at(x, z, biome, seed) -> WoodSpecies` blender function (depends on §3 enum existing — sub-foundation 28a ships AFTER 28b's enum is in, even though the biome phase is earlier conceptually).
 4. `biome_mob_pool(biome) -> &[MobType]` + spawning integration.
 5. Tests — biome distribution at known seeds, blend function determinism, surface-block per-biome.
-6. Axolittle playtest — explore all 12 biomes, confirm visual + mob distinction.
+6. Playtest — explore all 12 biomes, confirm visual + mob distinction.
 
 ---
 
@@ -201,7 +201,7 @@ Today the recipes hard-code `OAK_LOG` / `OAK_PLANKS`. Refactor to accept any `Wo
 7. Sapling planting — right-click sapling on dirt/grass plants it; grows into the matching tree over ~3 in-game days.
 8. Mine_drop normalisation — mining any species log drops the appropriate species log; same for planks.
 9. Tests — recipe-acceptance across species, tree-gen shape per species, sapling-grows-to-correct-species.
-10. Axolittle playtest — chop one of each species, plant saplings, confirm recipe works with mixed species.
+10. Playtest — chop one of each species, plant saplings, confirm recipe works with mixed species.
 
 ---
 
@@ -239,7 +239,7 @@ Current `MobType`: Cow, Pig, Chicken, Sheep, Zombie, Skeleton, Spider, Creeper, 
 - Charter/Bitcoin consideration: would a tame wolf earn its master's PoP trickle? Probably yes (it's "near the player"), but the consensus rule is fiddly.
 - The simpler primitive — Cat/Horse — already covers the tame-and-bond emotional beat without combat AI.
 
-**Decision (REVISED 2026-05-20)**: wolves lifted from v2-deferral. Spec'd at [28d.wolves](2026-05-20-wolves-tameable-companion.md) as the canonical first pet AND the consumer that justifies extracting the `tameable.rs` framework that Cat / Parrot / future companions then build on. Charter/PoP-trickle consideration deferred — alpha tamed wolves do not earn PoP for their owner; revisit if Axolittle playtest surfaces it as missing.
+**Decision (REVISED 2026-05-20)**: wolves lifted from v2-deferral. Spec'd at [28d.wolves](2026-05-20-wolves-tameable-companion.md) as the canonical first pet AND the consumer that justifies extracting the `tameable.rs` framework that Cat / Parrot / future companions then build on. Charter/PoP-trickle consideration deferred — alpha tamed wolves do not earn PoP for their owner; revisit if playtest surfaces it as missing.
 
 ### Implementation per phase (sub-foundation 28d, ~10 phases, ~3,000 LOC)
 
@@ -252,7 +252,7 @@ Current `MobType`: Cow, Pig, Chicken, Sheep, Zombie, Skeleton, Spider, Creeper, 
 7. Saddle + ride — Horse/Donkey/Mule. Camera moves to mount-eye position; movement controls the mount.
 8. Breeding — two tame mobs of the same species near each other with feed item produce a baby. Horse + Donkey → Mule (sterile).
 9. Bee → hive → Honeycomb economy.
-10. Axolittle playtest — find each new mob in the right biome, tame one of each tameable, breed the Horse/Donkey to get a Mule.
+10. Playtest — find each new mob in the right biome, tame one of each tameable, breed the Horse/Donkey to get a Mule.
 
 ---
 
@@ -301,7 +301,7 @@ Damage reduction per tier (Minecraft baseline scaled):
 4. Damage reduction wired into `PlayerCombat::take_damage`.
 5. Shield block mechanic — held-down right-click reduces damage.
 6. Fishing rod cast + Cod/Salmon/Pufferfish drop table.
-7. Axolittle playtest — craft full Leather → Iron → Diamond → Satori armour set; fish; shear sheep; trident a Phantom.
+7. Playtest — craft full Leather → Iron → Diamond → Satori armour set; fish; shear sheep; trident a Phantom.
 
 ---
 
@@ -344,7 +344,7 @@ Per Spec 5 §3.6 rendering patterns (Background-order overlay, pinned-width Midd
 4. Category filter — radio-button row.
 5. Drag-to-hotbar in creative — drag icon from explorer to a hotbar slot triggers `/give`.
 6. "You have N" overlay in survival — query inventory for each entry's count.
-7. Axolittle playtest — open explorer, search "iron", confirm all iron-related items appear (iron ore, iron ingot, iron pickaxe, iron block, …).
+7. Playtest — open explorer, search "iron", confirm all iron-related items appear (iron ore, iron ingot, iron pickaxe, iron block, …).
 
 ---
 

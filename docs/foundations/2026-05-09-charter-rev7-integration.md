@@ -114,7 +114,7 @@ Rust side: `MenuAction::CreateWorld | LoadWorld | JoinGame` consults the JS brid
 - `clause_expired` → "Charter's end date passed. Ask your guardian to extend."
 - `relay_unavailable` → "Can't reach your Charter — try again in a moment."
 
-Deny screen is a single-screen overlay; OK button returns to the lobby. Visual UX validated by Axolittle later (separate test sheet).
+Deny screen is a single-screen overlay; OK button returns to the lobby. Visual UX validated by the tester later (separate test sheet).
 
 ### Phase 7 — Optional kind-30471 self-reports (~1 day, defaults ON for alpha)
 
@@ -160,5 +160,5 @@ Per rev. 7 Q3: publish kind-30471 ephemeral session-start/end events gift-wrappe
 
 - signet boundary — entirely AxeNStax-internal consumer work. ✓
 - npub only display — any displayed pubkey (deny screen, future "manage Charter" UX) renders as npub. Hex stays internal. ✓
-- autonomy to playtest boundary — Phases 1–7 solo-verifiable via synthetic events; real-bunker round-trip waits for signet-app + an Axolittle session. ✓
+- autonomy to playtest boundary — Phases 1–7 solo-verifiable via synthetic events; real-bunker round-trip waits for signet-app + a tester session. ✓
 - charter rev7 pivot — Spec 8 IDB layer stays dormant; this spec doesn't reach into it. ✓

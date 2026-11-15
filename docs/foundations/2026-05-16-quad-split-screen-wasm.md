@@ -1,6 +1,6 @@
 # Quad split-screen on WASM — lift the web's solo-only clamp
 
-**Status**: READY TO BUILD, **depends on #14 landing first**. Phases 2–6 are autonomous solo work. Phase 7 (Axolittle 4-player PWA playtest) blocks on his time.
+**Status**: READY TO BUILD, **depends on #14 landing first**. Phases 2–6 are autonomous solo work. Phase 7 (the 4-player PWA playtest) blocks on tester time.
 **Date**: 2026-05-16
 **Branch**: `feat/quad-split-screen-wasm` once started; off `main`, **after** #14's `feat/quad-split-screen` has merged.
 **Session**: Fresh — implementer should treat this doc and #14 as the only briefs.
@@ -20,7 +20,7 @@ Per signet boundary and shared infra strategy, the gamepad-on-web work lifts eng
 
 ## Why this lives here
 
-- **PWA is the alpha target.** Per pwa priority, Chromium-only PWA is the alpha. "PWA" today means single-player local — for AxeNStax that's fine *until* Axolittle wants to play with siblings/friends on a laptop. Two kids on one MacBook with two USB controllers is a real, requested couch-co-op shape the native build supports today and the PWA cannot.
+- **PWA is the alpha target.** Per pwa priority, Chromium-only PWA is the alpha. "PWA" today means single-player local — for AxeNStax that's fine *until* players want to play with friends on a laptop. Two players on one MacBook with two USB controllers is a real, requested couch-co-op shape the native build supports today and the PWA cannot.
 - **One library swap unblocks an entire input axis.** `gamepad.rs` is the only file that pulls `gilrs`. Replace the gilrs-backed `GamepadSystem` with a `cfg`-split backend (gilrs on native, web-sys on WASM) behind the same public surface, and every consumer (`game_loop.rs`, the menu, the join rule) is target-agnostic.
 - **Cross-game lift.** A web Gamepad backend is one of those primitives that pays off across every Decented title. Couch-co-op for any web game becomes a layout decision, not an input-system rebuild.
 - **Closes the "WASM is solo" footnote.** #14's spec, `chunk_stream.rs:151`, and the 2026-04-02 wasm-web-build-design doc all carry the qualifier "split-screen stays native-only." This spec deletes the qualifier — or, more precisely, replaces it with "split-screen on web requires gamepads, which we now have."
@@ -109,7 +109,7 @@ Phase 2 of this spec is a careful audit of every one of the ~105 gates, classifi
 | 4 | Lift native-only `#[cfg]` gates around the gamepad + split-screen path (audit every gate, lift only the lift-class ones) | `main.rs`, `game_loop.rs`, `chunk_stream.rs`, possibly `menu.rs` | ~80 (mostly deletions) | ✓ |
 | 5 | WASM-side wiring: join toast on web; touch+gamepad coexistence (P1 = touch or KB, P2-P4 = gamepads); fullscreen behaviour for 4-viewport rendering | `game_loop.rs`, `touch_input.rs`, possibly `wasm_auth.rs` if cursor-pointer interactions overlap | ~80 | ✓ |
 | 6 | Perf verification on WASM — render 4 viewports at 1920×1080 in Chromium, measure tick + frame times via `wasm_feedback`'s existing samples, document the budget result | `wasm_feedback.rs` (verify only), playtest harness, `docs/foundations/2026-05-16-quad-split-screen-wasm.md` perf-results appendix | ~50 (verify + doc) | ✓ |
-| 7 | Axolittle 4-player PWA playtest — does it feel good with two laptops + 4 controllers on a Chromebook? Or one laptop + 4 USB-C gamepads via a hub? | n/a | 0 | ✗ blocked |
+| 7 | The 4-player PWA playtest — does it feel good with two laptops + 4 controllers on a Chromebook? Or one laptop + 4 USB-C gamepads via a hub? | n/a | 0 | ✗ blocked |
 
 **Total**: ~750 lines spec + code + tests. Phase 7 is the playtest gate.
 
@@ -225,7 +225,7 @@ Axes:
 - `axes[2]` = right stick X → `right_x`
 - `axes[3]` = right stick Y → `right_y`
 
-Non-standard mappings (`pad.mapping() != "standard"`) are rare on modern Chromium with Xbox/PS controllers but exist for older/weird hardware. **Strategy**: if mapping is not "standard", log a warn once and don't expose that controller. Phase 7 playtest will reveal whether any of Axolittle's hardware needs a remapping fallback.
+Non-standard mappings (`pad.mapping() != "standard"`) are rare on modern Chromium with Xbox/PS controllers but exist for older/weird hardware. **Strategy**: if mapping is not "standard", log a warn once and don't expose that controller. Phase 7 playtest will reveal whether any of the tester's hardware needs a remapping fallback.
 
 ### Hot-plug
 
@@ -415,7 +415,7 @@ walking in a chunk-streaming area. Numbers go below.
 
 ---
 
-## Phase 7 — Axolittle 4-player PWA playtest
+## Phase 7 — the 4-player PWA playtest
 
 ### Goal
 
@@ -425,7 +425,7 @@ Real couch co-op. Two laptops + 4 controllers, or one laptop + 4 controllers via
 
 - A laptop running Chromium + the PWA fullscreen.
 - 4 paired gamepads (USB or BT).
-- Axolittle + 1-3 friends/siblings.
+- The tester + 1-3 friends.
 - An area in a saved world with enough variety to fill 30 minutes (build, fight, explore, craft).
 
 ### What to watch for

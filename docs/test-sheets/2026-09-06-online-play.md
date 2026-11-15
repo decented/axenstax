@@ -59,7 +59,7 @@ upstream Signet ticket 187 lands.
       "AxeNStax" while hosting.
 - [ ] A: stop hosting. Within a moment the mapping is gone.
 
-## Questions for Axolittle
+## Questions for the tester
 
 1. Did the invite link feel like something you'd actually send someone?
 2. When it failed, did the message tell you what to do next?

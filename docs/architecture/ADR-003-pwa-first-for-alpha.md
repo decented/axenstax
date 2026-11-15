@@ -8,13 +8,13 @@
 
 ADR-002 sequenced the client targets as *"Native desktop first, WASM-aware but native-only until gameplay loop proven."* The gameplay loop is now proven — mining, crafting, combat, mobs, world gen, lighting, water, inventory, and split-screen multiplayer all work natively (see `docs/roadmap.md` Phase 0 and Phase 1).
 
-The critical missing piece for the project is **alpha tester feedback**. Without testers exercising the game, the team cannot validate gameplay decisions, prioritise bug fixes, or iterate toward the Phase 2–5 goals. Getting a build in front of Axolittle's friends and a small whitelisted group is the next hard gate.
+The critical missing piece for the project is **alpha tester feedback**. Without testers exercising the game, the team cannot validate gameplay decisions, prioritise bug fixes, or iterate toward the Phase 2–5 goals. Getting a build in front of a small whitelisted group of testers is the next hard gate.
 
 Native distribution for alpha has real friction:
 
 - Compiled binaries per OS, prerequisites on Linux (`libudev-dev`), no install path for Chromebooks
 - Every tester update requires a re-download
-- Alpha testers are primarily children (age 8–12) on Chromebooks, tablets, and shared PCs — Chromebooks in particular have no practical native path
+- Alpha testers are primarily children on Chromebooks, tablets, and shared PCs — Chromebooks in particular have no practical native path
 - QR-based Signet login is already phone-mediated, which naturally pairs with a browser-based client
 
 A substantial PWA alpha design and implementation plan already exists (`docs/superpowers/specs/2026-04-15-pwa-alpha-design.md`, `docs/superpowers/plans/2026-04-15-pwa-alpha.md`) — totalling ~2,500 lines. The decision here is not *how* to build the PWA (that's the plan) but whether to pull it forward as the current priority.
@@ -57,7 +57,7 @@ A substantial PWA alpha design and implementation plan already exists (`docs/sup
 
 - **Feedback dependency**: Phase 2 (Hosted Worlds) and Phase 3 (Gameplay Depth) both need tester input to prioritise. Building them without feedback risks wasted effort.
 - **Distribution friction is the blocker**: The native build works. What's missing is a frictionless way for a tester to *try* it. PWA removes that friction at the exact moment the game is worth trying.
-- **Chromebook reach**: A significant portion of Axolittle's friend group is on Chromebooks. Native builds can't reach them at all.
+- **Chromebook reach**: A significant portion of our alpha testers are on Chromebooks. Native builds can't reach them at all.
 - **WASM readiness**: The existing PWA design notes the WASM build is 97% ready. The incremental cost to push it over the line is small relative to the tester-feedback value unlocked.
 
 ### Why Chromium-only for alpha

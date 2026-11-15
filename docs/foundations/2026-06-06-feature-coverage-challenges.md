@@ -12,7 +12,7 @@ every bundled challenge (onboarding + explorer cards), Start one with a click
 active challenge's progress (`ScenarioState::progress_summary` → X/Y leaves +
 elapsed). `challenge_board_ui.rs` + the J toggle + modal gating (mirrors the map /
 wardrobe). The chat `/scenario list` stays as the equivalent text path. **Launch routing (audit fix 2026-09-28):** a scenario that clears the inventory (every non-Challenge kind, and a `Timed` Challenge such as Scavenger) or carries a kit (most explorer cards) never runs in the player's current world — the J board and `/scenario` save and leave (`leave_world`), then launch it into its arena through the Trials menu's own `PlayScenario` path (`world_exit::challenge_launch_mode`). Before, Scavenger wiped real gear in-world and kit Challenges were a repeatable free-items tap. Only a Challenge with no kit and no clear overlays the current world. In a hosted or joined session an arena launch is refused with a message. Remaining:
-**Phase 8** (Axolittle playtest gate — the board's *feel* + completion surfacing;
+**Phase 8** (playtest gate — the board's *feel* + completion surfacing;
 test sheet `docs/test-sheets/2026-06-18-feature-coverage-challenges.md`,
 Test Board ref `TB-49-challenges`).
 **Date**: 2026-06-06 (drafted) · 2026-06-14 (built)
@@ -150,7 +150,7 @@ An unordered board of single-feature challenges, each mapped to a built feature 
 - **Trade with a villager / earn reputation** (`village` + `reputation.rs`)
 - **Build with a blueprint / Drafting Stamp** (`blueprint` capture)
 
-Each card names the feature and gives a one-line "why we want you to try this." Balance/feel is a **playtest boundary** — counts and copy are tuned with Axolittle, not solo.
+Each card names the feature and gives a one-line "why we want you to try this." Balance/feel is a **playtest boundary** — counts and copy are tuned with the tester, not solo.
 
 ---
 
@@ -174,7 +174,7 @@ Each card names the feature and gives a one-line "why we want you to try this." 
 | 5 | HUD: sequence/checklist progress render | ✓ (logic) / playtest (feel) | ✅ **logic DELIVERED** (`0eab0df`) — "name — done / total" + "complete!"; feel = playtest |
 | 6 | Challenge board menu + create-or-start lifecycle (closes the Goal 5 menu gap) — **needs the running app to verify** | supervised | ☐ remaining — *interim discovery shipped*: `/scenario list` (`d298c65`, `scenario::challenge_listing()`) lists every challenge + start command in chat; the GUI board is the remaining app-supervised piece |
 | 7 | Feedback anchor: active-challenge id on `/bug`–`/idea` | ✓ | ✅ **DELIVERED** (`d298c65`) — `ChallengeSnap {name, done, total}` on the `wasm_feedback` Snapshot (the blob already attached to every report); rides the existing JSON, no JS change. Unit-tested (serialises when a challenge runs, omitted otherwise) |
-| 8 | Test sheet for Axolittle + the playtest gate (copy, counts, fun) | gate | ☐ gate — **test sheet written** (`docs/test-sheets/2026-06-18-feature-coverage-challenges.md`, `TB-49-challenges` on the lobby board); the play itself is the gate |
+| 8 | Test sheet for the tester + the playtest gate (copy, counts, fun) | gate | ☐ gate — **test sheet written** (`docs/test-sheets/2026-06-18-feature-coverage-challenges.md`, `TB-49-challenges` on the lobby board); the play itself is the gate |
 
 Phases 2–4 + 7 are fully solo-verifiable (data + unit tests). Phase 6 is the one ordering-sensitive piece that wants a live app (same reason Goal 5's menu was bounded). Phase 8 is the feel gate.
 

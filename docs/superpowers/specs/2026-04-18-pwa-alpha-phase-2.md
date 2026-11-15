@@ -7,7 +7,7 @@
 
 This spec is self-contained. A fresh session starting here should be able to execute it without re-reading chat history or other planning docs. If something referenced here conflicts with older docs, this spec wins.
 
-**Phase A amendments (2026-04-18)**: Task 1 cache moved from Rust to JS (JS must skip WASM boot on return visits). Task 2 names the real crypto lib (`@noble/curves`), vendors `signet-verify.iife.js` + `qrcode-generator` rather than trusting a CDN, and documents the one-time SDK build. Task 3 adds an HMAC-signed fragment so deep-link pubkey spoofing is blocked. Task 5 routes IndexedDB through a small JS helper rather than wrangling `web_sys::IdbFactory` from Rust, and explicitly deletes the now-unused Blossom code + HKDF encryption key. Task 6 moves whitelist enforcement server-side (cookie-gated `/play/` route) and adds admin-token auth to the reload endpoint. Open Questions 1–3 pre-answered; OQ 4 (splash UI) stays open for Axolittle. PWA installability explicitly punted to post-alpha.
+**Phase A amendments (2026-04-18)**: Task 1 cache moved from Rust to JS (JS must skip WASM boot on return visits). Task 2 names the real crypto lib (`@noble/curves`), vendors `signet-verify.iife.js` + `qrcode-generator` rather than trusting a CDN, and documents the one-time SDK build. Task 3 adds an HMAC-signed fragment so deep-link pubkey spoofing is blocked. Task 5 routes IndexedDB through a small JS helper rather than wrangling `web_sys::IdbFactory` from Rust, and explicitly deletes the now-unused Blossom code + HKDF encryption key. Task 6 moves whitelist enforcement server-side (cookie-gated `/play/` route) and adds admin-token auth to the reload endpoint. Open Questions 1–3 pre-answered; OQ 4 (splash UI) stays open for the tester. PWA installability explicitly punted to post-alpha.
 
 **Phase B amendments (2026-04-18, holodeck consensus)**: Old Tasks 1+2 merged into a single Task 1 (JS owns both cache and relay). Old Tasks 3+4 swapped (callback template must land before the fragment handoff uses it). Security must-fixes folded in: `HAS_SCHNORR=False` hard-fails startup, `/auth/verify-fragment` uses `hmac.compare_digest` + single-use nonce + `X-Requested-With` header, `/admin/reload-whitelist` returns 503 if token is unset/short, `/auth/callback` locks sessions after 3 failed sig verifies, `axenstax_session` cookie is `HttpOnly; Secure; SameSite=Strict`, strict CSP + `X-Frame-Options: DENY` on `/play/`, `X-Player-Pubkey` removed from CORS allow-list. Performance gates added: Chromebook bundle size + parse time measurements required during Task 1. `noble-curves` vendored directly (no Signet boundary push). Dead code (encrypt_blob, derive_encryption_key, worlds.py) deleted outright rather than marked dormant. Done Definition split into alpha-ready (this spec) vs alpha-live (separate deploy).
 
@@ -401,7 +401,7 @@ JS mirror (JSON shape returned by `AxeStore.list`): `{ name: string, size: numbe
 
 Per `docs/workflow/daily-build-test.md`: each task ends with a build → test sheet → user runs it → feedback → next task. For this spec:
 
-- After **Task 1** (JS-side auth module): major test session — the auth flow rewrites. Axolittle exercises the QR path on his phone + the same-device button on desktop.
+- After **Task 1** (JS-side auth module): major test session — the auth flow rewrites. The tester exercises the QR path on their phone + the same-device button on desktop.
 - After **Task 4** (IndexedDB worlds): confirm "my worlds persist between visits" is real.
 - After **Task 5** (whitelist gate): prod deployment becomes unblocked (prod deployment itself is separate work — see §8).
 
@@ -424,7 +424,7 @@ The test-sheet file for each task lives at `docs/test-sheets/YYYY-MM-DD-<task-na
 
 3. **Drop `/auth/poll` entirely?** — **RESOLVED**: yes, once Task 3 lands (the fragment handoff removes the last caller). Delete the route + the polling branch in `wasm_auth.rs`. `/auth/challenge` stays (still needed as a session-table anchor for redirect-mode signature verification).
 
-4. **Splash UI on WASM post-relay-integration** — **DEFERRED** to Axolittle. Current splash showed a logo + egui QR; post-Task-2 it just shows a title. Decide with Axolittle during the Task 2 test session whether to add a title animation, a boot progress bar, or leave it plain.
+4. **Splash UI on WASM post-relay-integration** — **DEFERRED** to the tester. Current splash showed a logo + egui QR; post-Task-2 it just shows a title. Decide with the tester during the Task 2 test session whether to add a title animation, a boot progress bar, or leave it plain.
 
 ---
 
@@ -451,7 +451,7 @@ All Tasks 0–5 complete, measured against local dev environment (`https://local
 - Non-whitelisted pubkeys see the waitlist page; their pubkey is logged.
 - No console errors during a normal play session.
 - Security tests pass: HAS_SCHNORR hard-fail verified; HMAC replay defence verified; spoofed fragments rejected; admin endpoint with missing/short token returns 503; `/play/` without session cookie returns waitlist.
-- Each task has its own test sheet in `docs/test-sheets/` with Axolittle's sign-off.
+- Each task has its own test sheet in `docs/test-sheets/` with the tester's sign-off.
 
 ### 8b. Alpha-live (separate, out-of-scope for this spec)
 

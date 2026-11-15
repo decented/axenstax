@@ -452,7 +452,7 @@ Native engine successfully joins a multiplayer game with `USE_SIGNET_AUTH=true` 
 
 ## Open design questions
 
-For Axolittle / Staxolottle / Forgesworn coordination:
+For the tester / Staxolottle / Forgesworn coordination:
 
 ### Affecting Phase 2 (`auth.js`)
 1. **Bunker timeout** — what's the right timeout? 30 seconds matches Charter rev. 5 groundwork; 60 seconds gives more grace for slow networks. **Recommendation**: 30 s for engine handshake; engine UI shows progress spinner during wait.

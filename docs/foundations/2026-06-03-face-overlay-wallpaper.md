@@ -19,7 +19,7 @@ block clears all its overlays** — every removed overlay is recoverable.
 
 **Branch:** `feat/face-overlay-wallpaper` off `main`. One branch, one merge when
 `./check.sh` is ALL GREEN. The visual/feel confirmation (does it *look* like wallpaper,
-do two sides read independently) is a **playtest-boundary** check Axolittle runs — see
+do two sides read independently) is a **playtest-boundary** check the tester runs — see
 the test sheet.
 
 ---

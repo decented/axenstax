@@ -463,7 +463,7 @@ Two distinct celebration tiers fire when a gem drops, keyed on whether this is t
 - World forking (`save::fork_world`) starts the fork with `genesis_block_found: false` — the fork is a new world, the source's claim doesn't transfer.
 - `audio.rs` ships `play_gem_pickup()` (routine chime) + `play_genesis_block()` (fanfare arpeggio). Procedural synthesis matches the rest of the audio engine.
 - `game_loop.rs` strike-time wiring uses `GameState::maybe_claim_genesis_block` to atomically claim the world's Genesis Block; the helper returns true exactly once per world. On claim, the flag is written through to `WorldMeta`.
-- HUD toasts use the existing `self.toast` slot; particle effects deferred to a polish wave with Axolittle's UX input.
+- HUD toasts use the existing `self.toast` slot; particle effects deferred to a polish wave with the tester's UX input.
 
 #### 2.2c.6 Legal posture — proof-of-work, not probabilistic gambling
 

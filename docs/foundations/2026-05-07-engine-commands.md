@@ -1,6 +1,6 @@
 # Engine commands — chat overlay + parser + dispatcher (plugin-shaped)
 
-**Status**: Phases 1–4 DELIVERED 2026-05-08 on main. Commits `0f7a269` (chat overlay + parser + dispatcher + 7 built-ins, plugin-shaped) → `b479099` (self-review pass) → `d864fe4` (chat input gate fix) → `909a0a9` (clippy clean), with `bfd8cd5` threading the feature through reference surfaces. Folds the world-time 4× BRIDGE into `/time speed`. Phase 5 (multiplayer dispatch via `hosted_server.rs`) deferred behind Specs 1+2 — must NOT parallelise on `hosted_server.rs`. Phase 6 (Axolittle UX playtest) blocked on his time. Test count: 65 new tests, 236 total. `check.sh` ALL GREEN.
+**Status**: Phases 1–4 DELIVERED 2026-05-08 on main. Commits `0f7a269` (chat overlay + parser + dispatcher + 7 built-ins, plugin-shaped) → `b479099` (self-review pass) → `d864fe4` (chat input gate fix) → `909a0a9` (clippy clean), with `bfd8cd5` threading the feature through reference surfaces. Folds the world-time 4× BRIDGE into `/time speed`. Phase 5 (multiplayer dispatch via `hosted_server.rs`) deferred behind Specs 1+2 — must NOT parallelise on `hosted_server.rs`. Phase 6 (tester UX playtest) blocked on tester time. Test count: 65 new tests, 236 total. `check.sh` ALL GREEN.
 **2026-05-30 fix (day↔night swap)**: `/time set day` was turning it dark and `/time set night` bright. Root cause: the keyword→tick table in `commands/builtins/time.rs` was copied from Minecraft's clock (`day=1000, night=13000`), but this engine's clock (`camera.rs::compute_sun`) is offset +6000 — **`0 = midnight, 6000 = sunrise, 12000 = noon, 18000 = sunset`** (sun above horizon for ticks `6000..=18000`). Corrected the table to Minecraft semantics + 6000 (mod 24000): `day=7000, noon=12000, night=19000, midnight=0`. Extracted a pure `time_for_keyword()` so the mapping is unit-tested against the clock convention (behavioural test, not a literal constant, so it can't silently re-encode a swap). **The clock convention above is the source of truth — keep `time.rs` and `camera.rs` in agreement.**
 **Date**: 2026-05-07 (drafted) → 2026-05-08 (Phases 1–4 landed)
 **Branch**: `feat/engine-commands` off `main`, merged.
@@ -20,7 +20,7 @@ The engine has zero command infrastructure today (`grep -rn "command|chat_input|
 
 Designed plugin-shaped: registry + parser + UI are **game-agnostic**. Built-in commands are voxel/Minecraft-style but can be replaced wholesale by another game keeping the same registry. When the engine grows `src/lib.rs` (likely for the PWA/native split or for a `genesis_server` crate), the `commands::` module lifts cleanly to its own crate (`axenstax-commands` or, if generalised, `voxel-commands`) with no API breakage.
 
-Total scope: ~1100 lines (spec → tests → UI → built-ins). 4 autonomous phases (spec + parser/registry + UI + built-ins). Phases 5–6 are blocked on hosted_server.rs queue + Axolittle playtest respectively.
+Total scope: ~1100 lines (spec → tests → UI → built-ins). 4 autonomous phases (spec + parser/registry + UI + built-ins). Phases 5–6 are blocked on hosted_server.rs queue + playtest respectively.
 
 ---
 
@@ -53,7 +53,7 @@ Total scope: ~1100 lines (spec → tests → UI → built-ins). 4 autonomous pha
 | 3 | Chat overlay UI + input gating | `src/chat_ui.rs`, `src/main.rs`, `src/input.rs`, `src/game_loop.rs` | 250 | ✓ (single-player only) |
 | 4 | Built-in commands (`/help`, `/time`, `/gamemode`, `/tp`, `/seed`, `/clear`, `/give`) | `src/commands/builtins/{help,time,gamemode,tp,seed,clear,give}.rs` + tests | 400 | ✓ |
 | 5 | Multiplayer command propagation | `hosted_server.rs`, `protocol.rs`, `remote_client.rs` | 150 | **Blocked** by Spec 1 Phase 4 + Spec 2 Phase 0b sharing `hosted_server.rs` |
-| 6 | Axolittle playtest — UX + command surface call | n/a | 0 | **Blocked** by Axolittle availability |
+| 6 | playtest — UX + command surface call | n/a | 0 | **Blocked** by the tester availability |
 
 **Total**: ~1150 lines. Phases 1–4 fully autonomous and ship as `feat/engine-commands` without touching the `hosted_server.rs` queue. Phase 5 sits behind the Spec 1+2 work in the queue. Phase 6 is the playtest gate.
 
@@ -386,9 +386,9 @@ Spec deferred to a follow-on doc `docs/foundations/2026-XX-XX-engine-commands-mu
 
 ---
 
-## Phase 6 — Axolittle playtest (deferred)
+## Phase 6 — playtest (deferred)
 
-**Blocked**: Axolittle availability.
+**Blocked**: The tester availability.
 
 Single test sheet at `docs/test-sheets/<date>-engine-commands.md`, drafted on the day. Validates:
 - `T` opens chat without breaking gameplay

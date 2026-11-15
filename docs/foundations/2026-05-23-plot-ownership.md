@@ -1,6 +1,6 @@
 # Plot Ownership (v1) — first land economy primitive
 
-**Status:** Phases 2-10 DELIVERED 2026-05-23 on `feat/plot-ownership`. Phase N = Axolittle playtest gate (open). Build also fixed a latent cross-spec bug: the Bounty Board / Tip Jar / Repair Bench item-materials were missing from `material_as_placeable_block`, so they crafted but couldn't be placed — now corrected (PlotMarker included).
+**Status:** Phases 2-10 DELIVERED 2026-05-23 on `feat/plot-ownership`. Phase N = playtest gate (open). Build also fixed a latent cross-spec bug: the Bounty Board / Tip Jar / Repair Bench item-materials were missing from `material_as_placeable_block`, so they crafted but couldn't be placed — now corrected (PlotMarker included).
 **Branch:** `feat/plot-ownership` off `main`.
 **Trigger:** Goal-driven solo dev cycle, Round 4. From `docs/vision/economies-long-run.md` §8.1 — "Plot Ownership (T2 — first land economy spec)". The economies vision flags it as parallelisable with Mob Bounty Board (different files). v1 is deliberately **minimal**: claim a region + build-protection enforcement. The fuller rule set (PvP toggle, mob-spawn toggle, vendor-only zones) + deed resale are explicitly v2.
 
@@ -163,7 +163,7 @@ Integration tests in `test_integration/plot.rs`:
 | 9 | `./check.sh` ALL GREEN | — | — |
 | 10 | Doc-flip + queue README | docs/ | 0 |
 | 11 | Merge to main --no-ff | — | — |
-| N | Axolittle playtest — plot size feel, claim/release UX, "do I want rule toggles", does build-protection feel fair | n/a | n/a |
+| N | playtest — plot size feel, claim/release UX, "do I want rule toggles", does build-protection feel fair | n/a | n/a |
 
 **Phases 2–10 solo-buildable.** Phase N = playtest gate.
 

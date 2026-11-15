@@ -12,11 +12,11 @@
 > `parity_check` and `ENABLE_SINGLEPLAYER_HOSTED_SERVER` were deleted in D1.
 > Kept for history.
 
-**Status**: Phase 0a DELIVERED 2026-05-03 on `main` (commit `47adf4b` — `parity_check` module + `WorldParityHash` + `ENABLE_SINGLEPLAYER_HOSTED_SERVER=false` flag-gated wiring). Phase 0b onwards remains READY TO BUILD — needs Axolittle for each phase's regression session before the next one starts.
+**Status**: Phase 0a DELIVERED 2026-05-03 on `main` (commit `47adf4b` — `parity_check` module + `WorldParityHash` + `ENABLE_SINGLEPLAYER_HOSTED_SERVER=false` flag-gated wiring). Phase 0b onwards remains READY TO BUILD — needs the tester for each phase's regression session before the next one starts.
 **Date**: 2026-04-20 (original); Phase 0a delivery 2026-05-03.
 **Branch**: original work on `feat/hostedserver-phase0-transport`, merged to main. Phase 0b: branch off main again.
 **Session**: Fresh — implementer should treat this doc as the only brief.
-**Risk**: High. This refactor touches live gameplay paths. Land it when Axolittle can test end-to-end, and phase every cut-over behind a feature flag so regressions can be reverted independently.
+**Risk**: High. This refactor touches live gameplay paths. Land it when the tester can test end-to-end, and phase every cut-over behind a feature flag so regressions can be reverted independently.
 
 ---
 
@@ -69,7 +69,7 @@ Six phases. Each is independently shippable. Phase 0 is prep (safety net); phase
 | 4 | Cut over **mob AI**. Target selection already moved to "nearest player from all positions" — server owns the decision. Client reads target via state update. | `mob_ai.rs`, `server.rs`, `game_loop.rs` | High |
 | 5 | Delete the `HostedServer` local-player position-trust BRIDGE. Single-player and multiplayer are now identical. Bump `PROTOCOL_VERSION`. | `hosted_server.rs`, `CLAUDE.md`, `docs/spec/01-engine-architecture.md`, `docs/spec/04-networking.md` | Medium |
 
-**Phase gating**: ship each phase as its own PR. Each PR has an Axolittle test session before the next one starts. If something feels off to him, we roll that phase back and think harder — faster than waiting until Phase 5 to notice.
+**Phase gating**: ship each phase as its own PR. Each PR has a tester test session before the next one starts. If something feels off to them, we roll that phase back and think harder — faster than waiting until Phase 5 to notice.
 
 ---
 
@@ -148,7 +148,7 @@ Add a `#[cfg(debug_assertions)] divergence_check()` that hashes the mob count, f
 ### Acceptance — Phase 0
 
 - `./check.sh` + `--smoke` green.
-- Single-player launches, plays normally (Axolittle confirms).
+- Single-player launches, plays normally (the tester confirms).
 - Divergence detector stays silent across a 5-minute single-player session.
 - Multiplayer (host game) still works — the `Transport` refactor didn't regress the UDP path.
 
@@ -179,12 +179,12 @@ On the client side, mob entities arrive via the existing StateUpdate packets. No
 ### Acceptance — Phase 1
 
 - Divergence detector: no spawn count mismatch across 20 minutes.
-- Axolittle session: mobs still spawn, same feel (not "they spawn on top of me now" or "they never spawn in caves anymore" — exact spec per `spawning::tick_mob_spawning`).
+- The tester session: mobs still spawn, same feel (not "they spawn on top of me now" or "they never spawn in caves anymore" — exact spec per `spawning::tick_mob_spawning`).
 - `./check.sh` green.
 
 ### Rollback
 
-One commit per phase. If Axolittle reports regressions, `git revert` and re-plan.
+One commit per phase. If the tester reports regressions, `git revert` and re-plan.
 
 ---
 
@@ -197,7 +197,7 @@ Server emits `BlockChange` packets for every cell the function modified. Client 
 ### Acceptance — Phase 2
 
 - Divergence detector silent on block counts.
-- Axolittle: drop sand, it falls. Break a supporting block, the pillar collapses. Same feel.
+- The tester: drop sand, it falls. Break a supporting block, the pillar collapses. Same feel.
 - Sand-column regression test (add one, if not already present): 10 sand blocks stacked on a floating block, break the support, all 10 fall exactly one tick later per block.
 - `./check.sh` green.
 
@@ -217,7 +217,7 @@ This is the high-risk phase. Remote-player physics already runs server-side (Tas
 ### Acceptance — Phase 3
 
 - Existing saves load cleanly (migration works).
-- Single-player movement feels identical (Axolittle session: run, jump, fall, swim, sprint).
+- Single-player movement feels identical (the tester session: run, jump, fall, swim, sprint).
 - Divergence detector silent.
 - Split-screen two-player still works (multi-player intents still feed through the in-process transport per player).
 - `./check.sh` green. A new integration test: authoritative-physics round-trip.
@@ -236,7 +236,7 @@ Client receives the AI state (target entity id, next-action enum) via state upda
 
 ### Acceptance — Phase 4
 
-- Axolittle: mob AI feels responsive. Mobs target correctly. No visible lag between "mob sees me" and "mob lunges."
+- The tester: mob AI feels responsive. Mobs target correctly. No visible lag between "mob sees me" and "mob lunges."
 - Unit test (introduced in Spec 3 — test-harness): two-player session, mob targets the closer player, switches when positions swap.
 - `./check.sh` green.
 
@@ -253,14 +253,14 @@ Client receives the AI state (target entity id, next-action enum) via state upda
 ### Acceptance — Phase 5
 
 - `./check.sh` + `--smoke` green.
-- Full Axolittle regression session: every gameplay subsystem feels the same or better.
+- Full tester regression session: every gameplay subsystem feels the same or better.
 - Spec docs describe what the code does.
 
 ---
 
 ## Global acceptance
 
-- Six phases merged (one branch, six commits — prefer six PRs for Axolittle's phase-by-phase review).
+- Six phases merged (one branch, six commits — prefer six PRs for the tester's phase-by-phase review).
 - Divergence detector stays silent across every gameplay session.
 - `./check.sh` + `--smoke` green at every phase boundary.
 - CLAUDE.md debt bullets 1, 2, 4 resolved.
@@ -281,14 +281,14 @@ Client receives the AI state (target entity id, next-action enum) via state upda
 ## Memory rules that apply
 
 - signet boundary — no Signet-side asks needed; this is engine-internal.
-- pretest check — before each Axolittle handoff, verify the phase's acceptance list against real code. The divergence detector helps but doesn't replace eyes.
+- pretest check — before each tester handoff, verify the phase's acceptance list against real code. The divergence detector helps but doesn't replace eyes.
 - CLAUDE.md "Concrete, Not Cards" — Every phase should leave the codebase closer to the target shape, never move sideways. If a phase needs a bridge, mark it with the `BRIDGE` pattern and the trigger for its removal.
 
 ---
 
 ## What "done" looks like
 
-- Six phases merged, each with an Axolittle-tested PR.
+- Six phases merged, each with a playtested PR.
 - CLAUDE.md's debt list shrinks by 3 bullets.
 - Single-player launches, runs, saves, loads — indistinguishably from today (that's the bar: zero feel regression).
 - The engine is now **one codebase with one simulation path**, which unblocks:

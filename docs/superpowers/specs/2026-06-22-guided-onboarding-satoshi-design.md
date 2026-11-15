@@ -9,7 +9,7 @@
 ---
 
 ## 1. The problem
-Axo (our playtester) said it plainly: **formal tutorials are boring — "I just want to play in the world and see what happens."** And our guiding principle says the incentive should be **fun itself**, never an extrinsic reward (no "do this, earn sats"). So we need onboarding that doesn't *feel* like onboarding: a way to draw a player into the game's activities through curiosity and delight, that they can also completely ignore.
+The tester (our playtester) said it plainly: **formal tutorials are boring — "I just want to play in the world and see what happens."** And our guiding principle says the incentive should be **fun itself**, never an extrinsic reward (no "do this, earn sats"). So we need onboarding that doesn't *feel* like onboarding: a way to draw a player into the game's activities through curiosity and delight, that they can also completely ignore.
 
 ## 2. The solution in one line
 **An optional, charming, in-world character — Satoshi — who notices you, offers a friendly nudge ("hey, are you hungry?"), shows you things by doing them beside you, and can always be waved off or sought out later.** He teaches by *being* part of the world, not by stopping the game to explain it.
@@ -26,13 +26,13 @@ Axo (our playtester) said it plainly: **formal tutorials are boring — "I just 
 3. **Co-presence, not control (never seize input).** Satoshi demonstrates *beside* you — he plants a seed, you watch, you try — he never grabs the controls or locks your movement.
 4. **Teach by doing-in-context, with meaning.** He introduces a thing *only when you can act on it* and attaches a why ("eat this — you'll mine longer before you tire"). No front-loaded explanation.
 5. **The world teaches first; Satoshi fills the gaps.** Lean on environmental signposting (block/animal/crop placement, the day/night rhythm). Satoshi is the *soft, human layer* over a world that already nudges — not the primary teacher.
-6. **Minimal reading (the kids constraint — biggest one).** Short lines, emotes, pointing, demonstration, icons — *not* paragraphs. An 11-year-old who hates tutorials will skip text; never gate progress on reading.
+6. **Minimal reading (the kids constraint — biggest one).** Short lines, emotes, pointing, demonstration, icons — *not* paragraphs. A player who hates tutorials will skip text; never gate progress on reading.
 7. **Choice → tiny goal → gift, not a checkbox.** "Hungry? Want to meet the animals, or try growing something?" → a small achievable target → a useful *welcome gift* (seeds, a tool), framed as a kindness, with **no "tutorial complete" pop-up.**
 8. **Show the locks before the keys (optional content only).** Let the player *see* animals, a crop, a far-off structure before Satoshi hands over the means — the unlock feels earned. Never gate mandatory first-session progress this way.
 9. **Fun is the incentive (SDT: competence, autonomy, relatedness).** Every nudge should make the player feel capable, free, and connected — not obligated. That's what brings them back tomorrow.
 
 ## 5. The first-session shape (illustrative, not prescriptive)
-You spawn. You're free to wander immediately (Axo gets his wish). Within a little while, Satoshi ambles over — warm, unhurried:
+You spawn. You're free to wander immediately (the tester gets their wish). Within a little while, Satoshi ambles over — warm, unhurried:
 - *"Oh — hello! New here? You look a bit peckish. Here, this'll keep you going."* (Hands you food; you learn eating exists, in context, as a gift.) You can say **"Thanks, I'm good — I'll explore"** and he tips his hat and leaves.
 - If you're curious, he offers a **choice**, not a script: *"Want to meet the animals down the way, or have a go at growing something?"* Either path is a tiny, concrete, optional goal.
 - He **shows by doing** — tills a patch, drops a seed, waits with you for it to sprout — then lets you do the next one.
@@ -56,7 +56,7 @@ The idea of letting a player plug in an **AI API key** so Satoshi can converse d
 ## 9. Open decisions (for us + the playtest)
 - **Delivery medium** with no voice budget: short captioned lines vs icon/emote-driven vs hybrid? (Lean low-text.)
 - **Where he lives / how he appears:** house-to-visit (pull) vs gentle contextual wander vs both — and the exact re-engagement frequency that stays the right side of "nagging."
-- **Does NPC co-presence feel collaborative** (not a cutscene) to an 11-year-old? **Untested — this is the key playtest question.**
+- **Does NPC co-presence feel collaborative** (not a cutscene) to a new player? **Untested — this is the key playtest question.**
 - How much Satoshi *leads* vs merely *suggests*; his voice/personality specifics; his look and his little house.
 
 ## 10. Scope & phasing
