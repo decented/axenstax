@@ -58,6 +58,7 @@ pub struct ActiveContexts {
 
 impl ActiveContexts {
     /// Every context live (tests, the default-overlap parity check).
+    #[cfg(test)]
     pub const ALL_LIVE: ActiveContexts =
         ActiveContexts { building_plan: true, workshop: true, avatar_paint: true, director: true };
 
