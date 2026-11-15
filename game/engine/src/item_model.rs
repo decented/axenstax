@@ -98,6 +98,9 @@ pub enum ItemLook {
     Cube { top: u32, side: u32, bottom: u32 },
     /// A flat extruded sprite of one texture layer (the inventory icon).
     Sprite { layer: u32 },
+    /// The hand lantern's small model (`lantern::held_mesh`, and `drop_mesh` on
+    /// the ground): the same shell the placed block is drawn with.
+    Lantern,
 }
 
 impl ItemLook {
@@ -134,18 +137,14 @@ pub const FRAME_SPRITE_WIDTH: f32 = 0.5;
 /// of material, with no background to cut away: rubber leaves, carpet, the
 /// logic gate's relay plate and lava (which borrows the lit furnace's face).
 /// A sprite of one would be a square card, so as items they keep the small
-/// cube (the hand lantern too: its layers are full tiles). Every other sprite's icon has a transparent background
+/// cube. Every other sprite's icon has a transparent background
 /// (`every_sprite_icon_has_a_transparent_background`); a block whose icon gains
 /// one should leave this list (`full_tile_blocks_have_no_background`).
-pub const FULL_TILE_BLOCKS: [BlockId; 5] = [
+pub const FULL_TILE_BLOCKS: [BlockId; 4] = [
     crate::block::RUBBER_LEAVES,
     crate::block::CARPET,
     crate::block::LOGIC_GATE,
     crate::block::LAVA,
-    // The hand lantern (off-hand slice 4): a micro-model in the world, a block of
-    // full-tile layers as an item. A dropped or framed one is the small cube; in
-    // the hand it is its model (`lantern::held_mesh`).
-    crate::block::LANTERN,
 ];
 
 /// The look of block `id` as an item: a sprite when the mesher draws the block
@@ -155,6 +154,11 @@ pub const FULL_TILE_BLOCKS: [BlockId; 5] = [
 /// the registry's fallback, as before.
 pub fn block_look(id: BlockId, registry: &BlockRegistry) -> ItemLook {
     let def = registry.get(id);
+    // The hand lantern is a micro-model in the world: as an item it is that model
+    // (held, dropped), not a cube of its full-tile layers.
+    if id == crate::block::LANTERN && registry.is_known(id) {
+        return ItemLook::Lantern;
+    }
     let cube = ItemLook::Cube { top: def.tex_top, side: def.tex_side, bottom: def.tex_bottom };
     if !registry.is_known(id) || FULL_TILE_BLOCKS.contains(&id) {
         return cube;
@@ -233,9 +237,9 @@ fn tier_material(tier: u16) -> ToolMaterial {
 pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) -> Vec<Vertex> {
     match held.item {
         ItemRef::Empty => Vec::new(),
-        // The hand lantern is drawn as its own small model, not a sprite.
-        ItemRef::Block(id) if id == crate::block::LANTERN && registry.is_known(id) => crate::lantern::held_mesh(registry),
         ItemRef::Block(id) => match block_look(id, registry) {
+            // The hand lantern is drawn as its own small model, not a sprite.
+            ItemLook::Lantern => crate::lantern::held_mesh(registry),
             ItemLook::Sprite { layer } => {
                 let mut verts = sprite_triangles(layer, HELD_SPRITE_WIDTH);
                 let offset = sprite_offset(side);
@@ -796,7 +800,8 @@ mod tests {
             let look = block_look(id, &reg);
             let class = mesh::render_class(id, &reg);
             let sprite = matches!(look, ItemLook::Sprite { .. });
-            let full_tile = FULL_TILE_BLOCKS.contains(&id);
+            // The lantern is its own model as an item, whatever the mesher's class says.
+            let full_tile = FULL_TILE_BLOCKS.contains(&id) || look == ItemLook::Lantern;
             assert_eq!(
                 sprite,
                 meshed_as_sprite(id, &reg) && !full_tile,
@@ -818,6 +823,20 @@ mod tests {
         for id in FULL_TILE_BLOCKS {
             assert!(meshed_as_sprite(id, &reg), "block {id} ({}) is a billboard in the world", reg.get(id).name);
             assert!(matches!(block_look(id, &reg), ItemLook::Cube { .. }), "block {id} ({}) is a cube item", reg.get(id).name);
+        }
+    }
+
+    #[test]
+    fn the_hand_lantern_is_its_model_everywhere_and_no_other_block_is() {
+        let reg = test_registry();
+        assert_eq!(block_look(block::LANTERN, &reg), ItemLook::Lantern);
+        assert_eq!(item_look(&Item::Block(block::LANTERN), &reg), ItemLook::Lantern);
+        assert_eq!(item_ref_look(ItemRef::Block(block::LANTERN), &reg), Some(ItemLook::Lantern));
+        assert!(!FULL_TILE_BLOCKS.contains(&block::LANTERN));
+        for id in 0..reg.len() as BlockId {
+            if id != block::LANTERN {
+                assert_ne!(block_look(id, &reg), ItemLook::Lantern, "block {id}");
+            }
         }
     }
 

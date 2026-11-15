@@ -1612,8 +1612,11 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   the cell's meta bit (`lantern::model_key`) and the far-LOD billboard is the generic one, a
   half-cell footprint. In a hand (`item_model::held_item_mesh`, routed before `block_look`) it is the
   standing shell baked once, scaled 0.55 and centred on itself (about 0.45 tall), in the entity
-  pass with no cut-out bit: a small model, not a sprite. As a dropped or framed item it is the
-  small cube (`FULL_TILE_BLOCKS`: its layers are full tiles). The web build's 512 layers are
+  pass with no cut-out bit: a small model, not a sprite. A dropped one is the same model, smaller (`ItemLook::Lantern`, `lantern::DROP_SCALE` 0.45, about
+  0.37 tall; `entity_model::push_item_drop_lantern`: it bobs and spins like the drop cube, its foot as high as the
+  cube's), no longer a cube of its full-tile layers (it is out of `FULL_TILE_BLOCKS`); the local and the
+  server-broadcast drop share it. A framed one is still the small cube of its yellow side layer (BRIDGE: the frame has
+  no model path yet). The web build's 512 layers are
   untouched (a test pins `texture_count() == 512`).
 - **The hand lantern's slot icon (pt1115).** A slot, the hotbar and the off-hand box draw a block's `tex_top` layer
   as its icon, and the lantern's top face is the opaque wallpaper-black lid fill, so its icon was a black square. One
