@@ -236,6 +236,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "avatar_shots.rs"]
     mod avatar_shots;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "lantern_shots.rs"]
+    mod lantern_shots;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

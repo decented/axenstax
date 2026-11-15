@@ -3443,11 +3443,12 @@ impl BlockRegistry {
             color: [0.55, 0.36, 0.20],
             tex_top: TEX_BOUNTY_BOARD, tex_bottom: TEX_BOUNTY_BOARD, tex_side: TEX_BOUNTY_BOARD,
         });
-        // The hand lantern: drawn by its micro-model in the world and in the hand
-        // (`lantern.rs`); the layers here are only what the dropped item (a small
-        // cube), the far-LOD billboard and the hotbar colour use, and all of them
-        // exist already (the atlas is full): the paper lantern's glowing yellow on
-        // the sides, the wallpaper-black paint layer for the lid and the base.
+        // The hand lantern: drawn by its micro-model in the world, in the hand and on
+        // the ground (`lantern.rs`), and by a code-drawn icon in a slot
+        // (`hud_icons::lantern`). The layers here are only what the far-LOD billboard
+        // uses, and all of them exist already (the atlas is full): the paper lantern's
+        // glowing yellow on the sides, the wallpaper-black paint layer (the lid and
+        // base; it is a plain fill, so it is NOT the icon).
         debug_assert_eq!(blocks.len(), LANTERN as usize, "the Lantern follows the Site Board");
         blocks.push(BlockDef { // 380 LANTERN
             name: "genesis:lantern",

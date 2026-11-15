@@ -1699,6 +1699,16 @@ pub fn build_player_avatar_vertices_travelling(
         {
             arm_override = Some(crate::shield_pose::GUARD_ARM_ANGLE);
         }
+        // A hanging item lifts its hand's forearm a little, on top of whatever the arm
+        // is doing (the walk cycle, the airborne lift, an attack swing), so the held
+        // item still rides the arm's own angle in every pose (`part_angle` below).
+        if i == LEFT_ARM_INDEX || i == RIGHT_ARM_INDEX {
+            let wire = if i == RIGHT_ARM_INDEX { main_wire } else { off_wire };
+            let lift = crate::hold_pose::hold_pose(crate::item_model::HeldItem::from_wire(wire)).arm_raise();
+            if lift != 0.0 {
+                arm_override = Some(arm_override.unwrap_or(walk_swing) + lift);
+            }
+        }
         let pose = PartPose { walk_swing, head_pitch: ps.pitch, arm_override, ..Default::default() };
         if let Some(slot) = part_angle.get_mut(i) {
             *slot = arm_override.unwrap_or(walk_swing);
@@ -1753,10 +1763,11 @@ pub fn build_player_avatar_vertices_travelling(
         let arm_pivot = arm.pivot;
         let x_rot = part_angle[side.arm_index()];
         let mut item_verts = crate::item_model::held_item_mesh(held, registry, side);
+        let pose = crate::hold_pose::hold_pose(held);
         // Off-hand release (slice 5) — a shield is placed by its own pose (worn on
         // the outside of the forearm, or lifted in front of the raised arm), not
         // hung from the hand anchor.
-        if held.tool == Some(crate::crafting::ToolType::Shield) {
+        if pose == crate::hold_pose::HoldPose::Shield {
             let raised = guard_side == Some(side);
             let m = crate::shield_pose::avatar_transform(arm.origin, arm.size, arm.pivot, side, raised);
             crate::shield_pose::transform_vertices(&mut item_verts, &m);
@@ -1771,6 +1782,18 @@ pub fn build_player_avatar_vertices_travelling(
             }
             for v in &mut item_verts {
                 let p = rotate_model_yaw(Vec3::from(v.position), (sin_y, cos_y));
+                v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
+            }
+            held_verts.extend(item_verts);
+            continue;
+        }
+        // A hanging item (the hand lantern): the hand carries it through the arm's own
+        // angle, but the item stays upright with its handle at the fist and its body
+        // hanging below, like a lantern held by its bail.
+        if let crate::hold_pose::HoldPose::Hanging { handle } = pose {
+            let fist = rot_x_about(hand_anchor, arm_pivot, x_rot) - Vec3::new(0.0, handle, 0.0);
+            for v in &mut item_verts {
+                let p = rotate_model_yaw(Vec3::from(v.position) + fist, (sin_y, cos_y));
                 v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
             }
             held_verts.extend(item_verts);
@@ -1836,19 +1859,20 @@ pub fn build_item_entity_vertices(
             continue;
         }
         let look = crate::item_model::item_look(&item.stack.item, registry);
-        push_item_drop(&mut verts, look, pos.0, anim_time, light_at(pos.0));
+        push_item_drop(&mut verts, look, registry, pos.0, anim_time, light_at(pos.0));
     }
 
     verts
 }
 
-/// Emit one dropped item in its look (`item_model`): the drop cube, or the
-/// flat sprite. Shared by the local `ItemEntity` pass and the remote-item
+/// Emit one dropped item in its look (`item_model`): the drop cube, the flat
+/// sprite, or the hand lantern's small model. Shared by the local `ItemEntity` pass and the remote-item
 /// pass, so a server-broadcast drop looks identical to a local one
 /// (death-drops phase 3).
 fn push_item_drop(
     verts: &mut Vec<Vertex>,
     look: crate::item_model::ItemLook,
+    registry: &crate::block::BlockRegistry,
     pos: Vec3,
     anim_time: f32,
     light: (f32, f32),
@@ -1860,7 +1884,32 @@ fn push_item_drop(
         crate::item_model::ItemLook::Sprite { layer } => {
             push_item_drop_sprite(verts, layer, pos, anim_time, light)
         }
+        crate::item_model::ItemLook::Lantern => push_item_drop_lantern(verts, registry, pos, anim_time, light),
     }
+}
+
+/// Emit one dropped hand lantern: its small model (`lantern::drop_mesh`) bobbing and
+/// spinning like the drop cube, its foot as high above the ground as the cube's.
+fn push_item_drop_lantern(
+    verts: &mut Vec<Vertex>,
+    registry: &crate::block::BlockRegistry,
+    pos: Vec3,
+    anim_time: f32,
+    light: (f32, f32),
+) {
+    let verts_start = verts.len();
+    let bob = (anim_time * 2.0).sin() * 0.06;
+    let yaw = anim_time * 0.9;
+    // The drop cube's foot is 0.08 up (centre 0.18, half size 0.1).
+    let centre = pos + Vec3::new(0.0, 0.08 + crate::lantern::DROP_HALF_HEIGHT + bob, 0.0);
+    let (sin_y, cos_y) = yaw.sin_cos();
+    let spin = |p: Vec3| Vec3::new(p.x * cos_y - p.z * sin_y, p.y, p.x * sin_y + p.z * cos_y);
+    for mut v in crate::lantern::drop_mesh(registry) {
+        v.position = (spin(Vec3::from(v.position)) + centre).to_array();
+        v.normal = spin(Vec3::from(v.normal)).to_array();
+        verts.push(v);
+    }
+    apply_light_channels(&mut verts[verts_start..], light);
 }
 
 /// Emit one bobbing, spinning drop cube — the shared "loot at a glance" mesh
@@ -1967,7 +2016,7 @@ pub fn build_remote_item_vertices(
                 None => continue,
             },
         };
-        push_item_drop(&mut verts, look, it.pos, anim_time, light_at(it.pos));
+        push_item_drop(&mut verts, look, registry, it.pos, anim_time, light_at(it.pos));
     }
     verts
 }
@@ -5200,5 +5249,41 @@ mod tests {
             build_player_avatar_vertices(&ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic)
         };
         assert!((arm_front(&no_shield, true) - arm_front(&rest_skin, true)).abs() < 1e-3, "no shield, no guard pose");
+    }
+}
+
+#[cfg(test)]
+mod drop_look_tests {
+    use super::*;
+
+    /// The vertices of one dropped block `id` at the origin, at animation time zero.
+    fn dropped(id: crate::block::BlockId) -> Vec<Vertex> {
+        let reg = crate::block::BlockRegistry::new();
+        let mut ecs = hecs::World::new();
+        crate::entity::spawn_item(&mut ecs, Vec3::new(0.0, 10.0, 0.0), crate::item::ItemStack::new_block(id, 1), 0);
+        build_item_entity_vertices(&ecs, &reg, 0, Vec3::new(50.0, 10.0, 50.0), |_| (1.0, 0.0))
+    }
+
+    fn extent(v: &[Vertex]) -> Vec3 {
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for v in v {
+            lo = lo.min(Vec3::from(v.position));
+            hi = hi.max(Vec3::from(v.position));
+        }
+        hi - lo
+    }
+
+    #[test]
+    fn a_dropped_lantern_is_its_small_model_not_a_cube() {
+        let lantern = dropped(crate::block::LANTERN);
+        let cube = dropped(crate::block::STONE);
+        assert_eq!(cube.len(), 36, "a dropped stone is the six-face cube");
+        assert!(lantern.len() > 36 * 3, "the lantern is its many-voxel model, not a cube ({} vertices)", lantern.len());
+        let e = extent(&lantern);
+        assert!(e.y > e.x * 1.3 && e.y > e.z * 1.3, "a lantern is taller than wide, a cube is not: {e:?}");
+        assert!(e.y > 0.25 && e.y < 0.6, "a dropped non-cube block is about the sprite's size: {e:?}");
+        // Its foot is as high above the ground as the drop cube's foot (0.08 up at rest).
+        let foot = lantern.iter().map(|v| v.position[1]).fold(f32::MAX, f32::min) - 10.4;
+        assert!((foot - 0.08).abs() < 0.03, "it sits where the cube sits, foot {foot}");
     }
 }

@@ -767,7 +767,18 @@ fn emit_non_solid_blocks(
                                     &mut cutout.vertices,
                                     &mut cutout.indices,
                                 ),
-                                crate::item_model::ItemLook::Cube { top, side, bottom } => {
+                                // A framed lantern stays the small cube (of its glowing
+                                // side layer on every face): the frame has no micro-model
+                                // path. BRIDGE: draw its model on the plate, replace when
+                                // item frames get a model look.
+                                look @ (crate::item_model::ItemLook::Cube { .. } | crate::item_model::ItemLook::Lantern) => {
+                                    let (top, side, bottom) = match look {
+                                        crate::item_model::ItemLook::Cube { top, side, bottom } => (top, side, bottom),
+                                        _ => {
+                                            let glow = registry.tex_side(crate::block::LANTERN);
+                                            (glow, glow, glow)
+                                        }
+                                    };
                                     let cube = crate::block_shape::item_frame_item_cube(facing);
                                     emit_cuboid(
                                         [obx + cube.min[0], oby + cube.min[1], obz + cube.min[2]],

@@ -1612,9 +1612,28 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   the cell's meta bit (`lantern::model_key`) and the far-LOD billboard is the generic one, a
   half-cell footprint. In a hand (`item_model::held_item_mesh`, routed before `block_look`) it is the
   standing shell baked once, scaled 0.55 and centred on itself (about 0.45 tall), in the entity
-  pass with no cut-out bit: a small model, not a sprite. As a dropped or framed item it is the
-  small cube (`FULL_TILE_BLOCKS`: its layers are full tiles). The web build's 512 layers are
+  pass with no cut-out bit: a small model, not a sprite. A dropped one is the same model, smaller (`ItemLook::Lantern`, `lantern::DROP_SCALE` 0.45, about
+  0.37 tall; `entity_model::push_item_drop_lantern`: it bobs and spins like the drop cube, its foot as high as the
+  cube's), no longer a cube of its full-tile layers (it is out of `FULL_TILE_BLOCKS`); the local and the
+  server-broadcast drop share it. A framed one is still the small cube of its yellow side layer (BRIDGE: the frame has
+  no model path yet). The web build's 512 layers are
   untouched (a test pins `texture_count() == 512`).
+- **The hand lantern's slot icon (pt1115).** A slot, the hotbar and the off-hand box draw a block's `tex_top` layer
+  as its icon, and the lantern's top face is the opaque wallpaper-black lid fill, so its icon was a black square. One
+  question now picks every slot's icon, `hud_icons::block_icon`: the lantern is a code-drawn icon
+  (`hud_icons::lantern`: a bail over a grey cap, an iron frame round a lit yellow window, a base plate; no atlas layer),
+  every other block its `tex_top` layer as before. The hotbar, the inventory window and its carried-item painter all go
+  through `hud_icons::paint_block_icon`. An audit of every block's `tex_top` found no other block whose icon layer is
+  one plain colour.
+- **How a held item is carried (`hold_pose.rs`, pt1115).** One hook, `hold_pose(HeldItem) -> HoldPose`
+  (`Default`, `Shield`, `Hanging { handle }`), is asked by the third-person avatar (`entity_model`) and the first-person
+  hands (`viewmodel`); it is keyed off the held item already on the avatar wire, so no packet, state field or save
+  changes. The shield keeps its own poses (§5.10 "The shield"). The hand lantern is `Hanging` (handle height
+  `lantern::HANDLE_HEIGHT`, 0.21): third person, its forearm lifts `HANGING_ARM_RAISE` (0.5 rad) on top of whatever
+  the arm does (idle, walk, jump, swing), the hand carries it through that angle like any held item, but the item
+  stays upright with its top bar at the fist and the body hanging below. First person, the item hangs from the fist
+  (no lean) and the whole hand is raised `HANGING_FIST_RAISE_NDC` (0.30 of the half-view height) so the body is in view
+  instead of off the bottom edge. A later hanging item (a pail, a bell) joins by returning `Hanging` with its own handle.
 - **The avatar's two hands.** `entity_model::build_player_avatar_vertices_with`
   holds the main-hand item (`held_*`) at the right arm's hand anchor and the
   off-hand item (`off_*`) at the left arm's (index 2), each through the same

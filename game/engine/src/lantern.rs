@@ -16,6 +16,9 @@
 //!   registered shells: the standing one under the block's own id, the hanging one
 //!   under [`HANGING_MODEL_KEY`] (a key that is not a block id). In the hand
 //!   ([`held_mesh`]) the standing model is drawn small, not a sprite.
+//! - **On the ground** ([`drop_mesh`]) it is the same model, smaller
+//!   ([`DROP_SCALE`]), not a cube; the inventory slot shows a code-drawn icon
+//!   (`hud_icons::lantern`), because its top face is a plain fill.
 //! - **Not built here:** collision (non-solid, like a torch) and the far-LOD
 //!   billboard (the generic one, from the block's own layer).
 
@@ -136,6 +139,15 @@ pub fn register_models(reg: &mut crate::micro_model_registry::MicroModelRegistry
 /// hand holds it about half that.
 pub const HELD_SCALE: f32 = 0.55;
 
+/// How big a dropped lantern is: the same model as the hand's, smaller. A dropped
+/// non-cube block is about 0.4 across (`item_model::DROP_SPRITE_WIDTH`); this one is
+/// about 0.37 tall and 0.22 wide.
+pub const DROP_SCALE: f32 = 0.45;
+
+/// The model's own middle, in the baked model's units (the cell is 1 across, the
+/// body 13 sixteenths tall): held and dropped meshes are centred on it.
+const MESH_CENTRE: glam::Vec3 = glam::Vec3::new(0.5, 6.5 / 16.0, 0.5);
+
 /// The lantern in the hand: the standing model baked once, scaled by
 /// [`HELD_SCALE`] and centred on its own middle, as a triangle list for the
 /// entity passes (the caller stamps the light). No cut-out bit: every texel it
@@ -144,19 +156,39 @@ pub fn held_mesh(registry: &BlockRegistry) -> Vec<Vertex> {
     static MESH: OnceLock<Vec<Vertex>> = OnceLock::new();
     MESH.get_or_init(|| {
         let baked = bake_micro_model(&standing_model(), registry);
-        let centre = glam::Vec3::new(0.5, 6.5 / 16.0, 0.5);
         baked
             .indices
             .iter()
             .map(|&i| {
                 let mut v = baked.vertices[i as usize];
-                v.position = ((glam::Vec3::from(v.position) - centre) * HELD_SCALE).to_array();
+                v.position = ((glam::Vec3::from(v.position) - MESH_CENTRE) * HELD_SCALE).to_array();
                 v
             })
             .collect()
     })
     .clone()
 }
+
+/// How far the top bar of the held model (the grip of its bail) sits above the
+/// mesh's own middle: the hanging pose puts this at the fist
+/// (`hold_pose::HoldPose::Hanging`). 12.5 sixteenths is the bar's middle.
+pub const HANDLE_HEIGHT: f32 = (12.5 / 16.0 - MESH_CENTRE.y) * HELD_SCALE;
+
+/// The dropped lantern's mesh: the hand's model at [`DROP_SCALE`], centred on itself
+/// (`item_model::ItemLook::Lantern`; the caller spins and lifts it).
+pub fn drop_mesh(registry: &BlockRegistry) -> Vec<Vertex> {
+    let k = DROP_SCALE / HELD_SCALE;
+    held_mesh(registry)
+        .into_iter()
+        .map(|mut v| {
+            v.position = (glam::Vec3::from(v.position) * k).to_array();
+            v
+        })
+        .collect()
+}
+
+/// Half the dropped lantern's height: how far its middle is above its foot.
+pub const DROP_HALF_HEIGHT: f32 = MESH_CENTRE.y * DROP_SCALE;
 
 #[cfg(test)]
 mod tests {

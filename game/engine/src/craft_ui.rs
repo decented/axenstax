@@ -1797,15 +1797,7 @@ fn draw_item_slot(
 
         match &stack.item {
             Item::Block(id) => {
-                let tex_layer = registry.tex_top(*id);
-                if let Some(tex_id) = icons.block_texture(tex_layer) {
-                    ui.painter().image(
-                        tex_id,
-                        icon_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                }
+                crate::hud_icons::paint_block_icon(ui.painter(), icon_rect, *id, registry, |layer| icons.block_texture(layer));
             }
             Item::Tool(tool) if tool.tool_type == crate::crafting::ToolType::Shield => {
                 icons.paint_shield(ui, icon_rect);
@@ -1957,15 +1949,7 @@ fn paint_item_icon(
 ) {
     match &stack.item {
         Item::Block(id) => {
-            let tex_layer = registry.tex_top(*id);
-            if let Some(tex_id) = icons.block_texture(tex_layer) {
-                painter.image(
-                    tex_id,
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-            }
+            crate::hud_icons::paint_block_icon(painter, rect, *id, registry, |layer| icons.block_texture(layer));
         }
         _ => {
             let color = stack.item.color(registry);
@@ -2811,3 +2795,49 @@ mod tests {
 #[cfg(test)]
 #[path = "craft_ui_phone_tests.rs"]
 mod phone_tests;
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    /// Every shape one `paint_item_icon` call puts down for `stack`, with no atlas
+    /// icons available (a headless pass).
+    fn shapes_of(stack: &ItemStack) -> Vec<egui::epaint::Shape> {
+        let ctx = egui::Context::default();
+        let reg = BlockRegistry::new();
+        let out = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(48.0, 48.0));
+            paint_item_icon(&painter, rect, stack, &reg, &NoIcons);
+        });
+        out.shapes.into_iter().map(|s| s.shape).collect()
+    }
+
+    /// The fill colours of every filled rect in `shapes`.
+    fn fills(shapes: &[egui::epaint::Shape]) -> Vec<egui::Color32> {
+        fn walk(s: &egui::epaint::Shape, out: &mut Vec<egui::Color32>) {
+            match s {
+                egui::epaint::Shape::Rect(r) => out.push(r.fill),
+                egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|s| walk(s, &mut out));
+        out
+    }
+
+    #[test]
+    fn the_lantern_icon_is_a_drawn_lantern_not_a_texture_layer() {
+        // A stone's icon is its atlas layer: with no atlas, nothing is drawn.
+        assert!(shapes_of(&ItemStack::new_block(crate::block::STONE, 1)).is_empty());
+        // The lantern is painted: a frame, a lit window and a grey cap, with a handle.
+        let lantern = shapes_of(&ItemStack::new_block(crate::block::LANTERN, 1));
+        assert!(lantern.len() >= 4, "a frame, a window, a cap and a handle: {} shapes", lantern.len());
+        let colours = fills(&lantern);
+        let lit = |c: &egui::Color32| c.r() > 200 && c.g() > 170 && c.b() < 140;
+        assert!(colours.iter().any(lit), "a lit yellow window: {colours:?}");
+        // And it is not the old icon, the black fill of the lid layer (34, 34, 40).
+        assert!(!colours.iter().all(|c| *c == egui::Color32::from_rgb(34, 34, 40)));
+    }
+}

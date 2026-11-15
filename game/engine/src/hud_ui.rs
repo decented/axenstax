@@ -1266,7 +1266,7 @@ pub(crate) fn paint_shield_icon(ui: &egui::Ui, icon_rect: egui::Rect, egui_integ
 
 /// One stack drawn inside a slot rect: its icon, count badge and durability
 /// bar. Shared by the hotbar slots and the off-hand box.
-fn draw_stack_in_slot(
+pub(crate) fn draw_stack_in_slot(
     ui: &egui::Ui,
     rect: egui::Rect,
     stack: &crate::item::ItemStack,
@@ -1278,15 +1278,7 @@ fn draw_stack_in_slot(
 
     match &stack.item {
         Item::Block(id) => {
-            let tex_layer = registry.tex_top(*id);
-            if let Some(tex_id) = egui_integration.block_texture(tex_layer) {
-                ui.painter().image(
-                    tex_id,
-                    icon_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-            }
+            crate::hud_icons::paint_block_icon(ui.painter(), icon_rect, *id, registry, |layer| egui_integration.block_texture(layer));
         }
         Item::Tool(tool) if tool.tool_type == crate::crafting::ToolType::Shield => {
             paint_shield_icon(ui, icon_rect, egui_integration);
