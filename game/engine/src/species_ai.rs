@@ -34,7 +34,7 @@ use crate::entity::{Flying, MobKind, Position, Velocity};
 use crate::mob::{self, MobType};
 use crate::mob_ai::{AiState, MobAi};
 
-// --- Tunables (feel; Axolittle playtest refines) -------------------------
+// --- Tunables (feel; playtest refines) -------------------------
 
 /// Rabbit hop: horizontal leap speed as a multiple of base walk speed.
 pub const RABBIT_HOP_SPEED_MULT: f32 = 2.5;

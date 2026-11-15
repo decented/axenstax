@@ -6,7 +6,7 @@
 //! always produce the same tree.
 //!
 //! Live placement (deciding *where* trees go in world-gen) needs the
-//! 28a biome layer + Axolittle playtest. This module is the shape
+//! 28a biome layer + playtest. This module is the shape
 //! library that the eventual live placer consumes.
 //!
 //! Each shape is testable for invariants:

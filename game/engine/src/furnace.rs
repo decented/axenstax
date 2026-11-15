@@ -94,7 +94,7 @@ pub struct FurnaceTickOutcome {
 /// Pure recipe table. **Spec 29 (2026-05-21) — furnace is ore-only.**
 /// The raw-meat → cooked-meat arms that v1 inherited from the grid-
 /// smelt migration moved entirely to the Campfire (Spec 17) following
-/// Axolittle's playtest call: the furnace is the smelter, the
+/// The tester's playtest call: the furnace is the smelter, the
 /// campfire is the cook station. No overlap.
 pub fn smelt_recipe_for_input(input: MaterialId) -> Option<MaterialId> {
     use MaterialId::*;
@@ -823,7 +823,7 @@ mod tests {
 
     #[test]
     fn smelt_recipe_rejects_raw_meats_post_spec29() {
-        // Spec 29 — Axolittle's playtest call 2026-05-21: cooking
+        // Spec 29 — the tester's playtest call 2026-05-21: cooking
         // food belongs at the Campfire (Spec 17), not in the furnace.
         // These four arms were live up to and including v1 (Spec 20);
         // Spec 29 removes them. The four meats now return None;

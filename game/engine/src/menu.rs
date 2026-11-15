@@ -5367,7 +5367,7 @@ pub fn draw_settings_panel(
             }
 
             // Phase 6 — third-person camera section. Defaults preserve the
-            // approved feel; these are the live dials the Axolittle playtest tunes.
+            // approved feel; these are the live dials the playtest tunes.
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(6.0);

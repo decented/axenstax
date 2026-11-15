@@ -78,7 +78,7 @@ fn anchor_hash(world_seed: u32, gx: i32, gz: i32) -> u32 {
 
 /// Should the grid cell `(gx, gz)` host a village? About 80% of cells do —
 /// the other 20% are intentional empty stretches so the world doesn't feel
-/// villager-saturated. (Will be tuned post-Axolittle-playtest.)
+/// villager-saturated. (Will be tuned post-playtest.)
 fn cell_has_village(world_seed: u32, gx: i32, gz: i32) -> bool {
     !anchor_hash(world_seed, gx, gz).is_multiple_of(5)
 }

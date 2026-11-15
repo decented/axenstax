@@ -70,7 +70,7 @@ pub enum PowerDeviceKind {
 /// Spec 49 (Explosives) — the Blasting Keg fuse length, in ticks (~4 s @ 20 TPS).
 /// Stored in `PowerDeviceData.charge` once lit (by the Magnesium Firestarter or a
 /// rising-edge power pulse) and counted down in the game-loop keg sweep. Tunable
-/// const — Axolittle tunes the final feel at playtest.
+/// const — the final feel is tuned at playtest.
 pub const KEG_FUSE_TICKS: u32 = 80;
 
 /// Per-device state stored in `BlockEntityData::PowerDevice` (saved).

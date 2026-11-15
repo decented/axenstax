@@ -1086,13 +1086,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("pack.json"),
-            r#"{ "name": "Crisp 32", "texture_resolution": 32, "authors": ["axo"], "license": "CC-BY-4.0" }"#,
+            r#"{ "name": "Crisp 32", "texture_resolution": 32, "authors": ["builder"], "license": "CC-BY-4.0" }"#,
         )
         .unwrap();
         let m = load_manifest(&dir);
         assert_eq!(m.name, "Crisp 32");
         assert_eq!(m.texture_resolution, 32);
-        assert_eq!(m.authors, vec!["axo".to_string()]);
+        assert_eq!(m.authors, vec!["builder".to_string()]);
         assert_eq!(m.license, "CC-BY-4.0");
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -164,7 +164,7 @@ def render_md(path: Path) -> tuple[str, str]:
 SECTIONS = {
     "gameplay": {
         "title": "Gameplay",
-        "subtitle": "Everything about how the game plays — Axolittle's territory",
+        "subtitle": "Everything about how the game plays — feel, mechanics and mobs",
         "docs": [
             {"path": "vision/platform-overview.md", "title": "Platform Overview", "short": "The vision"},
             {"path": "spec/05-gameplay-systems.md", "title": "Gameplay Systems", "short": "Movement, blocks, inventory, combat, mobs"},

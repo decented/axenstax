@@ -927,7 +927,7 @@ mod tests {
             trial_id: "sprint".to_string(),
             trial_name: "The Sprint".to_string(),
             ticks: 240,
-            author: Some("Axo".to_string()),
+            author: Some("Builder".to_string()),
             ghost,
         };
         let back = GhostShareFile::from_json(&f.to_json()).expect("round trip");
@@ -985,11 +985,11 @@ mod tests {
         ghost.record(frame(0.0));
         bests.rivals.insert(
             "sprint".to_string(),
-            RivalGhost { label: "Axo".to_string(), ticks: 200, ghost },
+            RivalGhost { label: "Builder".to_string(), ticks: 200, ghost },
         );
         let back = TrialBests::from_json(&bests.to_json());
         assert_eq!(back.rivals.len(), 1);
-        assert_eq!(back.rivals["sprint"].label, "Axo");
+        assert_eq!(back.rivals["sprint"].label, "Builder");
         // A pre-rival store (no `rivals` key) still loads — tolerant default.
         let old = r#"{"bests":{},"completed_challenges":[]}"#;
         assert!(TrialBests::from_json(old).rivals.is_empty());
@@ -1019,10 +1019,10 @@ mod tests {
     fn rival_outcome_line_celebrates_or_reports() {
         let mut ghost = GhostRecording::new();
         ghost.record(frame(0.0));
-        let rival = RivalGhost { label: "Axo".to_string(), ticks: 200, ghost };
-        assert_eq!(rival_outcome_line(&rival, 150), "You beat Axo's ghost!");
+        let rival = RivalGhost { label: "Builder".to_string(), ticks: 200, ghost };
+        assert_eq!(rival_outcome_line(&rival, 150), "You beat Builder's ghost!");
         let slower = rival_outcome_line(&rival, 300);
-        assert!(slower.starts_with("Axo's ghost: "), "reports their time: {slower}");
+        assert!(slower.starts_with("Builder's ghost: "), "reports their time: {slower}");
     }
 
     #[test]
@@ -1286,7 +1286,7 @@ mod tests {
             ghost: GhostRecording::new(),
         };
         let mut mine = TrialBests::default();
-        mine.rivals.insert("sprint".into(), rival("Axo", 400));
+        mine.rivals.insert("sprint".into(), rival("Builder", 400));
         let mut web = TrialBests::default();
         web.rivals.insert("sprint".into(), rival("Stax", 350));
         web.rivals.insert("climb".into(), rival("Stax", 600));
@@ -1349,7 +1349,7 @@ mod tests {
         let rival = |label: &str, ticks: u32| RivalGhost { label: label.to_string(), ticks, ghost: GhostRecording::new() };
         // The game's copy just imported a slower rival on purpose…
         let mut game = TrialBests::default();
-        game.rivals.insert("sprint".into(), rival("Axo", 500));
+        game.rivals.insert("sprint".into(), rival("Builder", 500));
         game.mark_challenge_done("Chop a tree");
         // …while the copy on disk (the gallery's) opened a card and holds an
         // older, faster rival and a best the game's copy never saw.
@@ -1358,7 +1358,7 @@ mod tests {
         disk.mark_card_opened("fish");
         disk.bests.insert("sprint".into(), best(250, 1.0));
         game.absorb_progress(&disk);
-        assert_eq!(game.rivals["sprint"].label, "Axo", "an import replaces; a save must not undo it");
+        assert_eq!(game.rivals["sprint"].label, "Builder", "an import replaces; a save must not undo it");
         assert!(game.cards_opened.contains("fish"), "the gallery's mark survives the game's save");
         assert_eq!(game.best("sprint").map(|b| b.ticks), Some(250));
         assert!(game.is_challenge_done("Chop a tree"));
@@ -1437,7 +1437,7 @@ mod tests {
         };
         let mut game = TrialBests::default();
         let mut gallery = TrialBests::default();
-        game.rivals.insert("sprint".into(), rival("Axo", 500));
+        game.rivals.insert("sprint".into(), rival("Builder", 500));
         save(&mut game, &mut stored);
         gallery.rivals.insert("marathon".into(), rival("Stax", 900));
         gallery.mark_card_opened("fish");
@@ -1454,7 +1454,7 @@ mod tests {
         let mut slow = TrialBests::default();
         slow.rivals.insert("sprint".into(), rival("Slow", 800));
         save(&mut slow, &mut stored);
-        assert_eq!(TrialBests::from_json(&stored).rivals["sprint"].label, "Axo");
+        assert_eq!(TrialBests::from_json(&stored).rivals["sprint"].label, "Builder");
     }
 
     #[test]

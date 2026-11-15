@@ -264,9 +264,9 @@ mod tests {
 
     #[test]
     fn a_row_reads_name_and_players_and_never_the_room_code() {
-        let r = room("Axo's World", "KMTRWX", 23, 2, 5);
+        let r = room("Builder's World", "KMTRWX", 23, 2, 5);
         let label = entry_label(&room_label(&r), &r);
-        assert_eq!(label, "Axo's World  \u{b7}  2 of 5 players");
+        assert_eq!(label, "Builder's World  \u{b7}  2 of 5 players");
         // The code works over the internet; the LAN list is everyone nearby.
         for rooms in [vec![r.clone()], vec![room("a", "KMTRWX", 1, 5, 5)]] {
             for (r, name) in rooms.iter().zip(row_names(&rooms)) {
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn the_games_section_draws_in_every_state_without_a_phantom_click() {
         let populated = LanGames {
-            rooms: ordered(&[room("Axo", "KMTRWX", 3, 1, 5), room("Full", "PQRSTU", 5, 5, 5)]),
+            rooms: ordered(&[room("Builder", "KMTRWX", 3, 1, 5), room("Full", "PQRSTU", 5, 5, 5)]),
             listening: true,
         };
         let empty = LanGames { rooms: vec![], listening: true };

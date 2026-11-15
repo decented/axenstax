@@ -46,7 +46,7 @@ pub fn crop_can_plant_at(x: i32, y: i32, z: i32, world: &World) -> bool {
 /// tuples. Caller renders this however it likes.
 ///
 /// Doesn't try to enumerate every possible recipe — covers the
-/// staples Axolittle will hit first: Bread, Sticks, Planks, basic
+/// staples players will hit first: Bread, Sticks, Planks, basic
 /// tool tiers. The crafting registry is already shape-based; the
 /// achievable-list is an additive surface.
 #[cfg_attr(not(test), allow(dead_code))]

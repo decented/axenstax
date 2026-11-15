@@ -359,7 +359,7 @@ mod tests {
         assert!(ever_strikes(true, 200_000), "a normal world must still get storms");
     }
 
-    /// THE guard — Axolittle 2026-07-31. No rain in the Workshop, ever.
+    /// THE guard — playtest report 2026-07-31. No rain in the Workshop, ever.
     #[test]
     fn the_workshop_never_rains() {
         assert!(!ever_rains(false, 200_000), "the Workshop must stay clear");

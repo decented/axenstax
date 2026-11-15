@@ -100,7 +100,7 @@ const HOTBAR_SCROLL_COOLDOWN_TICKS: u64 = 2;
 /// Ticks between successive block placements while the place button is HELD
 /// (20 TPS). The first placement on a fresh press is always immediate — this
 /// only paces the auto-repeat. Bumped 6 → 10 (300 ms → 500 ms) after the
-/// 2026-06-16 playtest (Axolittle "place blocks too fast"): a kid holding the
+/// 2026-06-16 playtest (the tester said "place blocks too fast"): a player holding the
 /// button a beat too long was getting an unwanted second block. Calmer, still
 /// responsive for distinct clicks. Feel-tunable. (Earlier history: 4 → 6 when
 /// 4 felt "too twitchy in creative".)
@@ -16955,7 +16955,7 @@ impl super::GameState {
                             // player's own foot level, so aiming straight down at
                             // your feet no-ops. Speak up so the gesture isn't
                             // mistaken for "broken". Applies in EVERY world (was
-                            // workshop-only) — Axo hit this trying to lay cables on
+                            // workshop-only) — the tester hit this trying to lay cables on
                             // the floor and got silence. (Cables and other
                             // non-solid blocks now place instead via the
                             // `would_place_solid` exemption above.)

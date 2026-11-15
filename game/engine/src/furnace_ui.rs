@@ -1,5 +1,5 @@
 //! Spec 20 Phase 5 — Furnace egui overlay. **Spec 29 (2026-05-21)**
-//! reworked the surface following Axolittle's playtest:
+//! reworked the surface following the tester's playtest:
 //!
 //! - Three slots are now **clickable buttons** with Minecraft-style
 //!   semantics. Left-click moves 1 unit; shift-click moves the whole

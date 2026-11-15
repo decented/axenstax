@@ -117,7 +117,7 @@ pub(crate) const THUNDER_LAYERS: [Layer; 2] = [
     Layer::RumbleNoise { secs: 2.0, volume: 0.15, attack: 0.30, cutoff: 400.0 },
 ];
 
-/// The recipe for each sound. Tunable at the Axolittle playtest.
+/// The recipe for each sound. Tunable at the playtest.
 pub(crate) fn layers(sound: Sound) -> &'static [Layer] {
     match sound {
         Sound::Break => &[Layer::Noise { secs: 0.08, volume: 0.3 }],

@@ -120,7 +120,7 @@ pub fn draw_villager_dialogue(
             ui.vertical_centered(|ui| {
                 ui.add_space(14.0);
                 // Villager name (Phase 13 may swap in nicer names from
-                // Axolittle's playtest).
+                // the tester's playtest).
                 ui.label(
                     egui::RichText::new(villager_label)
                         .size(22.0)

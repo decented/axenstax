@@ -323,7 +323,7 @@ impl InputState {
         }
         match action {
             // Double-tap Jump toggles creative flight (Spec 05 Section 1.7).
-            // Window widened 300 → 450 ms (2026-06-16 playtest: Axolittle "to come out
+            // Window widened 300 → 450 ms (2026-06-16 playtest: the tester said "to come out
             // of flying you have to double-tap space really quickly") — easier for a
             // kid to trigger the toggle without fumbling the timing.
             Action::Jump => {

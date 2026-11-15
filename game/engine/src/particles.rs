@@ -8,7 +8,7 @@
 //! `GraphicsSettings.particles` (Off / Reduced / Full), and everything is
 //! deterministic (position+seed hashes, no RNG — house discipline).
 //!
-//! Feel knobs live in the constants below — Axo playtest tunes them.
+//! Feel knobs live in the constants below — the playtest tunes them.
 
 use glam::Vec3;
 

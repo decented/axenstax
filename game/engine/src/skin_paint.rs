@@ -120,7 +120,7 @@ pub fn restore_from(buf: &mut [u8], cx: u32, cy: u32, brush: u32, source: &[u8],
 /// `[0, 0, 0, 0]`, and `picked_color` survives a clothes/layer toggle. Without
 /// this guard the next base stroke pencils alpha-0 texels into the body and
 /// `fs_avatar` (`shader.wgsl`, `alpha < 0.5 -> discard`) renders a see-through
-/// hole. Reported by Axolittle 2026-07-31: "the back of the arms on the skins
+/// hole. Reported by the tester 2026-07-31: "the back of the arms on the skins
 /// are trasparent".
 pub fn bind_to_layer(color: [u8; 4], layer: crate::skin_uv::SkinLayer) -> [u8; 4] {
     match layer {
@@ -845,7 +845,7 @@ mod tests {
         assert_eq!(get_pixel(&b, 5, 5), [0, 255, 0, 255], "restored from source");
     }
 
-    // ── base-is-never-transparent (Axolittle 2026-07-31) ────────────────────
+    // ── base-is-never-transparent (playtest report 2026-07-31) ────────────────────
 
     /// A transparent colour bound for the BASE layer is forced opaque. This is
     /// the eyedropper hole-punch: grabbing a colour off the bare clothes shell

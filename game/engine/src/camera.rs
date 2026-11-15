@@ -130,7 +130,7 @@ impl CameraMode {
     }
 }
 
-// Tuning consts — *feel* numbers. Phase 6's Axolittle playtest tunes these; the
+// Tuning consts — *feel* numbers. Phase 6's playtest tunes these; the
 // directions they encode (behind / to-the-side / lifted) are the invariant, not
 // the magnitudes. All in world units (blocks).
 /// Over-the-shoulder: metres the render eye pulls back along -forward.
@@ -179,7 +179,7 @@ pub const PITCH_FOV_MAX: f32 = 8.0;
 // Auto-recenter / free-look tuning. Live as of Phase 6 (free-look input bound to
 // Alt; auto-recenter ticked in the game loop). The DEFAULT values double as the
 // `GraphicsSettings.auto_centre_*` defaults — the flagged feel guesses the
-// Axolittle playtest tunes via the in-game sliders.
+// The playtest tunes via the in-game sliders.
 /// Default auto-recenter ease speed: orbit radians/second back toward behind.
 pub const RECENTER_SPEED: f32 = 2.5;
 /// Default post-input cooldown (seconds) after free-look before recenter resumes.

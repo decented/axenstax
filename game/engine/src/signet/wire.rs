@@ -217,7 +217,7 @@ mod tests {
             pubkey: [0xaau8; 32],
             created_at: 1_700_000_000,
             kind: CREDENTIAL_KIND,
-            tags: vec![vec!["display-name".into(), "AxoLittle".into()]],
+            tags: vec![vec!["display-name".into(), "Builder".into()]],
             content: String::new(),
             id: [0xccu8; 32],
             sig: [0xdeu8; 64],

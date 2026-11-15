@@ -2030,7 +2030,7 @@ pub fn tool_texture(material: crate::crafting::ToolMaterial) -> u32 {
         M::Iron => TEX_ITEM_TOOL_IRON,
         M::Diamond => TEX_ITEM_TOOL_DIAMOND,
         // Satori tools reuse the Satori item icon for now — Wave 25b polish
-        // can add dedicated tool variants if Axolittle wants distinct icons.
+        // can add dedicated tool variants if the tester wants distinct icons.
         M::Satori => crate::block::TEX_ITEM_SATORI,
     }
 }

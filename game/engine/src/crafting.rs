@@ -306,14 +306,14 @@ fn max_durability(material: ToolMaterial) -> u16 {
 pub fn block_hardness(block_id: BlockId) -> f32 {
     // Values = seconds to break with bare fist (speed 1.0).
     match block_id {
-        block::DIRT | block::GRASS | block::WORN_PATH => 2.5,  // Axolittle: 2.5s
+        block::DIRT | block::GRASS | block::WORN_PATH => 2.5,  // playtest-tuned: 2.5s
         block::SAND => 0.5,
         block::GRAVEL => 0.6,
-        block::STONE => 10.0,               // Axolittle: 10s
+        block::STONE => 10.0,               // playtest-tuned: 10s
         block::COBBLESTONE => 2.0,
         // Every log (any species, the tapped rubber log too) takes oak's
         // owner-tuned 4.5 s by hand; one rule, not one entry per species.
-        id if block::is_any_log_block(id) => 4.5,   // Axolittle: 4.5s
+        id if block::is_any_log_block(id) => 4.5,   // playtest-tuned: 4.5s
         // Every species' planks and leaves break like oak's (2026-11-15): they
         // fell to the 1.0 s default, so a birch floor broke twice as fast as oak.
         id if block::is_any_planks(id) => 2.0,
@@ -2250,7 +2250,7 @@ fn match_recipe_exact(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
             return Some(ItemStack::new_material(MaterialId::CopperCable, 2));
         }
         // Spec 48 (Electricity) — power-block 1×3 recipes. Shapes adapted from
-        // the spec's proposed set to existing materials (owner/Axolittle to
+        // the spec's proposed set to existing materials (owner/tester to
         // confirm feel). Placed AFTER the CopperCable material arm so its
         // Copper/Rubber/Copper recipe stays unshadowed; Cable inverts the layers
         // (Rubber outside, "insulated wire") to keep the two grids distinct.
@@ -5671,7 +5671,7 @@ mod tests {
 
     // Spec 48 (Electricity) — every power block must be craftable, not just
     // /give-able (the Phase-1 obtainability guard). Shapes are the spec's
-    // proposed set adapted to existing materials (owner/Axolittle confirm feel).
+    // proposed set adapted to existing materials (owner/tester confirm feel).
     #[test]
     fn electricity_blocks_are_craftable() {
         use MaterialId as M;

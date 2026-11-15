@@ -277,7 +277,7 @@ fn protocol_version_is_the_pinned_value() {
 fn join_request_round_trips_bincode() {
     let req = protocol::JoinRequestPacket {
         protocol_version: protocol::PROTOCOL_VERSION,
-        player_name: "Axo".to_string(),
+        player_name: "Builder".to_string(),
         auth_event: None,
         handle_credential: None,
         skin_key: 0,
@@ -312,13 +312,13 @@ fn player_name_length_rule() {
     // to re-declare the constant locally and could never fail.
     let max = protocol::MAX_PLAYER_NAME_LEN;
 
-    assert!(protocol::player_name_is_valid("Axo"));
+    assert!(protocol::player_name_is_valid("Builder"));
     assert!(protocol::player_name_is_valid(&"x".repeat(max)), "exactly the limit is accepted");
     assert!(
         !protocol::player_name_is_valid(&"x".repeat(max + 1)),
         "one byte over the limit is rejected"
     );
-    assert!(!protocol::player_name_is_valid("Axo\x1b[31m"), "control characters are rejected");
+    assert!(!protocol::player_name_is_valid("Builder\x1b[31m"), "control characters are rejected");
     // The limit is in bytes: a 4-byte emoji x 9 is 36 bytes but 9 chars.
     assert!(!protocol::player_name_is_valid(&"\u{1F980}".repeat(9)), "the cap counts bytes");
     // The text the joiner sees must quote the real limit, not a stale literal.

@@ -642,7 +642,7 @@ pub struct World {
     pub architect_plaques: AHashMap<(i32, i32, i32), crate::plan::PlaqueChain>,
     /// Spec 29 — one-shot legacy migration queue. When a v1 save with
     /// raw meat in a furnace input slot loads, the meat is ejected
-    /// (the v2 furnace is ore-only per Axolittle's 2026-05-21 playtest
+    /// (the v2 furnace is ore-only per the tester's 2026-05-21 playtest
     /// call) and queued here for the GameState / GameServer first-tick
     /// path to spawn as ItemEntities near the furnace block. NOT
     /// persisted on save — drained on each tick.
@@ -3356,7 +3356,7 @@ impl World {
     }
 
     // Surface-decoration densities (per-cell roll out of 100). Halved on
-    // 2026-05-30 after Axolittle's playtest: flower/grass density was both
+    // 2026-05-30 after the tester's playtest: flower/grass density was both
     // visually cluttered ("too many flowers") and a frame-rate sink (each
     // plant is an individual non-solid cross-quad mesh). The renderer-side
     // lever is plant-mesh instancing; these constants trim the raw count.
@@ -3539,7 +3539,7 @@ pub(crate) fn species_pick_for(wx: i32, wz: i32, seed: u32, pool_len: usize) -> 
 /// Per-biome tree-placement threshold. `tree_hash % threshold == 0` is
 /// the spawn gate. Returns `None` for treeless biomes (Desert, Ocean,
 /// Mountains today). Forest + Plains preserve their pre-Spec-28b
-/// rates exactly to avoid jarring Axo's existing terrain. Jungle is
+/// rates exactly to avoid jarring existing terrain. Jungle is
 /// dense (1/10) to match Minecraft expectations; Birch/Taiga match
 /// Forest; Savanna + SnowyTundra are sparse.
 pub(crate) fn tree_threshold_for_biome(biome: Biome) -> Option<i32> {
@@ -4523,7 +4523,7 @@ mod tests {
         // flower is an individual non-solid cross-quad mesh, so raw
         // density drives both visual clutter and frame cost. Guard that
         // flower coverage of grassy surface stays modest — the original
-        // 4% roll read as "too many" to Axolittle.
+        // 4% roll read as "too many" to the tester.
         let bg = BiomeGenerator::new(42, crate::biome::Generator::V2);
         let mut world = World::new();
         for cx in 0..6 {

@@ -169,7 +169,7 @@ pub const MINIMAP_ZOOM_MAX: f32 = 4.0;
 pub const DEFAULT_MINIMAP_ZOOM: f32 = 1.0;
 
 /// The default mouse-look multiplier. Lowered 0.003 → 0.002 (2026-06-16 playtest:
-/// Axolittle "look around too fast") for a calmer default turn rate; players who
+/// the tester said "look around too fast") for a calmer default turn rate; players who
 /// want faster can raise it on the Settings slider (`SENSITIVITY_MIN..=MAX`).
 /// Feel-tunable.
 pub const DEFAULT_SENSITIVITY: f32 = 0.002;
@@ -183,7 +183,7 @@ const LEGACY_SENSITIVITY_DEFAULT: f32 = 0.003;
 pub const DEFAULT_FOV: f32 = 70.0;
 
 // Phase 6 — third-person camera feel ranges (live-tunable sliders). Defaults are
-// the flagged feel guesses; the Axolittle playtest tunes them in-game.
+// the flagged feel guesses; the playtest tunes them in-game.
 /// Third-person pull-back zoom multiplier (1.0 = the built-in distance).
 pub const TP_DISTANCE_MIN: f32 = 0.5;
 pub const TP_DISTANCE_MAX: f32 = 2.0;
@@ -857,7 +857,7 @@ fn save_raw(json: &str) {
 /// One-shot migration for a value carried over from an old persisted profile.
 ///
 /// **Sensitivity migration (2026-09-06)**: `DEFAULT_SENSITIVITY` was lowered
-/// 0.003 → 0.002 on 2026-06-16 (Axolittle playtest: "look around too fast"),
+/// 0.003 → 0.002 on 2026-06-16 (playtest: "look around too fast"),
 /// but a profile already saved to native `settings.json` or web localStorage
 /// (`axenstax_gfx`) keeps whatever value it was written with — new-install
 /// players got the calmer default, existing players stayed on the old feel

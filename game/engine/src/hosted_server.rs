@@ -8957,12 +8957,12 @@ pub(crate) mod tests {
         let now = current_unix_ts();
 
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, now);
-        let cred = signed_credential([0x42; 32], "Axolittle", None, now);
+        let cred = signed_credential([0x42; 32], "Builder", None, now);
         let req = join_with_auth(ev, Some(cred));
 
         let (handle, pubkey) = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN)
             .expect("valid auth + credential must accept");
-        assert_eq!(handle.as_deref(), Some("Axolittle"));
+        assert_eq!(handle.as_deref(), Some("Builder"));
         // Phase 4 — verify now also surfaces the pubkey (economy ownership).
         assert_ne!(pubkey, [0u8; 32]);
     }
@@ -9080,7 +9080,7 @@ pub(crate) mod tests {
         let now = current_unix_ts();
 
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, now);
-        let cred = signed_credential([0x42; 32], "Axo", Some(now - 1), now);
+        let cred = signed_credential([0x42; 32], "Builder", Some(now - 1), now);
         let req = join_with_auth(ev, Some(cred));
 
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
@@ -9132,9 +9132,9 @@ pub(crate) mod tests {
 
     #[test]
     fn sanitise_handle_strips_bidi_and_control_and_caps_length() {
-        assert_eq!(sanitise_handle("Axo\u{202E}elttil"), "Axoelttil");
+        assert_eq!(sanitise_handle("Buil\u{202E}der"), "Builder");
         assert_eq!(sanitise_handle("a\nb\u{200B}c\u{2066}d"), "abcd");
-        assert_eq!(sanitise_handle("  Axolittle  "), "Axolittle");
+        assert_eq!(sanitise_handle("  Builder  "), "Builder");
         let long = "x".repeat(100);
         assert_eq!(sanitise_handle(&long).chars().count(), MAX_HANDLE_CHARS);
         assert_eq!(sanitise_handle("\u{202E}\u{200F}"), "");
@@ -9154,15 +9154,15 @@ pub(crate) mod tests {
     #[test]
     fn disambiguate_handle_unique_when_no_collision() {
         let pk = [0x11u8; 32];
-        assert_eq!(disambiguate_handle("Axolittle", &pk, &["Staxolottle"]), "Axolittle");
+        assert_eq!(disambiguate_handle("Builder", &pk, &["Staxolottle"]), "Builder");
     }
 
     #[test]
     fn disambiguate_handle_appends_suffix_on_collision() {
         let pk = [0x11u8; 32];
-        let out = disambiguate_handle("Axolittle", &pk, &["Axolittle"]);
-        assert!(out.starts_with("Axolittle-"), "got {out}");
-        assert!(out.len() > "Axolittle-".len(), "suffix must be non-empty: {out}");
+        let out = disambiguate_handle("Builder", &pk, &["Builder"]);
+        assert!(out.starts_with("Builder-"), "got {out}");
+        assert!(out.len() > "Builder-".len(), "suffix must be non-empty: {out}");
     }
 
     #[test]
@@ -9188,14 +9188,14 @@ pub(crate) mod tests {
         let nonce_hex = issue_nonce(&mut chals, 0);
         let now = current_unix_ts();
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, now);
-        let cred = signed_credential([0x42; 32], "Axolittle", None, now);
+        let cred = signed_credential([0x42; 32], "Builder", None, now);
         let req = join_with_auth(ev, Some(cred));
 
         let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], Vec::new)
             .expect("valid signed join must be accepted");
         // A credential name is self-asserted: always tagged with the npub suffix.
         let pk = id.pubkey.expect("verified join must surface the pubkey");
-        assert_eq!(id.display_name, format!("Axolittle-{}", npub_suffix(&pk, 4)));
+        assert_eq!(id.display_name, format!("Builder-{}", npub_suffix(&pk, 4)));
     }
 
     #[test]
@@ -9204,12 +9204,12 @@ pub(crate) mod tests {
         let nonce_hex = issue_nonce(&mut chals, 0);
         let now = current_unix_ts();
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, now);
-        let cred = signed_credential([0x42; 32], "Axolittle", None, now);
+        let cred = signed_credential([0x42; 32], "Builder", None, now);
         let req = join_with_auth(ev, Some(cred));
 
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &["Axolittle"], &crate::access_policy::Allow::Open, &[], Vec::new)
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &["Builder"], &crate::access_policy::Allow::Open, &[], Vec::new)
             .expect("accepted");
-        assert!(id.display_name.starts_with("Axolittle-"), "got {}", id.display_name);
+        assert!(id.display_name.starts_with("Builder-"), "got {}", id.display_name);
     }
 
     #[test]
@@ -9266,7 +9266,7 @@ pub(crate) mod tests {
         let nonce_hex = issue_nonce(&mut chals, 0);
         let now = current_unix_ts();
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, now);
-        let cred = signed_credential([0x42; 32], "Axolittle", None, now);
+        let cred = signed_credential([0x42; 32], "Builder", None, now);
         let req = join_with_auth(ev, Some(cred));
         let allow = crate::access_policy::Allow::only([xonly_of([0x42; 32])]);
         let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &allow, &[], Vec::new)
@@ -9280,7 +9280,7 @@ pub(crate) mod tests {
         let nonce_hex = issue_nonce(&mut chals, 0);
         let now = current_unix_ts();
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, now);
-        let cred = signed_credential([0x42; 32], "Axolittle", None, now);
+        let cred = signed_credential([0x42; 32], "Builder", None, now);
         let req = join_with_auth(ev, Some(cred));
         let allow = crate::access_policy::Allow::only([xonly_of([0x99; 32])]); // a different operator-approved key
         let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &allow, &[], Vec::new)
@@ -9471,8 +9471,8 @@ pub(crate) mod tests {
     #[test]
     fn disambiguate_handle_is_case_insensitive() {
         let pk = [0x11u8; 32];
-        let out = disambiguate_handle("axolittle", &pk, &["Axolittle"]);
-        assert!(out.starts_with("axolittle-"), "got {out}");
+        let out = disambiguate_handle("builder", &pk, &["Builder"]);
+        assert!(out.starts_with("builder-"), "got {out}");
         assert_eq!(disambiguate_handle("Sam", &pk, &["Other"]), "Sam");
     }
 
@@ -9502,13 +9502,13 @@ pub(crate) mod tests {
         let nonce_hex = issue_nonce(&mut chals, 0);
         let now = current_unix_ts();
         let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, now);
-        let cred = signed_credential([0x42; 32], "Axolittle", None, now);
+        let cred = signed_credential([0x42; 32], "Builder", None, now);
         let req = join_with_auth(ev, Some(cred));
-        let book = vec![book_entry(xonly_of([0x42; 32]), Some("Little Axo"))];
+        let book = vec![book_entry(xonly_of([0x42; 32]), Some("Little Builder"))];
 
         let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &crate::access_policy::Allow::Open, &[], || book)
             .expect("accepted");
-        assert_eq!(id.display_name, "Little Axo");
+        assert_eq!(id.display_name, "Little Builder");
         assert!(id.pubkey.is_some());
     }
 

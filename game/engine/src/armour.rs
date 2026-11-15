@@ -8,7 +8,7 @@
 //!
 //! Live wiring (inventory armour slots, equip-on-pickup, HUD bar,
 //! durability decrement on hit, combat hookup) is deferred to a
-//! follow-up PR that lands after Axolittle playtest on the maths.
+//! follow-up PR that lands after a playtest on the maths.
 //! This module is pure data + functions, ready to plug in.
 //!
 //! Spec: `docs/foundations/2026-05-20-tools-armour-roster.md`.

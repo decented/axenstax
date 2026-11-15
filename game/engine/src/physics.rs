@@ -24,7 +24,7 @@ const GROUND_DRAG: f32 = 0.91;
 const GROUND_ACCEL: f32 = 0.1;
 const AIR_DRAG: f32 = 0.91;
 const AIR_ACCEL: f32 = 0.02;
-// 2026-06-16 playtest (Axolittle "slide to much when you stop"): when grounded
+// 2026-06-16 playtest (the tester said "slide to much when you stop"): when grounded
 // with NO movement input, decay horizontal velocity with a much stronger drag so
 // the player stops promptly instead of skating. Kept SEPARATE from GROUND_DRAG so
 // top speed is unchanged — lowering GROUND_DRAG itself would also cut the
@@ -438,7 +438,7 @@ impl Player {
 
         // Drag and acceleration factors depend on ground contact. When grounded
         // with no movement input, use STOP_DRAG so the player halts quickly
-        // instead of skating (Axolittle "slide to much when you stop"); top speed
+        // instead of skating (the tester said "slide to much when you stop"); top speed
         // is unaffected because that's set by GROUND_DRAG while moving.
         let (drag, accel_factor) = if self.on_ground {
             if has_move_input {
@@ -487,7 +487,7 @@ impl Player {
         }
 
         // #2 — sneak edge-protection (Minecraft "shift won't walk off ledges";
-        // 2026-06-16 playtest: Axolittle wanted a crouch that stops you falling
+        // 2026-06-16 playtest: the tester wanted a crouch that stops you falling
         // off while building out over a drop). While sneaking AND grounded, zero
         // any horizontal velocity component that would carry the whole hitbox off
         // every supporting block. Checked per-axis so you can still slide ALONG

@@ -375,7 +375,7 @@ impl super::GameState {
         // Save path = resuming an existing world; the `else if` below is a
         // fresh world (no save / load failed AND nothing preloaded), which is
         // where the one-time kits + spawn placement live so they never re-apply
-        // on re-entry (2026-06-16 playtest: Axolittle "loads of blocks you
+        // on re-entry (2026-06-16 playtest: the tester said "loads of blocks you
         // havnt gotten" + "spawn in flying" on every join). A WASM resume takes
         // NEITHER branch: the sync load always fails there, but the game_loop
         // poll branch already restored world + players (`world_preloaded`), so
@@ -470,7 +470,7 @@ impl super::GameState {
                     // Resume grounded — never auto-fly on load. Creative can still
                     // double-tap space to fly; flight capability is gated by the
                     // play mode in `Player::tick`, not by this initial state
-                    // (2026-06-16 playtest: Axolittle "spawn in flying… you dont
+                    // (2026-06-16 playtest: the tester said "spawn in flying… you dont
                     // want that"). Survival/Adventure were already grounded.
                     slot.player.flying = false;
                     crate::save::restore_inventory(&mut slot.inventory, &p_save.inventory);

@@ -2422,7 +2422,7 @@ mod tests {
     #[test]
     fn authenticated_join_attaches_the_signed_event() {
         let auth = JoinAuth { auth_event: sample_wire(), credential: None };
-        let req = build_join_request("Axo", 7, Some(auth));
+        let req = build_join_request("Builder", 7, Some(auth));
         assert_eq!(req.skin_key, 7);
         let attached = req.auth_event.expect("auth event attached");
         assert_eq!(attached.kind, crate::signet::AUTH_EVENT_KIND);
@@ -2478,7 +2478,7 @@ mod tests {
         let driver: SignDriverFn = Box::new(move |_nonce, _origin| rx);
         let mut rc = RemoteClient::from_transport_authed(
             Box::new(client),
-            build_join_request_guest("Axo", 0),
+            build_join_request_guest("Builder", 0),
             driver,
             None,
         );
@@ -2515,7 +2515,7 @@ mod tests {
         });
         let mut rc = RemoteClient::from_transport_authed(
             Box::new(client),
-            build_join_request_guest("Axo", 0),
+            build_join_request_guest("Builder", 0),
             driver,
             None,
         );
@@ -2577,7 +2577,7 @@ mod tests {
         });
         let mut rc = RemoteClient::from_transport_authed(
             Box::new(BoundClient { inner: client, binding }),
-            build_join_request_guest("Axo", 0),
+            build_join_request_guest("Builder", 0),
             driver,
             None,
         );
@@ -2622,7 +2622,7 @@ mod tests {
         });
         let mut rc = RemoteClient::from_transport_authed(
             Box::new(WsClient { inner: client, host: "play.example.org:6767" }),
-            build_join_request_guest("Axo", 0),
+            build_join_request_guest("Builder", 0),
             driver,
             None,
         );
@@ -2645,7 +2645,7 @@ mod tests {
         let (srv, client) = channel_pair();
         let _rc = RemoteClient::from_transport(
             Box::new(WsClient { inner: client, host: "[2001:db8::1]:6767" }),
-            build_join_request_guest("Axo", 0),
+            build_join_request_guest("Builder", 0),
             None,
         );
         let req = read_join_request(&srv).expect("guest JoinRequest sent at once");
@@ -3242,7 +3242,7 @@ mod tests {
         let ev = protocol::PlayerEventPacket {
             player_index: 5,
             event: protocol::PlayerEventType::Joined {
-                name: "Axolittle".into(),
+                name: "Builder".into(),
                 npub: "npub1axoexample".into(),
             },
             window_event: 0,
@@ -3250,7 +3250,7 @@ mod tests {
         srv.send_to_client(&protocol::serialize_packet(PacketType::PlayerEvent, &ev));
         rc.poll();
         let entry = rc.roster().get(&5).expect("joined player in roster");
-        assert_eq!(entry.handle, "Axolittle");
+        assert_eq!(entry.handle, "Builder");
         assert_eq!(entry.npub, "npub1axoexample");
 
         // …and is removed when they leave.
@@ -3375,7 +3375,7 @@ mod tests {
         let driver: SignDriverFn = Box::new(move |_nonce, _origin| rx);
         let mut rc = RemoteClient::from_transport_authed(
             Box::new(ClosingClient { inner: client, closed: closed.clone(), said: said.map(String::from), host_closed }),
-            build_join_request_guest("Axo", 0),
+            build_join_request_guest("Builder", 0),
             driver,
             None,
         );
@@ -4139,7 +4139,7 @@ mod tests {
         });
         let mut rc = RemoteClient::from_transport_authed(
             Box::new(client),
-            build_join_request_guest("Axo", 0),
+            build_join_request_guest("Builder", 0),
             driver,
             None,
         );
@@ -4162,7 +4162,7 @@ mod tests {
         });
         let mut rc = RemoteClient::from_transport_authed(
             Box::new(client),
-            build_join_request_guest("Axo", 0),
+            build_join_request_guest("Builder", 0),
             driver,
             None,
         );

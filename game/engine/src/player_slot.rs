@@ -17,7 +17,7 @@ use crate::physics::Player;
 /// Ticks the creative break cooldown holds between block breaks. At 20 TPS,
 /// 5 ticks ≈ 0.25 s (~4 breaks/s) — brisk enough for building, far below the
 /// effectively-uncapped ~20/s a held button used to give in creative. Tunable;
-/// Axolittle playtest will refine the feel. Spec 05.
+/// The playtest will refine the feel. Spec 05.
 pub const BLOCK_BREAK_COOLDOWN_TICKS: u32 = 5;
 
 /// Ticks the short "just placed/interacted with a workstation" cooldown

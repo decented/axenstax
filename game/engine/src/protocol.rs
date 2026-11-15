@@ -3417,7 +3417,7 @@ mod tests {
     fn chat_deliver_roundtrip() {
         let pkt = ChatDeliverPacket {
             from_pubkey: Some([0x42; 32]),
-            from_name: "Axolittle".to_string(),
+            from_name: "Builder".to_string(),
             text: "welcome!".to_string(),
             kind: ChatWireKind::Player,
         };
@@ -3426,7 +3426,7 @@ mod tests {
         assert_eq!(ptype, PacketType::ChatDeliver, "header tag 55 maps back");
         let back: ChatDeliverPacket = safe_deserialize(payload).unwrap();
         assert_eq!(back.from_pubkey, Some([0x42; 32]));
-        assert_eq!(back.from_name, "Axolittle");
+        assert_eq!(back.from_name, "Builder");
         assert_eq!(back.text, "welcome!");
         assert_eq!(back.kind, ChatWireKind::Player);
     }

@@ -230,7 +230,7 @@ mod tests {
         let roster = vec![
             PlayerRow {
                 npub: "npub1a".into(),
-                handle: "Axo".into(),
+                handle: "Builder".into(),
                 connected_secs: 120,
             },
             PlayerRow {

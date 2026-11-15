@@ -172,7 +172,7 @@ pub const CART_SPEED: f32 = 0.08;
 /// A TRACK cell whose `meta` powered-bit is set (driven each `power_tick` by an
 /// adjacent energised cable) speeds a passing cart by this factor. 2× ≈ 3.2
 /// blocks/s — a noticeable "electric boost" over the trundle. Tunable in playtest
-/// (owner/Axolittle to confirm the feel).
+/// (owner/tester to confirm the feel).
 pub const POWERED_RAIL_SPEED_MULT: f32 = 2.0;
 
 /// Y offset above the cell's integer Y so the cart body sits on top of the

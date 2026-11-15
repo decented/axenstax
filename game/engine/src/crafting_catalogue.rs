@@ -1007,7 +1007,7 @@ fn push_more_literal_cards(out: &mut Vec<RecipeCard>) {
         vec![mat(M::CopperIngot, 2), mat(M::Rubber, 1)],
         grid(&[(0, 0, m_at(M::CopperIngot)), (0, 1, m_at(M::Rubber)), (0, 2, m_at(M::CopperIngot))]), RecipeCategory::Materials));
     // ── Spec 48 (Electricity) — power blocks (catalogue ↔ matcher; shapes
-    //    are the spec's proposed set, owner/Axolittle to confirm feel) ──
+    //    are the spec's proposed set, owner/tester to confirm feel) ──
     out.push(card("Cable", ItemStack::new_block(block::CABLE, 3),
         vec![mat(M::Rubber, 2), mat(M::CopperIngot, 1)],
         grid(&[(0, 0, m_at(M::Rubber)), (0, 1, m_at(M::CopperIngot)), (0, 2, m_at(M::Rubber))]), RecipeCategory::Building));

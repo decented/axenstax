@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn credential_wrong_kind_rejected() {
-        let mut cred = make_credential([1u8; 32], "Axo", None);
+        let mut cred = make_credential([1u8; 32], "Builder", None);
         cred.kind = 1234;
         assert_eq!(
             verify_credential(&cred, &[1u8; 32], 100),
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn credential_pubkey_mismatch_rejected() {
-        let cred = make_credential([1u8; 32], "Axo", None);
+        let cred = make_credential([1u8; 32], "Builder", None);
         assert_eq!(
             verify_credential(&cred, &[2u8; 32], 100),
             VerifyResult::CredentialPubkeyMismatch
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn credential_expired_rejected() {
-        let cred = make_credential([1u8; 32], "Axo", Some(100));
+        let cred = make_credential([1u8; 32], "Builder", Some(100));
         assert_eq!(
             verify_credential(&cred, &[1u8; 32], 200),
             VerifyResult::ExpiredCredential
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn credential_unparseable_expires_rejected() {
-        let mut cred = make_credential([1u8; 32], "Axo", Some(100));
+        let mut cred = make_credential([1u8; 32], "Builder", Some(100));
         // Replace the expires timestamp with a non-integer.
         for tag in &mut cred.tags {
             if tag.len() == 2 && tag[0] == "expires" {
@@ -440,8 +440,8 @@ mod tests {
 
     #[test]
     fn extract_display_name_present_and_absent() {
-        let with_name = make_credential([1u8; 32], "Axolittle", None);
-        assert_eq!(extract_display_name(&with_name), Some("Axolittle"));
+        let with_name = make_credential([1u8; 32], "Builder", None);
+        assert_eq!(extract_display_name(&with_name), Some("Builder"));
 
         let mut no_name = with_name.clone();
         no_name.tags.clear();

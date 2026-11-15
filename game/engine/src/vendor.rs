@@ -12,8 +12,8 @@
 //!   + save/load + docs.
 //! - Phases 11-14 (multi-slot conversion, rep-gating + trade-value
 //!   floors, stale-shop expiry, raid-supplies highlight) DEFERRED
-//!   post-Axolittle-playtest per the meta-economy review.
-//! - Phase 15 = Axolittle playtest gate.
+//!   post-playtest per the meta-economy review.
+//! - Phase 15 = playtest gate.
 
 use serde::{Deserialize, Serialize};
 

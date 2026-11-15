@@ -3,7 +3,7 @@
 //! BRIDGE: this command surface is a **testable, functional control surface** for
 //! the Workshop redesign loop — place an asset, paint it, pin it, and watch every
 //! instance reskin — while the **tactile bellows + 16×16 paint-grid UI** (the
-//! kid-facing UX the owner designed) is built and feel-tuned with Axolittle. The
+//! kid-facing UX the owner designed) is built and feel-tuned with the tester. The
 //! loop it drives is the real pipeline (`workshop::commit_project_override` →
 //! `OverrideRegistry` → the mesher/entity seams), so the command and the future
 //! tactile UI commit through the exact same path. Replace the command's role as the

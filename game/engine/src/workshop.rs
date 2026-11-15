@@ -180,7 +180,7 @@ pub const MAX_INFLATION: u8 = 6;
 
 /// Per-step growth of the working scale. Working scale = `1.0 + inflation * STEP`,
 /// so a flower at inflation 6 is 4× size — "blow up like a photo/bubble, never
-/// explode". The exact value is a *feel* knob the Axolittle playtest tunes.
+/// explode". The exact value is a *feel* knob the playtest tunes.
 pub const INFLATION_STEP: f32 = 0.5;
 
 /// The visual working scale for an inflation level. Clamped to [`MAX_INFLATION`].

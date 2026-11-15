@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn apart_pose_reaches_every_face() {
         // THE guard. With the limbs separated, all 6 parts × 6 faces must be
-        // paintable. Axolittle hit a wall here: in the resting pose 8 of these 36
+        // paintable. The tester hit a wall here: in the resting pose 8 of these 36
         // are occluded by a neighbouring part and can never be painted at all.
         for arm in [ArmModel::Classic, ArmModel::Slim] {
             let found = reachable_faces(1.0, arm);

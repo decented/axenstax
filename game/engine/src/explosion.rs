@@ -15,7 +15,7 @@
 use crate::block::{self, BlockId};
 use crate::world::World;
 
-/// Blast radius in blocks (~4, tunable — Axolittle tunes the feel at playtest).
+/// Blast radius in blocks (~4, tunable at playtest).
 pub const BLAST_RADIUS: f32 = 4.0;
 /// The keg's blast power: a block is destroyed iff its [`blast_resistance`] is
 /// below this. Tuned so common terrain + ore go, but the tough/immune set holds.
