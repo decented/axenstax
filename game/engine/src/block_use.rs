@@ -191,13 +191,6 @@ pub struct Used {
 /// changed nothing).
 pub type UseResult = Result<Used, ItemNote>;
 
-fn material(held: Option<&ItemStack>) -> Option<MaterialId> {
-    match held.map(|s| &s.item) {
-        Some(Item::Material(m)) => Some(*m),
-        _ => None,
-    }
-}
-
 /// The composter: a compostable item in hand loads one unit
 /// (`composter::try_load_input`); otherwise — an empty or other hand, or an
 /// input slot that won't take it — the aged output is collected.
@@ -214,7 +207,7 @@ pub fn use_composter(state: &mut crate::workstation::WorkstationState, held: Opt
     }
 }
 
-/// The drying rack: a green log in hand hangs in the first empty slot (or
+/// The drying rack: a green log in hand (any species' log block, or a legacy GreenLog stack) hangs in the first empty slot (or
 /// the rack is full); an empty hand takes down the first seasoned log — or,
 /// when `room` says it wouldn't fit, leaves it seasoned on the rack. Anything
 /// else in hand does nothing.
@@ -224,7 +217,7 @@ pub fn use_drying_rack(
     room: &dyn Fn(&ItemStack) -> bool,
 ) -> UseResult {
     if held.is_some() {
-        let species = material(held).and_then(crate::drying_rack::species_of_green).ok_or(ItemNote::NothingToTake)?;
+        let species = held.and_then(|s| crate::drying_rack::species_of_green_item(&s.item)).ok_or(ItemNote::NothingToTake)?;
         if !rack.try_place_green(species) {
             return Err(ItemNote::RackFull);
         }
@@ -274,6 +267,7 @@ pub fn use_campfire(
             let bump = match (fuel_material, fuel_block) {
                 (_, Some(block::OAK_LEAVES)) => crate::campfire::SMOKE_TICKS_PER_LEAF,
                 (Some(MaterialId::GreenLog), _) => crate::campfire::SMOKE_TICKS_PER_GREEN_LOG,
+                (_, Some(b)) if block::is_any_log_block(b) => crate::campfire::SMOKE_TICKS_PER_GREEN_LOG,
                 _ => 0,
             };
             cf.smoke_ticks = cf.smoke_ticks.saturating_add(bump);
@@ -520,7 +514,7 @@ pub fn claim(kind: UseKind, held: Option<&Item>) -> u8 {
     let stack = ItemStack { item: item.clone(), count: 1 };
     let takes = match kind {
         UseKind::Composter => crate::composter::is_compostable(&stack),
-        UseKind::DryingRack => material(Some(&stack)).and_then(crate::drying_rack::species_of_green).is_some(),
+        UseKind::DryingRack => crate::drying_rack::species_of_green_item(&stack.item).is_some(),
         UseKind::Campfire => {
             let (m, b) = match item {
                 Item::Material(m) => (Some(*m), None),
@@ -668,6 +662,36 @@ mod tests {
         let used = use_campfire(&mut cf, Some(&ItemStack::new_block(block::OAK_PLANKS, 2)), &room).unwrap();
         assert!(!used.relit, "a burning fire just takes the fuel");
         assert_eq!(cf.fuel_ticks, 30 * 20 + 12 * 20);
+    }
+
+    #[test]
+    fn a_species_log_block_burns_as_smoky_green_wood_on_a_campfire() {
+        for s in block::ALL_WOOD_SPECIES {
+            let mut cf = CampfireData::default();
+            let log = ItemStack::new_block(block::log_block_for(*s), 1);
+            let used = use_campfire(&mut cf, Some(&log), &room).unwrap();
+            assert_eq!((used.pay, used.effect), (1, Effect::Fuelled), "{s:?}");
+            assert_eq!(cf.fuel_ticks, 30 * 20, "{s:?}");
+            assert_eq!(cf.smoke_ticks, crate::campfire::SMOKE_TICKS_PER_GREEN_LOG, "{s:?}");
+            assert_eq!(claim(UseKind::Campfire, Some(&log.item)), 1, "{s:?}");
+            assert_eq!(claim(UseKind::DryingRack, Some(&log.item)), 1, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn every_species_log_block_hangs_on_the_rack_and_seasons_to_a_seasoned_log() {
+        for s in block::ALL_WOOD_SPECIES {
+            let mut r = DryingRackData::default();
+            let log = ItemStack::new_block(block::log_block_for(*s), 1);
+            let used = use_drying_rack(&mut r, Some(&log), &room).unwrap();
+            assert_eq!((used.pay, used.effect), (1, Effect::Hung), "{s:?}");
+            r.slots[0].seasoning_ticks = SEASON_TICKS;
+            let used = use_drying_rack(&mut r, None, &room).unwrap();
+            assert_eq!(used.gain, vec![ItemStack::new_material(MaterialId::SeasonedLog, 1)], "{s:?}");
+        }
+        // Not wood: nothing happens.
+        let mut r = DryingRackData::default();
+        assert_eq!(use_drying_rack(&mut r, Some(&ItemStack::new_block(block::OAK_PLANKS, 1)), &room), Err(ItemNote::NothingToTake));
     }
 
     #[test]

@@ -56,10 +56,10 @@ fn survival_chain_from_copper_ore_to_a_lit_lamp() {
         h.set_block(i, Y, 0, block::OAK_LOG);
         assert!(h.mine_into_inventory(i, Y, 0).is_some(), "a log comes off by hand");
     }
-    assert_eq!(h.carrying(mat(MaterialId::GreenLog)), 4, "four green logs felled");
+    assert_eq!(h.carrying(blk(block::OAK_LOG)), 4, "four oak logs felled");
 
     for _ in 0..2 {
-        assert!(h.craft(grid(&[(0, 0, mat(MaterialId::GreenLog))])).is_some(), "log → planks");
+        assert!(h.craft(grid(&[(0, 0, blk(block::OAK_LOG))])).is_some(), "log → planks");
     }
     assert_eq!(h.carrying(blk(block::OAK_PLANKS)), 8);
 
@@ -124,7 +124,7 @@ fn survival_chain_from_copper_ore_to_a_lit_lamp() {
         furnace.1,
         furnace.2,
         ItemStack::new_material(MaterialId::Copper, 2),
-        ItemStack::new_material(MaterialId::GreenLog, 2),
+        ItemStack::new_block(block::OAK_LOG, 2),
     );
     h.tick_furnaces(2 * crate::furnace::SMELT_TICKS_PER_ITEM + 8);
     let ingots = h

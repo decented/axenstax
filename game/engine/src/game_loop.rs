@@ -16159,7 +16159,7 @@ impl super::GameState {
                         }
                     } else if target_blk == block::DRYING_RACK {
                         // Spec 29 Phase 6 — Drying Rack right-click handler.
-                        // Held GreenLog → deposit into first empty slot.
+                        // Held log (any species' log block, or a legacy GreenLog) → deposit into first empty slot.
                         // Empty hand → withdraw first mature slot as
                         //   SeasonedLog material; toast progress if none ready.
                         // Anything else → nothing (the click is just consumed).

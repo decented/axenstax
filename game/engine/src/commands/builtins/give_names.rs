@@ -282,8 +282,10 @@ pub(super) static MATERIAL_NAMES: &[(&[&str], M)] = &[
     (&["baked_corn", "bakedcorn", "corn_on_the_cob", "corn_on_cob"], M::BakedCorn),
     (&["baked_potato", "bakedpotato"], M::BakedPotato),
     (&["baked_carrot", "bakedcarrot"], M::BakedCarrot),
-    // Wave 29 — log seasoning materials. GreenLog is the tree-fell
-    // drop in normal gameplay; SeasonedLog is the Drying Rack output;
+    // Wave 29 — log seasoning materials. GreenLog is the legacy
+    // species-neutral log stack (nothing drops it since logs keep their tree
+    // type, 2026-11-15; `/give green_log` still works); SeasonedLog is the
+    // Drying Rack output;
     // KilnDriedLog is /give-only this wave (future Kiln workstation).
     (&["green_log", "greenlog"], M::GreenLog),
     (&["seasoned_log", "seasonedlog"], M::SeasonedLog),

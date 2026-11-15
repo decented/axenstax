@@ -311,7 +311,9 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         block::GRAVEL => 0.6,
         block::STONE => 10.0,               // Axolittle: 10s
         block::COBBLESTONE => 2.0,
-        block::OAK_LOG => 4.5,              // Axolittle: 4.5s
+        // Every log (any species, the tapped rubber log too) takes oak's
+        // owner-tuned 4.5 s by hand; one rule, not one entry per species.
+        id if block::is_any_log_block(id) => 4.5,   // Axolittle: 4.5s
         block::OAK_PLANKS | block::CRAFTING_TABLE => 2.0,
         // Living world S3 — a table is boards; the Commons Stone is cobblestone.
         block::FEAST_TABLE | block::FEAST_MARKER | block::COMMONS_STONE | block::SITE_BOARD => 2.0,
@@ -397,7 +399,8 @@ pub fn best_tool_for(block_id: BlockId) -> Option<ToolType> {
         // so Phase 3b's variant rollout is automatic.
         id if block::is_pure_deepslate_family(id) => Some(ToolType::Pickaxe),
         block::DIRT | block::GRASS | block::WORN_PATH | block::SAND | block::GRAVEL | block::SNOW => Some(ToolType::Shovel),
-        block::OAK_LOG | block::OAK_PLANKS | block::CRAFTING_TABLE
+        id if block::is_any_log_block(id) => Some(ToolType::Axe),
+        block::OAK_PLANKS | block::CRAFTING_TABLE
         | block::FEAST_TABLE | block::FEAST_MARKER | block::COMMONS_SHELF | block::SITE_BOARD => Some(ToolType::Axe),
         // Building variants: woods want an axe, stones a pickaxe.
         id => crate::building_variants::best_tool(id),
@@ -538,12 +541,13 @@ impl CraftSlot {
 /// Try to match a 3x3 crafting grid against known recipes.
 /// Returns the output ItemStack if a recipe matches.
 /// Whether a single grid slot holds something that counts as "a log" for
-/// recipe purposes. Accepts both the back-compat `Block(OAK_LOG)` (old
-/// saves' inventory log-blocks) and the three Wave 29 log materials
-/// (GreenLog / SeasonedLog / KilnDriedLog). Used by the 1×1 plank recipe.
+/// recipe purposes: any species' log block (what mining a tree drops since
+/// 2026-11-15) and the three log materials (GreenLog / SeasonedLog /
+/// KilnDriedLog; a GreenLog stack is the legacy species-neutral drop). Used
+/// by the 1×1 plank recipe and the campfire recipe.
 pub fn is_logish_slot(slot: CraftSlot) -> bool {
     match slot {
-        CraftSlot::Block(b) if b == block::OAK_LOG => true,
+        CraftSlot::Block(b) => block::is_any_log_block(b),
         CraftSlot::Material(MaterialId::GreenLog) => true,
         CraftSlot::Material(MaterialId::SeasonedLog) => true,
         CraftSlot::Material(MaterialId::KilnDriedLog) => true,
@@ -743,27 +747,14 @@ pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
         // from `Block(OAK_LOG)` only to also accept the three log
         // materials. Yield is uniform — structural plank-use isn't gated
         // on seasoning; that pressure lives in the fuel ladder instead.
-        // Spec 28b — per-species fresh-log blocks craft to their species'
-        // planks. Mine-drops normalise to GreenLog (species-neutral), so
-        // these arms fire only on creative `/give` or via the explorer
-        // dispensing a specific species log block. Falls through to the
-        // generic Oak-planks default below for log materials.
-        if let CraftSlot::Block(b) = slot {
-            if b == block::BIRCH_LOG {
-                return Some(ItemStack::new_block(block::BIRCH_PLANKS, 4));
-            }
-            if b == block::SPRUCE_LOG {
-                return Some(ItemStack::new_block(block::SPRUCE_PLANKS, 4));
-            }
-            if b == block::JUNGLE_LOG {
-                return Some(ItemStack::new_block(block::JUNGLE_PLANKS, 4));
-            }
-            if b == block::ACACIA_LOG {
-                return Some(ItemStack::new_block(block::ACACIA_PLANKS, 4));
-            }
-            if b == block::DARK_OAK_LOG {
-                return Some(ItemStack::new_block(block::DARK_OAK_PLANKS, 4));
-            }
+        // Logs keep their tree type: a species log block (what mining a
+        // tree drops) crafts to its own species' planks. The log materials
+        // (a legacy GreenLog stack, seasoned and kiln-dried logs) are
+        // species-neutral and fall through to the Oak-planks default below.
+        if let CraftSlot::Block(b) = slot
+            && let Some(species) = block::species_for_log(b)
+        {
+            return Some(ItemStack::new_block(block::planks_block_for(species), 4));
         }
         if is_logish_slot(slot) {
             return Some(ItemStack::new_block(block::OAK_PLANKS, 4));
@@ -2735,6 +2726,9 @@ mod tests {
     #[test]
     fn is_logish_slot_covers_all_log_variants() {
         assert!(is_logish_slot(CraftSlot::Block(block::OAK_LOG)));
+        for s in block::ALL_WOOD_SPECIES {
+            assert!(is_logish_slot(CraftSlot::Block(block::log_block_for(*s))), "{s:?}");
+        }
         assert!(is_logish_slot(CraftSlot::Material(MaterialId::GreenLog)));
         assert!(is_logish_slot(CraftSlot::Material(MaterialId::SeasonedLog)));
         assert!(is_logish_slot(CraftSlot::Material(MaterialId::KilnDriedLog)));
@@ -3826,19 +3820,19 @@ mod tests {
 
     #[test]
     fn campfire_recipe_accepts_any_log_variant() {
-        // Wave 29 fix: tree-felling drops GreenLog material, not OAK_LOG
-        // block-items — so the first-night campfire MUST be craftable
-        // from green logs straight out of the tree. Seasoned + kiln-dried
-        // also work (a player flush with infrastructure shouldn't be
-        // blocked from using premium wood on a campfire). Mixed log
-        // types in the middle row are also OK by design.
+        // Tree-felling drops the species' log block, so the first-night
+        // campfire MUST be craftable from any species' log straight out of
+        // the tree; a legacy GreenLog stack still works. Seasoned +
+        // kiln-dried also work (a player flush with infrastructure
+        // shouldn't be blocked from using premium wood on a campfire).
+        // Mixed log types in the middle row are also OK by design.
         use crate::item::MaterialId;
-        let inputs = [
-            CraftSlot::Block(block::OAK_LOG),
+        let mut inputs = vec![
             CraftSlot::Material(MaterialId::GreenLog),
             CraftSlot::Material(MaterialId::SeasonedLog),
             CraftSlot::Material(MaterialId::KilnDriedLog),
         ];
+        inputs.extend(block::ALL_WOOD_SPECIES.iter().map(|s| CraftSlot::Block(block::log_block_for(*s))));
         for log_slot in inputs {
             let mut g = empty_grid();
             for c in 0..3 {
@@ -5180,6 +5174,8 @@ mod tests {
             (B::JUNGLE_LOG, B::JUNGLE_PLANKS),
             (B::ACACIA_LOG, B::ACACIA_PLANKS),
             (B::DARK_OAK_LOG, B::DARK_OAK_PLANKS),
+            (B::RUBBER_LOG, B::RUBBER_PLANKS),
+            (B::OAK_LOG, B::OAK_PLANKS),
         ];
         for (log_id, expected_planks) in species_pairs {
             let mut g = empty_grid();
@@ -5192,6 +5188,32 @@ mod tests {
             }
             assert_eq!(out.count, 4);
         }
+    }
+
+    #[test]
+    fn every_log_breaks_in_oaks_time_and_takes_the_same_axe_speed_up() {
+        // One hardness for every log (2026-11-15): oak's owner-tuned 4.5 s by
+        // hand, the same axe bonus. It was 1.0 s with no axe bonus for every
+        // species but oak.
+        let oak_hand = block_hardness(block::OAK_LOG);
+        assert_eq!(oak_hand, 4.5);
+        let axe = Tool::new(ToolType::Axe, ToolMaterial::Iron);
+        for s in block::ALL_WOOD_SPECIES {
+            let log = block::log_block_for(*s);
+            assert_eq!(block_hardness(log), oak_hand, "{s:?} by hand");
+            assert_eq!(best_tool_for(log), Some(ToolType::Axe), "{s:?} wants an axe");
+            assert_eq!(
+                break_time_ticks(log, Some(&axe)),
+                break_time_ticks(block::OAK_LOG, Some(&axe)),
+                "{s:?} with an axe"
+            );
+            assert_eq!(break_time_ticks(log, None), break_time_ticks(block::OAK_LOG, None), "{s:?} by hand");
+        }
+        assert_eq!(block_hardness(block::RUBBER_LOG_TAPPED), oak_hand);
+        assert!(
+            break_time_ticks(block::BIRCH_LOG, Some(&axe)) < break_time_ticks(block::BIRCH_LOG, None),
+            "an axe speeds up a birch log"
+        );
     }
 
     #[test]

@@ -194,10 +194,23 @@ pub fn species_of_green(m: MaterialId) -> Option<LogSpecies> {
     }
 }
 
+/// Map a held ITEM to the species the rack seasons it as: a legacy
+/// GreenLog material ([`species_of_green`]) or any species' log block (what
+/// mining a tree drops since 2026-11-15; a log is fresh wood). The rack
+/// keeps one species-neutral output (`mature_output`), so a birch log and an
+/// oak log both season into a SeasonedLog. `None` for anything else.
+pub fn species_of_green_item(item: &crate::item::Item) -> Option<LogSpecies> {
+    match item {
+        crate::item::Item::Material(m) => species_of_green(*m),
+        crate::item::Item::Block(b) if block::is_any_log_block(*b) => Some(LogSpecies::Oak),
+        _ => None,
+    }
+}
+
 /// Cleanup hook when a Drying Rack block is destroyed (mined, blown up,
 /// /setblock-replaced, …). Removes the rack's state entry from the world
-/// AND returns a list of ItemStacks to spill — one [`MaterialId::GreenLog`]
-/// per occupied slot, regardless of seasoning progress. Mining a working
+/// AND returns a list of ItemStacks to spill — one oak log block (the rack
+/// is species-neutral, and a log is fresh wood) per occupied slot, regardless of seasoning progress. Mining a working
 /// workstation loses the in-progress seasoning by design (matches the
 /// Minecraft "you uprooted the rack, the wood went back to fresh" feel),
 /// so the player can't trivially relocate a half-seasoned stack.
@@ -222,7 +235,7 @@ pub fn cleanup_drying_rack(
     // path's overflow handling simpler — each call to add_item routes
     // through the standard stacking logic.
     (0..count)
-        .map(|_| crate::item::ItemStack::new_material(MaterialId::GreenLog, 1))
+        .map(|_| crate::item::ItemStack::new_block(block::OAK_LOG, 1))
         .collect()
 }
 
@@ -379,11 +392,24 @@ mod tests {
     }
 
     #[test]
+    fn the_rack_takes_any_species_log_block_and_the_legacy_green_log() {
+        use crate::item::Item;
+        for s in crate::block::ALL_WOOD_SPECIES {
+            let log = Item::Block(crate::block::log_block_for(*s));
+            assert_eq!(species_of_green_item(&log), Some(LogSpecies::Oak), "{s:?}");
+        }
+        assert_eq!(species_of_green_item(&Item::Material(MaterialId::GreenLog)), Some(LogSpecies::Oak));
+        assert_eq!(species_of_green_item(&Item::Material(MaterialId::SeasonedLog)), None);
+        assert_eq!(species_of_green_item(&Item::Block(block::OAK_PLANKS)), None);
+        assert_eq!(species_of_green_item(&Item::Material(MaterialId::Stick)), None);
+    }
+
+    #[test]
     fn cleanup_spills_one_green_per_filled_slot_and_removes_entry() {
         let mut world = World::new();
         let _ = rack_at(&mut world, 1, 70, 2);
         // Manually populate three slots — one fresh, one half-seasoned,
-        // one mature. All spill back as green logs (seasoning lost).
+        // one mature. All spill back as fresh logs (seasoning lost).
         {
             let d = world.drying_racks.get_mut(&(1, 70, 2)).unwrap();
             d.try_place_green(LogSpecies::Oak);
@@ -394,8 +420,8 @@ mod tests {
         assert_eq!(spilled.len(), 3);
         for stack in &spilled {
             match stack.item {
-                crate::item::Item::Material(MaterialId::GreenLog) => {}
-                ref other => panic!("expected GreenLog, got {:?}", other),
+                crate::item::Item::Block(block::OAK_LOG) => {}
+                ref other => panic!("expected an oak log block, got {:?}", other),
             }
             assert_eq!(stack.count, 1);
         }
