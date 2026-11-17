@@ -108,6 +108,34 @@ Everything below is on `main`. Much of it hasn't reached players yet (see above)
 
 ---
 
+## Being built now: the Living World, Tier 3
+
+*Added 2026-11-17. In build on a branch: not on `main`, not released and not yet played. The rest of this file dates from 2026-11-09.*
+
+Tiers 1 and 2 made a place's life visible. Tier 3 makes it matter: as a place comes alive, the limits of survival lift there, one at a time. It is a journey a group walks together, not a setting someone turns on.
+
+**First build (in progress)**
+
+- **Places.** A Hearth founds a place, nine chunks by nine around it. The place grows through stages as people build, tend and eat together there. The game says how the place is doing in a few plain phrases, never a score, a bar or a percentage.
+- **Freedom from hunger.** The first limit to lift: a place that feeds itself keeps its people fed.
+- **Standing.** Belonging to a place comes from what you do there, not from a list someone edits. A guest may build in a place, but may not break what others placed.
+- **Freedom from hauling.** A Sawmill and a Stone Mill, and, in a place that has grown far enough, common wood and stone that place without cost. A block placed for free gives nothing back when broken.
+- **Freedom from fear.** Nights in a living place are safe, and a death there costs nothing: you wake at the Hearth with what you carried.
+- **Pace.** Each new world picks how fast its places grow (Sprint, Steady or Saga) when it is created.
+- **Privacy fixes** found while designing this tier.
+
+**Designed, and to be detailed and reviewed before it is built**
+
+- **The later stages:** metal and gas (a Bloomery, a Gas Works and a blimp), crews, and Great Works a place builds together (a Lighthouse, a Station, a Library).
+- **Travel between worlds by railway.** People and ideas cross; materials never do. A world is joined only through a contact or a Keep, and nothing here is a service AxeNStax runs.
+- **Permissions on a shared copy of the game.** Whoever looks after the machine turns each one on as its own line, off by default, with no "open everything" switch. This is a design, not a shipped control.
+- **Guests on a shared machine,** and Plans that carry their maker's mark.
+- **Voice** is parked until the rest is settled.
+
+Existing worlds are not migrated: places start in new worlds.
+
+---
+
 ## Where we're going
 
 In order:

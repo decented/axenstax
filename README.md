@@ -45,6 +45,16 @@ There are two ways to play:
 Both come from the same engine and the same codebase — the web build is a
 restricted subset, not a separate product.
 
+## What's being built
+
+The third tier of the Living World is in build. As a place comes alive, the
+limits of survival lift there for the people in it: hunger first, then
+hauling, then fear. It is a journey a group walks together, not a setting
+someone turns on. It is not released yet and has not been played.
+
+What is in the first build, what is designed for later, and everything
+already built: [docs/roadmap.md](docs/roadmap.md).
+
 ## Building it yourself
 
 ### Prerequisites (host)
