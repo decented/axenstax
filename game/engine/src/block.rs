@@ -729,6 +729,15 @@ pub fn unbreakable(id: BlockId, creative: bool, placed: bool) -> bool {
     id == BEDROCK && !(creative && placed)
 }
 
+/// pt1124 review 7 — whether a client's own break gate stops it from even
+/// asking to break `id`. A joined client cannot know the placed bit (a live
+/// `BlockChange` carries the block and meta, never provenance), so in Creative
+/// it asks and the server decides with its own `unbreakable` check; everywhere
+/// else the local world's bit is the authority's.
+pub fn break_gated_locally(id: BlockId, creative: bool, placed_here: bool, joined: bool) -> bool {
+    unbreakable(id, creative, placed_here || (joined && creative))
+}
+
 /// What an attached block must have next to it to stay (`BlockRegistry::attachment`,
 /// run by `support.rs`). Lose it and the block drops as its item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4720,6 +4729,12 @@ mod tests {
         assert!(unbreakable(BEDROCK, false, true), "placed bedrock holds in Survival");
         assert!(!unbreakable(BEDROCK, true, true), "placed bedrock breaks in Creative");
         assert!(!unbreakable(STONE, false, false));
+        // Review 7: a Creative joiner asks to break bedrock it cannot see the
+        // placed bit of; the server's own check decides (natural holds there).
+        assert!(!break_gated_locally(BEDROCK, true, false, true), "a Creative joiner asks");
+        assert!(break_gated_locally(BEDROCK, false, false, true), "a Survival joiner never asks");
+        assert!(break_gated_locally(BEDROCK, true, false, false), "a local Creative player's natural bedrock holds");
+        assert!(!break_gated_locally(BEDROCK, true, true, false));
     }
 
     #[test]

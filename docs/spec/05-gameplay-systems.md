@@ -386,8 +386,11 @@ player placed (the per-voxel placed bit, `World::is_placed`, which every placeme
 in Creative, by a local seat or a joiner; in Survival it holds like the world's. One rule, `block::unbreakable(id,
 creative, placed)`, read by the break arm (`game_loop`) and the server's edit checks (`validate_block_edit`,
 `cell_permitted`). A joiner still cannot place bedrock. A joined client learns the placed bit with a pushed chunk, not
-with a single `BlockChange`, so bedrock a host placed after the joiner's chunk arrived reads as natural on that
-client and its break is refused locally (the server would allow it).
+with a single `BlockChange`, so in Creative a joined client never refuses a bedrock break itself
+(`block::break_gated_locally`): it asks, and the server's own check decides (natural bedrock is refused and sent
+back; bedrock a host placed after the joiner's chunk arrived breaks; review 7). Bedrock a `/we set` or a `/we paste`
+writes is player-placed too, so the same Creative player can mine it, and a cell `/we` writes to AIR keeps no placed
+bit (`worldedit::write_cell`, review 8).
 
 **Harvest rules**: Certain blocks require a minimum tool tier to drop items. Mining stone without a pickaxe breaks the block but drops nothing. Mining iron ore without at least a stone pickaxe drops nothing. These rules are defined in the block registry and are plugin-extensible.
 

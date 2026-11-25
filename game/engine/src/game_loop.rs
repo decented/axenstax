@@ -12734,7 +12734,9 @@ impl super::GameState {
                             && !plot_marker_break_blocked
                             // pt1124 — bedrock the world made holds; placed
                             // bedrock breaks in Creative (`block::unbreakable`).
-                            && !block::unbreakable(blk, self.is_creative, self.world.is_placed(pos[0], pos[1], pos[2]))
+                            // A Creative joiner asks and its server decides
+                            // (review 7: the placed bit never reaches it).
+                            && !block::break_gated_locally(blk, self.is_creative, self.world.is_placed(pos[0], pos[1], pos[2]), self.joined())
                             && self.play_mode.can_edit_world()
                         {
                             // Release the plot if this break removes an owned

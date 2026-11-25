@@ -94,6 +94,14 @@ pub fn write_cell(world: &mut World, pos: [i32; 3], new: BlockId, changed: &mut 
     world.set_meta(key, 0);
     world.block_entities.remove(&key);
     world.set_block(x, y, z, new);
+    // pt1124 review 8 — a `/we` write is a player's: bedrock it puts down is
+    // placed (so Creative can break it again, `block::unbreakable`), and a
+    // cell it empties keeps no placed bit. Other blocks keep the bit as before.
+    if new == crate::block::BEDROCK {
+        world.set_placed(x, y, z, true);
+    } else if new == crate::block::AIR {
+        world.set_placed(x, y, z, false);
+    }
     if let Some(kind) = crate::power::device_kind_for_block(new) {
         world.insert_power_device(
             key,
@@ -403,6 +411,21 @@ mod tests {
         assert_eq!(n, 2);
         assert!(w.power_device_at((10, 4, 0)).is_some(), "pasted lever has a device");
         assert!(w.power_device_at((11, 4, 0)).is_some(), "pasted lamp has a device");
+    }
+
+    /// pt1124 review 8 — bedrock a `/we set` or a paste puts down is player-placed, so the
+    /// same Creative player can mine it again; a cell written to AIR keeps no placed bit.
+    #[test]
+    fn worldedit_bedrock_is_placed_and_air_clears_the_bit() {
+        let mut w = World::new();
+        region_set(&mut w, [0, 4, 0], [1, 4, 0], block::BEDROCK, &mut Vec::new());
+        assert!(w.is_placed(0, 4, 0) && w.is_placed(1, 4, 0));
+        assert!(!block::unbreakable(block::BEDROCK, true, w.is_placed(0, 4, 0)), "Creative can mine it");
+        let clip = Clipboard { dims: [1, 1, 1], blocks: vec![block::BEDROCK] };
+        clipboard_paste(&mut w, &clip, [5, 4, 0], &mut Vec::new());
+        assert!(w.is_placed(5, 4, 0), "pasted bedrock is placed too");
+        region_set(&mut w, [0, 4, 0], [1, 4, 0], block::AIR, &mut Vec::new());
+        assert!(!w.is_placed(0, 4, 0) && !w.is_placed(1, 4, 0), "an emptied cell keeps no placed bit");
     }
 
     #[test]
