@@ -275,6 +275,7 @@ mod retired_files;
 #[cfg(not(target_arch = "wasm32"))]
 mod signet_contacts;
 mod held_tool_model;
+mod armour_model; // Armour as boxes: worn on the avatar, held in a hand, dropped on the ground.
 mod item_model;
 mod brand;
 mod splash_ui;
@@ -4439,7 +4440,7 @@ fn run_shot_3p(args: &[String]) {
         let fwd = camera.forward();
         ps.yaw = crate::entity_model::yaw_facing(fwd.x, fwd.z);
 
-        let (skin_v, _held) = crate::entity_model::self_avatar_vertices(mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic);
+        let (skin_v, _held) = crate::entity_model::self_avatar_vertices(mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
         renderer.upload_avatar_vertices(0, &skin_v); // empty (first-person) clears the buffer
 
         renderer.update_camera(0, &CameraUniform::from_camera(&camera));
@@ -4475,7 +4476,7 @@ fn run_shot_3p(args: &[String]) {
 
         let night_brightness = 0.05_f32;
         let (mut skin_v, _held) =
-            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic);
+            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
         let ch = world.light_channels_at(foot.x, foot.y, foot.z);
         crate::entity_model::set_avatar_light(&mut skin_v, ch, night_brightness);
         renderer.upload_avatar_vertices(0, &skin_v);
@@ -4542,7 +4543,7 @@ fn run_shot_3p(args: &[String]) {
         ps.yaw = crate::entity_model::yaw_facing(fwd.x, fwd.z);
         // Opaque body (fade 1.0) — proves the camera clamped in front of the wall.
         let (skin_v, _held) =
-            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic);
+            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
         renderer.upload_avatar_vertices(0, &skin_v);
         renderer.update_camera(0, &CameraUniform::from_camera(&camera));
         renderer.render_to_png(&walled_path);
@@ -4567,7 +4568,7 @@ fn run_shot_3p(args: &[String]) {
         let fade_path = sib("play-3p-fade.png");
         let fade = crate::camera::avatar_fade_alpha(frac);
         let (skin_fv, _h) =
-            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, fade, &registry, crate::skin_uv::ArmModel::Classic);
+            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, fade, &registry, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
         renderer.upload_avatar_vertices(0, &skin_fv);
         renderer.update_camera(0, &CameraUniform::from_camera(&camera));
         renderer.render_to_png(&fade_path);
