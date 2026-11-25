@@ -11,7 +11,7 @@ use crate::item::Item;
 /// material, with its display name.
 fn everything_giveable(registry: &BlockRegistry) -> Vec<(String, Item)> {
     let blocks = (0..registry.len() as block::BlockId)
-        .filter(|id| !NOT_GIVEABLE_BLOCKS.contains(id))
+        .filter(|id| !NOT_GIVEABLE_BLOCKS.contains(id) && !block::is_reserved(*id))
         .map(Item::Block);
     let materials = ALL_MATERIAL_IDS.iter().map(|&m| Item::Material(m));
     blocks.chain(materials).map(|item| (item.name(registry), item)).collect()
@@ -92,8 +92,10 @@ fn deepslate_gives_the_pure_deepslate_block() {
     for typed in ["deepslate", "pure deepslate", "pure_deepslate", "Pure Deepslate"] {
         assert_eq!(resolve_item(typed, 1).unwrap().item, Item::Block(block::PURE_DEEPSLATE), "{typed}");
     }
-    // There is no cobbled deepslate in the game, so the name stays unknown.
-    assert!(resolve_item("cobbled deepslate", 1).is_err());
+    // Cobbled Deepslate (what mining pure deepslate drops) is its own block, by its own name.
+    for typed in ["cobbled deepslate", "cobbled_deepslate", "genesis:cobbled_deepslate"] {
+        assert_eq!(resolve_item(typed, 1).unwrap().item, Item::Block(block::COBBLED_DEEPSLATE), "{typed}");
+    }
 }
 
 #[test]
@@ -104,6 +106,20 @@ fn the_technical_blocks_are_not_given_and_the_list_says_why_each_is_there() {
     }
     for typed in ["air", "genesis:air", "piston_head", "worn_path", "feast_marker", "blighted_crop"] {
         assert!(resolve_item(typed, 1).is_err(), "{typed} must not be giveable");
+    }
+}
+
+#[test]
+fn the_ids_held_for_tier_3_are_never_given_or_offered() {
+    let registry = BlockRegistry::new();
+    let names = super::give::item_names();
+    for id in block::RESERVED_FIRST..=block::RESERVED_LAST {
+        let name = registry.get(id).name;
+        let local = name.rsplit_once(':').map_or(name, |(_, rest)| rest);
+        assert!(resolve_item(name, 1).is_err(), "{name} must not be giveable by its registry name");
+        assert!(resolve_item(local, 1).is_err(), "{local} must not be giveable");
+        assert!(!resolve_item(&Item::Block(id).name(&registry), 1).is_ok_and(|s| s.item == Item::Block(id)), "{id} must not be giveable by its display name");
+        assert!(!names.iter().any(|n| n == local), "{local} must not be offered by Tab");
     }
 }
 

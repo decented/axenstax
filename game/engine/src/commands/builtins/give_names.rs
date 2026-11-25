@@ -43,8 +43,8 @@ pub(super) static BLOCK_NAMES: &[(&[&str], BlockId)] = &[
     // it as a source). Enables `/give lava` for testing + the "Floor Is Lava"
     // arena. The survival way to move lava stays the lava bucket.
     (&["lava"], block::LAVA),
-    // Pure deepslate is the one deepslate block (there is no cobbled one); `deepslate` is the
-    // name a player reaches for.
+    // `deepslate` is the name a player reaches for: the placed block, pure deepslate (mining it
+    // drops Cobbled Deepslate, which the registry fallback gives by its own name).
     (&["pure_deepslate", "deepslate"], block::PURE_DEEPSLATE),
     // The three chests of metal: `iron_chest` (and its kin) already name the chestplate.
     (&["iron_chest_block"], block::IRON_CHEST),
@@ -224,7 +224,8 @@ pub(super) static BLOCK_NAMES: &[(&[&str], BlockId)] = &[
 /// piston's head (the piston places and removes it; a loose one is a block with nothing behind it),
 /// and the three Living World records that exist only as the world's own marks (a Feast Marker, a
 /// Worn Path, a Blighted Crop; breaking one gives back something else or nothing). The creative
-/// inventory leaves out the same ones (`inventory_explorer`).
+/// inventory leaves out the same ones (`inventory_explorer`). The four ids held for Tier 3
+/// (`block::is_reserved`, stone stand-ins until that branch lands) are skipped too, by range.
 pub(crate) const NOT_GIVEABLE_BLOCKS: &[BlockId] = &[
     block::AIR,
     block::PISTON_HEAD,
@@ -260,7 +261,8 @@ fn snake_case(camel: &str) -> String {
     out
 }
 
-/// Every block and material the registry knows (minus [`NOT_GIVEABLE_BLOCKS`]), by key.
+/// Every block and material the registry knows (minus [`NOT_GIVEABLE_BLOCKS`] and the reserved
+/// Tier 3 ids), by key.
 struct RegistryNames {
     /// Every key that gives an item: display name and registry name; blocks first, so a block
     /// wins a name a material shares, as in the tables.
@@ -281,7 +283,7 @@ static REGISTRY_NAMES: LazyLock<RegistryNames> = LazyLock::new(|| {
     };
     for id in 0..registry.len() {
         let id = id as BlockId;
-        if NOT_GIVEABLE_BLOCKS.contains(&id) {
+        if NOT_GIVEABLE_BLOCKS.contains(&id) || block::is_reserved(id) {
             continue;
         }
         let item = Item::Block(id);
