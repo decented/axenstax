@@ -57,17 +57,53 @@ pub struct FishingLine {
     pub hooked: bool,
     pub cast_tick: u64,
     pub target: Option<Vec3>,
+    /// The hand the cast was made with (drawing only: the line leaves THAT rod).
+    pub hand: crate::hands::Hand,
+    /// The hotbar slot the rod was in when cast (a main-hand rod; the line is
+    /// drawn only while a rod is still there).
+    pub slot: usize,
+    /// A joiner's cast still waiting for the server's word: the request's
+    /// sequence number. An outcome applies to the line only if it answers THIS
+    /// request, so a late reply to an earlier cast never touches a later one.
+    pub request: Option<u32>,
 }
 
 impl FishingLine {
-    /// A line cast at client tick `now` that bites at `catch_at_tick`.
+    /// A line cast at client tick `now` that bites at `catch_at_tick` (cast with
+    /// the main hand's rod in hotbar slot 0 until [`Self::with_rod`] says otherwise).
     pub fn cast(now: u64, catch_at_tick: u64, target: Option<Vec3>) -> Self {
-        FishingLine { catch_at_tick, hooked: false, cast_tick: now, target }
+        FishingLine { catch_at_tick, hooked: false, cast_tick: now, target, hand: crate::hands::Hand::Main, slot: 0, request: None }
+    }
+
+    /// This line was cast with the rod in `hand` (hotbar slot `slot`).
+    pub fn with_rod(self, hand: crate::hands::Hand, slot: usize) -> Self {
+        FishingLine { hand, slot, ..self }
+    }
+
+    /// This line waits for the server's answer to request `seq`.
+    pub fn awaiting(self, seq: Option<u32>) -> Self {
+        FishingLine { request: seq, ..self }
+    }
+
+    /// Is the rod this line was cast with still where it was cast from? `main` and
+    /// `off` say whether the hands hold a rod now and `hotbar_slot` is the selected
+    /// slot: a main-hand cast follows its slot (selecting another slot, even one
+    /// with a second rod, is a different rod), an off-hand cast its hand.
+    pub fn rod_in_place(&self, hotbar_slot: usize, main_is_rod: bool, off_is_rod: bool) -> bool {
+        match self.hand {
+            crate::hands::Hand::Main => main_is_rod && hotbar_slot == self.slot,
+            crate::hands::Hand::Off => off_is_rod,
+        }
+    }
+
+    /// Does an outcome for request `seq` answer this line's cast?
+    pub fn answers(&self, seq: u32) -> bool {
+        self.request == Some(seq)
     }
 }
 
 /// How far above the water cell's floor the bobber's surface is: the top of a
-/// full (source) cell, as the mesher draws it (`water::water_surface_height`).
+/// cell of depth `level`, as the mesher draws it (`water::water_surface_height`).
 fn water_top(level: u8) -> f32 {
     crate::water::water_surface_height(level)
 }
@@ -82,6 +118,18 @@ const SURFACE_CLIMB: i32 = 8;
 /// reads the caster's world: single-player's own, or the server's for a joiner's
 /// `Cast`.
 pub fn cast_target(eye: Vec3, dir: Vec3, is_water: impl Fn(i32, i32, i32) -> bool) -> Option<Vec3> {
+    cast_target_levelled(eye, dir, is_water, |_, _, _| 0)
+}
+
+/// [`cast_target`] with the surface cell's depth level (`water::level_at`: 0 a
+/// source or falling water, up to 7 the thinnest flow) so the bobber floats at the
+/// height the mesher draws that cell's surface, not at a source's.
+pub fn cast_target_levelled(
+    eye: Vec3,
+    dir: Vec3,
+    is_water: impl Fn(i32, i32, i32) -> bool,
+    level_at: impl Fn(i32, i32, i32) -> u8,
+) -> Option<Vec3> {
     let (p, cell) = (1..=CAST_STEPS).find_map(|step| {
         let p = eye + dir * (step as f32 * CAST_STEP);
         let cell = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
@@ -91,7 +139,7 @@ pub fn cast_target(eye: Vec3, dir: Vec3, is_water: impl Fn(i32, i32, i32) -> boo
     while top - cell.1 < SURFACE_CLIMB && is_water(cell.0, top + 1, cell.2) {
         top += 1;
     }
-    Some(Vec3::new(p.x, top as f32 + water_top(0), p.z))
+    Some(Vec3::new(p.x, top as f32 + water_top(level_at(cell.0, top, cell.2)), p.z))
 }
 
 /// Is there water along the cast from `eye` along `dir` (unit), within
@@ -241,6 +289,48 @@ mod tests {
         let line = FishingLine::cast(40, 190, Some(Vec3::new(1.0, 2.0, 3.0)));
         assert_eq!((line.cast_tick, line.catch_at_tick, line.hooked), (40, 190, false));
         assert_eq!(line.target, Some(Vec3::new(1.0, 2.0, 3.0)));
+    }
+
+    #[test]
+    fn the_bobber_floats_at_the_height_of_the_cells_own_surface() {
+        // A level-7 flow is 1/9 of a block deep: the bobber sits there, not at a
+        // source's 8/9.
+        let eye = Vec3::new(0.5, 72.5, 0.5);
+        let dir = Vec3::new(1.0, -0.25, 0.0).normalize();
+        let still = cast_target_levelled(eye, dir, pond_column(1), |_, _, _| 0).expect("water");
+        let shallow = cast_target_levelled(eye, dir, pond_column(1), |_, _, _| 7).expect("water");
+        assert!((still.y - (70.0 + crate::water::water_surface_height(0))).abs() < 1e-5);
+        assert!((shallow.y - (70.0 + crate::water::water_surface_height(7))).abs() < 1e-5, "{shallow:?}");
+        assert!(still.y - shallow.y > 0.7, "about 0.78 of a block lower: {} vs {}", still.y, shallow.y);
+        // The level read is the TOP cell's: a deep column's surface cell, not the
+        // cell the ray first met.
+        let top_only = cast_target_levelled(eye, dir, pond_column(3), |_, y, _| if y == 70 { 7 } else { 0 }).expect("water");
+        assert!((top_only.y - (70.0 + crate::water::water_surface_height(7))).abs() < 1e-5, "{top_only:?}");
+        // The plain cast is the source-height one (what the server's rule uses).
+        assert_eq!(cast_target(eye, dir, pond_column(1)), Some(still));
+    }
+
+    #[test]
+    fn a_line_is_drawn_only_while_the_rod_it_was_cast_with_is_where_it_was() {
+        use crate::hands::Hand;
+        let main = FishingLine::cast(0, 100, None).with_rod(Hand::Main, 3);
+        assert!(main.rod_in_place(3, true, false));
+        assert!(!main.rod_in_place(4, true, false), "a second rod on another slot is a different rod");
+        assert!(!main.rod_in_place(3, false, false), "the rod went from the slot");
+        assert!(!main.rod_in_place(3, false, true), "an off-hand rod is not the main hand's");
+        let off = FishingLine::cast(0, 100, None).with_rod(Hand::Off, 3);
+        assert!(off.rod_in_place(7, false, true), "the off-hand's rod ignores the hotbar slot");
+        assert!(!off.rod_in_place(3, true, false), "a main-hand rod is not the off-hand's");
+    }
+
+    #[test]
+    fn an_outcome_answers_only_the_cast_it_was_asked_for() {
+        let a = FishingLine::cast(0, u64::MAX, None).awaiting(Some(7));
+        assert!(a.answers(7) && !a.answers(8));
+        // A line with no request pending (single-player's, or one already answered)
+        // answers nothing.
+        assert!(!FishingLine::cast(0, 100, None).answers(7));
+        assert!(!a.awaiting(None).answers(7));
     }
 
     #[test]

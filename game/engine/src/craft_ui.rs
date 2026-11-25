@@ -1715,7 +1715,7 @@ fn paint_shield_silhouette(painter: &egui::Painter, rect: egui::Rect) {
     ));
 }
 
-fn draw_item_slot(
+pub(crate) fn draw_item_slot(
     ui: &mut egui::Ui,
     stack: &Option<ItemStack>,
     registry: &BlockRegistry,

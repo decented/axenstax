@@ -59,23 +59,22 @@ pub struct CastView {
     pub hooked: bool,
 }
 
-/// The hand a cast leaves from: the main hand's rod, else the off-hand's. (A rod
-/// in neither hand draws no line: the line is out but the rod is put away.)
-pub fn rod_hand(main: Option<ToolType>, off: Option<ToolType>) -> Option<HandSide> {
-    if main == Some(ToolType::FishingRod) {
-        Some(HandSide::Right)
-    } else if off == Some(ToolType::FishingRod) {
-        Some(HandSide::Left)
-    } else {
-        None
+/// The hand side of the hand a cast was made with.
+pub fn side_of(hand: crate::hands::Hand) -> HandSide {
+    match hand {
+        crate::hands::Hand::Main => HandSide::Right,
+        crate::hands::Hand::Off => HandSide::Left,
     }
 }
 
 /// The view of `line` at client tick `now` (`frac` of the next tick done), with
-/// the tools in the two hands. `None` when there is nothing to draw: no line, no
-/// water point (a joiner whose own world shows none), or no rod in hand.
+/// the tools in the two hands and the selected hotbar slot. `None` when there is
+/// nothing to draw: no line, no water point (a joiner whose own world shows none),
+/// or the rod the line was cast with is no longer where it was cast from (a second
+/// rod selected, or the rod put away): the line is drawn from THAT rod only.
 pub fn cast_view(
     line: Option<FishingLine>,
+    hotbar_slot: usize,
     main: Option<ToolType>,
     off: Option<ToolType>,
     now: u64,
@@ -83,9 +82,11 @@ pub fn cast_view(
 ) -> Option<CastView> {
     let line = line?;
     let target = line.target?;
-    let side = rod_hand(main, off)?;
+    if !line.rod_in_place(hotbar_slot, main == Some(ToolType::FishingRod), off == Some(ToolType::FishingRod)) {
+        return None;
+    }
     Some(CastView {
-        side,
+        side: side_of(line.hand),
         target,
         age_ticks: now.saturating_sub(line.cast_tick) as f32 + frac.clamp(0.0, 1.0),
         hooked: line.hooked,
@@ -246,31 +247,35 @@ mod tests {
     }
 
     #[test]
-    fn the_rod_in_the_main_hand_carries_the_line_else_the_off_hand() {
+    fn the_line_leaves_the_hand_that_cast_it() {
+        use crate::hands::Hand;
         let rod = Some(ToolType::FishingRod);
-        let sword = Some(ToolType::Sword);
-        assert_eq!(rod_hand(rod, None), Some(HandSide::Right));
-        assert_eq!(rod_hand(rod, rod), Some(HandSide::Right));
-        assert_eq!(rod_hand(sword, rod), Some(HandSide::Left));
-        assert_eq!(rod_hand(None, rod), Some(HandSide::Left));
-        assert_eq!(rod_hand(sword, None), None);
-        assert_eq!(rod_hand(None, None), None);
+        let water = Some(Vec3::new(1.0, 2.0, 3.0));
+        let main = FishingLine::cast(100, 300, water).with_rod(Hand::Main, 2);
+        let off = FishingLine::cast(100, 300, water).with_rod(Hand::Off, 2);
+        assert_eq!(cast_view(Some(main), 2, rod, None, 103, 0.0).unwrap().side, HandSide::Right);
+        assert_eq!(cast_view(Some(off), 2, None, rod, 103, 0.0).unwrap().side, HandSide::Left);
+        // An off-hand cast with a second rod now in the main hand stays on the off-hand's rod.
+        assert_eq!(cast_view(Some(off), 5, rod, rod, 103, 0.0).unwrap().side, HandSide::Left);
+        // A main-hand cast does not jump to a second rod on another slot, nor to the off-hand's.
+        assert!(cast_view(Some(main), 5, rod, None, 103, 0.0).is_none(), "another slot's rod");
+        assert!(cast_view(Some(main), 2, None, rod, 103, 0.0).is_none(), "the off-hand's rod");
     }
 
     #[test]
     fn nothing_is_drawn_without_a_line_a_water_point_or_a_rod() {
         let line = FishingLine::cast(100, 300, Some(Vec3::new(1.0, 2.0, 3.0)));
         let rod = Some(ToolType::FishingRod);
-        let v = cast_view(Some(line), rod, None, 103, 0.5).expect("a cast line with a rod in hand");
+        let v = cast_view(Some(line), 0, rod, None, 103, 0.5).expect("a cast line with a rod in hand");
         assert_eq!(v.target, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(v.side, HandSide::Right);
         assert!((v.age_ticks - 3.5).abs() < 1e-5, "{}", v.age_ticks);
         assert!(!v.hooked);
-        assert!(cast_view(None, rod, None, 103, 0.0).is_none(), "no line");
-        assert!(cast_view(Some(FishingLine::cast(100, 300, None)), rod, None, 103, 0.0).is_none(), "no water point");
-        assert!(cast_view(Some(line), Some(ToolType::Sword), None, 103, 0.0).is_none(), "rod put away");
+        assert!(cast_view(None, 0, rod, None, 103, 0.0).is_none(), "no line");
+        assert!(cast_view(Some(FishingLine::cast(100, 300, None)), 0, rod, None, 103, 0.0).is_none(), "no water point");
+        assert!(cast_view(Some(line), 0, Some(ToolType::Sword), None, 103, 0.0).is_none(), "rod put away");
         // A tick counter that reads before the cast (a clock reset) is a line at age 0, not a panic.
-        assert_eq!(cast_view(Some(line), rod, None, 50, 0.0).unwrap().age_ticks, 0.0);
+        assert_eq!(cast_view(Some(line), 0, rod, None, 50, 0.0).unwrap().age_ticks, 0.0);
     }
 
     #[test]

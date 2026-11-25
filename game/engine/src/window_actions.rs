@@ -43,7 +43,14 @@ impl GameState {
     /// so a joined client's server copy swaps by the same rule.
     pub(crate) fn swap_hands(&mut self, pidx: usize) -> ClickResult {
         let slot = self.players[pidx].hotbar_slot;
-        self.apply_window_click(pidx, &WindowClick::SwapHands { slot })
+        let result = self.apply_window_click(pidx, &WindowClick::SwapHands { slot });
+        // The food in hand moved with the swap: the bite still shown (F keeps the
+        // selected slot number, so the slot check cannot see it) is no longer in
+        // the hand it was drawn in.
+        if result == ClickResult::Done {
+            self.eating.remove(&pidx);
+        }
+        result
     }
 
     pub(crate) fn apply_window_click(&mut self, pidx: usize, click: &WindowClick) -> ClickResult {

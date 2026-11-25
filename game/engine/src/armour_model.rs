@@ -356,22 +356,26 @@ fn rot_x(p: Vec3, pivot: Vec3, a: f32) -> Vec3 {
 
 /// The worn armour of player part `part_index` (`part`: its box in the model's own
 /// space), turned about the part's pivot by `x_rot` (the part's own effective
-/// angle, the one the skin part is built with), then about Y by `yaw`, then moved
+/// angle, the one the skin part is built with), then about the vertical axis through
+/// the pivot by `arm_yaw` (an eating arm's swing in), then about Y by `yaw`, then moved
 /// to `entity_pos`: the same transform `entity_model::build_skin_part_vertices`
 /// gives the part's skin, so the armour never lags a swinging limb.
+#[allow(clippy::too_many_arguments)]
 pub fn push_worn_part(
     verts: &mut Vec<Vertex>,
     part_index: usize,
     part: &ModelPart,
     worn_set: &WornArmour,
     x_rot: f32,
+    arm_yaw: f32,
     yaw: f32,
     entity_pos: Vec3,
 ) {
     let (sin_y, cos_y) = yaw.sin_cos();
     let turn_y = |p: Vec3| Vec3::new(p.x * cos_y - p.z * sin_y, p.y, p.x * sin_y + p.z * cos_y);
-    let place = |p: Vec3| turn_y(rot_x(p, part.pivot, x_rot)) + entity_pos;
-    let turn = |n: Vec3| turn_y(rot_x(n, Vec3::ZERO, x_rot));
+    let swing_in = |p: Vec3, about: Vec3| crate::entity_model::rot_y_about(p, about, arm_yaw);
+    let place = |p: Vec3| turn_y(swing_in(rot_x(p, part.pivot, x_rot), part.pivot)) + entity_pos;
+    let turn = |n: Vec3| turn_y(swing_in(rot_x(n, Vec3::ZERO, x_rot), Vec3::ZERO));
     for (slot, material) in SLOTS.iter().zip(worn_set.iter()) {
         let Some(material) = material else { continue };
         let colours = palette(*material);
@@ -468,6 +472,32 @@ pub fn drop_mesh(slot: ArmourSlot, material: ArmourMaterial) -> Vec<Vertex> {
     verts
 }
 
+thread_local! {
+    /// The dropped models already built, by slot and material: a pile of identical
+    /// helmets used to allocate, build and scan the same seven-box mesh for every
+    /// helmet in every viewport every frame.
+    static DROP_MESHES: std::cell::RefCell<std::collections::HashMap<(usize, usize), Vec<Vertex>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Test hook: how many dropped models were actually built on this thread.
+    #[cfg(test)]
+    static DROP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` on [`drop_mesh`] of `slot` in `material`, built once and kept: the
+/// caller appends its transformed vertices straight into its own buffer instead of
+/// taking a copy of the mesh to turn in place.
+pub fn with_drop_mesh<R>(slot: ArmourSlot, material: ArmourMaterial, f: impl FnOnce(&[Vertex]) -> R) -> R {
+    DROP_MESHES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let mesh = cache.entry((slot as usize, material as usize)).or_insert_with(|| {
+            #[cfg(test)]
+            DROP_BUILDS.with(|n| n.set(n.get() + 1));
+            drop_mesh(slot, material)
+        });
+        f(mesh)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,6 +524,23 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_pile_of_identical_drops_builds_its_model_once() {
+        let builds = || DROP_BUILDS.with(std::cell::Cell::get);
+        let want = drop_mesh(ArmourSlot::Helmet, ArmourMaterial::Iron);
+        let bytes = |v: &[Vertex]| bytemuck::cast_slice::<Vertex, u8>(v).to_vec();
+        for _ in 0..40 {
+            with_drop_mesh(ArmourSlot::Helmet, ArmourMaterial::Iron, |m| assert_eq!(bytes(m), bytes(&want)));
+        }
+        assert_eq!(builds(), 1, "forty helmets, one build");
+        with_drop_mesh(ArmourSlot::Helmet, ArmourMaterial::Diamond, |m| assert_eq!(m.len(), want.len()));
+        with_drop_mesh(ArmourSlot::Boots, ArmourMaterial::Iron, |_| ());
+        assert_eq!(builds(), 3, "one per slot and material");
+        for (slot, material) in all_armour_combos() {
+            with_drop_mesh(slot, material, |m| assert_eq!(bytes(m), bytes(&drop_mesh(slot, material))));
+        }
     }
 
     #[test]
@@ -632,11 +679,11 @@ mod tests {
         let set = full(ArmourMaterial::Iron);
         for i in 0..6 {
             let mut still = Vec::new();
-            push_worn_part(&mut still, i, &parts[i], &set, 0.0, 0.0, Vec3::ZERO);
+            push_worn_part(&mut still, i, &parts[i], &set, 0.0, 0.0, 0.0, Vec3::ZERO);
             assert!(!still.is_empty(), "part {i}");
             let angle = 0.4;
             let mut turned = Vec::new();
-            push_worn_part(&mut turned, i, &parts[i], &set, angle, 0.0, Vec3::ZERO);
+            push_worn_part(&mut turned, i, &parts[i], &set, angle, 0.0, 0.0, Vec3::ZERO);
             assert_eq!(still.len(), turned.len());
             for (a, b) in still.iter().zip(&turned) {
                 let want = rot_x(Vec3::from(a.position), parts[i].pivot, angle);
@@ -652,7 +699,7 @@ mod tests {
         let parts = player_model_for(ArmModel::Classic);
         let mut verts = Vec::new();
         for i in 0..6 {
-            push_worn_part(&mut verts, i, &parts[i], &NO_ARMOUR, 0.0, 0.0, Vec3::ZERO);
+            push_worn_part(&mut verts, i, &parts[i], &NO_ARMOUR, 0.0, 0.0, 0.0, Vec3::ZERO);
         }
         assert!(verts.is_empty());
         // Boots alone touch only the legs.
@@ -660,7 +707,7 @@ mod tests {
         let set: WornArmour = [None, None, None, Some(ArmourMaterial::Rubber)];
         for i in 0..6 {
             let before = boots.len();
-            push_worn_part(&mut boots, i, &parts[i], &set, 0.0, 0.0, Vec3::ZERO);
+            push_worn_part(&mut boots, i, &parts[i], &set, 0.0, 0.0, 0.0, Vec3::ZERO);
             assert_eq!(boots.len() > before, i == LEFT_LEG || i == RIGHT_LEG, "part {i}");
         }
     }

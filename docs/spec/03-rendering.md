@@ -1594,8 +1594,10 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
     combinations are therefore 12 distinct shapes by 5 materials. **Armour** is a procedural silhouette per slot
     (`item_icon::armour_pieces`: a helmet with a visor, a chestplate with sleeves, leggings, a pair of boots) in the
     material's colour with a darker accent. A **Plan** is a rolled blueprint in its develop stage's colour. A **material**
-    draws its own texture layer (`entity_model::material_texture`, many are shared stand-ins); only an un-uploaded layer
-    (a headless pass) falls back to the flat colour. No texture layer was added (the array is full). The shield keeps
+    draws its own texture layer (`entity_model::material_texture`, many are shared stand-ins; a material that borrows
+    another's layer, the first in id order that maps to it, is multiplied by its own `Item::color`:
+    `item_icon::borrowed_layer_tint`, so the water and lava buckets and the copper, tin and bronze ingots stay
+    apart); only an un-uploaded layer (a headless pass) falls back to the flat colour. No texture layer was added (the array is full). The shield keeps
     its board:
     `hud_ui::paint_shield_icon`
     lays the oak planks layer in a board a little taller than wide with an iron-grey rim and a
@@ -1691,8 +1693,10 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   hand-sized model of the piece (`armour_model::held_mesh`, about 0.4 across, its open side toward the viewer) in
   first person, on the third-person hand of the own body and of every peer, through the ordinary hand placement
   (`HeldItem.armour`; a Plan is drawn as its parchment cube the same way, `HeldItem.plan`). **Dropped:** the same model
-  at 0.7 scale (`ItemLook::Armour`, `armour_model::drop_mesh`), bobbing and spinning like the drop cube; the old
-  iron-ingot cube is gone. **Known gap (BRIDGE):** a REMOTE peer's worn armour is not drawn: it is not on the avatar
+  at 0.7 scale (`ItemLook::Armour`, `armour_model::drop_mesh`, built once per slot and material and kept:
+  `armour_model::with_drop_mesh`, whose vertices are appended turned and lifted straight into the viewport's
+  buffer), bobbing and spinning like the drop cube; the old
+  iron-ingot cube is gone. **Split-screen:** a seat's body is fitted to the same arm width in every viewport (`local_seats::seat_arm_model`: seat 0 wears its wardrobe's arms, the others are Classic), so a Slim player's plates are Slim in its own F5 view and in the other seat's. **Known gap (BRIDGE):** a REMOTE peer's worn armour is not drawn: it is not on the avatar
   wire (a field would be a protocol bump), so peers draw bare until `PlayerState` carries the worn set (Spec 04 §4.2a).
 - **The avatar's two hands.** `entity_model::build_player_avatar_vertices_with`
   holds the main-hand item (`held_*`) at the right arm's hand anchor and the
@@ -1721,8 +1725,10 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   columns centred on the hand, so a bite can cut into it (its sides sample 1-texel strips of the icon rather than
   the whole tile). Crumbs are `ParticleSystem::burst_crumbs`, the colours read from the removed texels of the stock
   texture (`item_model::texel_colour`). First person the arm and item are moved together in view space
-  (`eating::view_offset`); third person the avatar's eating arm angle is `eating::avatar_arm_angle`
-  (`SkinRenderOpts.eating`), and a sprite food keeps `HoldPose::Sprite`'s grip measured on the whole
+  (`eating::view_offset`); third person the avatar's eating arm angle is `eating::avatar_arm_angle` and its swing in
+  across the body `eating::avatar_arm_yaw` (`SkinRenderOpts.eating`; Spec 05 §6.4.2), and the bitten mesh and the
+  whole-item grip bounds are built once per food layer and bite stage and kept (`eating::eaten_item_mesh`,
+  `eating::grip_bounds`: only the hand's transform changes between frames). A sprite food keeps `HoldPose::Sprite`'s grip measured on the whole
   (unbitten) item, so it does not shift in the fist as bites come off. Worn armour and eating ride the same
   avatar (`SkinRenderOpts` carries both). With no eat in progress every mesh is exactly what it was.
 - **The cutout bit.** `mesh::CUTOUT_FLAG` is bit 17 of `Vertex.tex_layer` (bit

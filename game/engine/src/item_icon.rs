@@ -229,9 +229,14 @@ pub(crate) fn paint_item_icon(
         // Every other material has its own texture layer (many share a stand-in
         // picture, but none is a bare swatch). Only where that layer has not been
         // uploaded (a headless pass) does the flat colour stand in.
+        //
+        // A material that stands in with another material's layer (the buckets and
+        // the copper, tin and bronze ingots on the iron ingot's, the saplings on the
+        // wheat seeds) is multiplied by its own colour, as the flat swatch it
+        // replaced was, so the two buckets and the three ingots stay apart.
         Item::Material(m) => match icons.block_texture(crate::entity_model::material_texture(*m)) {
             Some(tex_id) => {
-                painter.image(tex_id, rect, UNIT_UV, Color32::WHITE);
+                painter.image(tex_id, rect, UNIT_UV, borrowed_layer_tint(*m, item.color(registry)));
             }
             None => {
                 painter.rect_filled(rect, 2.0, to_color(item.color(registry)));
@@ -240,6 +245,34 @@ pub(crate) fn paint_item_icon(
         Item::Plan(_) => paint_plan_icon(painter, rect, item.color(registry)),
         Item::Armour(a) => paint_armour_icon(painter, rect, a.slot, a.material),
     }
+}
+
+/// The material whose picture each texture layer is: the first material (in id
+/// order) that maps to it. Every later material on the same layer borrows it.
+fn layer_owner(layer: u32) -> Option<u16> {
+    static OWNERS: std::sync::OnceLock<std::collections::HashMap<u32, u16>> = std::sync::OnceLock::new();
+    OWNERS
+        .get_or_init(|| {
+            let mut owners = std::collections::HashMap::new();
+            for id in 0..=u16::MAX {
+                let Ok(m) = crate::item::MaterialId::try_from(id) else { break };
+                owners.entry(crate::entity_model::material_texture(m)).or_insert(id);
+            }
+            owners
+        })
+        .get(&layer)
+        .copied()
+}
+
+/// Whether `m` draws another material's layer rather than its own.
+pub(crate) fn borrows_layer(m: crate::item::MaterialId) -> bool {
+    layer_owner(crate::entity_model::material_texture(m)).is_some_and(|owner| owner != m as u16)
+}
+
+/// The multiplier a material's icon is drawn with: its own colour (`color`, the
+/// item's) when it borrows another material's layer, white when the layer is its own.
+pub(crate) fn borrowed_layer_tint(m: crate::item::MaterialId, color: [f32; 3]) -> Color32 {
+    if borrows_layer(m) { to_color(color) } else { Color32::WHITE }
 }
 
 const UNIT_UV: Rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
@@ -355,6 +388,22 @@ mod tests {
     fn a_plan_is_a_scroll_in_its_stage_colour() {
         let plan = Item::Plan(crate::plan::PlanData::debug_3x3_stone());
         assert!(shapes_of(&plan).len() >= 8);
+    }
+
+    #[test]
+    fn a_material_on_another_materials_layer_is_tinted_by_its_own_colour() {
+        let reg = BlockRegistry::new();
+        let tint = |m: MaterialId| borrowed_layer_tint(m, Item::Material(m).color(&reg));
+        // The two buckets share the iron ingot's layer and must not look alike.
+        assert_ne!(tint(MaterialId::WaterBucket), tint(MaterialId::LavaBucket));
+        assert_ne!(tint(MaterialId::WaterBucket), Color32::WHITE);
+        // So do the three ingots, and none of them is the iron ingot's own picture.
+        let ingots = [MaterialId::CopperIngot, MaterialId::TinIngot, MaterialId::BronzeIngot].map(tint);
+        assert!(ingots[0] != ingots[1] && ingots[1] != ingots[2] && ingots[0] != ingots[2]);
+        // A material on its own layer is drawn as the picture is.
+        assert_eq!(tint(MaterialId::IronIngot), Color32::WHITE);
+        assert_eq!(tint(MaterialId::Coal), Color32::WHITE);
+        assert!(!borrows_layer(MaterialId::IronIngot) && borrows_layer(MaterialId::Bucket));
     }
 
     #[test]

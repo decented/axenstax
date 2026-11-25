@@ -551,6 +551,27 @@ impl PlayerSlot {
         self.combat.dead
     }
 
+    /// A panel of THIS seat's own owns its input: its crafting screen, a dialogue,
+    /// a container, a steed's pack, a sign, a site board, the Explorer. The part of
+    /// `GameState::seat_modal_open` that every seat shares (player 0's own extras,
+    /// the Workshop, the Wardrobe and the rest, are asked there).
+    pub fn own_panel_open(&self) -> bool {
+        self.crafting_ui.open
+            || self.dialogue_villager.is_some()
+            || self.dialogue_satoshi.is_some()
+            || self.pending_build_choice.is_some()
+            || self.pending_capture.is_some()
+            || self.pending_inspect.is_some()
+            || self.pending_plaque.is_some()
+            || self.open_furnace.is_some()
+            || self.open_vendor.is_some()
+            || self.open_chest.is_some()
+            || self.open_pack.is_some()
+            || self.open_sign.is_some()
+            || self.open_site_board.is_some()
+            || self.explorer_state.is_some()
+    }
+
     /// Iterator over the four armour slots in canonical order
     /// (Helmet, Chestplate, Leggings, Boots). Pass directly into
     /// `armour::total_armour_points`.
@@ -876,6 +897,19 @@ mod tests {
 
     fn fresh_slot() -> PlayerSlot {
         PlayerSlot::new(0, Vec3::new(0.0, 64.0, 0.0), 1.0)
+    }
+
+    #[test]
+    fn a_steeds_open_pack_is_a_panel_of_the_seat_that_opened_it() {
+        // Player 2's eat ends behind the pack screen as player 1's does: the pack is
+        // one of the per-seat panels, not only player 0's.
+        let mut slot = fresh_slot();
+        assert!(!slot.own_panel_open());
+        slot.open_pack = Some((hecs::Entity::DANGLING, (0, 64, 0)));
+        assert!(slot.own_panel_open());
+        slot.open_pack = None;
+        slot.open_chest = Some((1, 2, 3));
+        assert!(slot.own_panel_open());
     }
 
     #[test]

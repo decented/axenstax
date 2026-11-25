@@ -1548,6 +1548,19 @@ fn rot_x_about(p: Vec3, pivot: Vec3, a: f32) -> Vec3 {
     Vec3::new(p.x, pivot.y + dy * c - dz * s, pivot.z + dy * s + dz * c)
 }
 
+/// `p` turned about the vertical axis through `pivot` by `a` radians: the rotation
+/// that swings an arm held forward in toward the middle: a point in front of the
+/// pivot (toward -Z) goes toward -X for a positive angle (`eating::avatar_arm_yaw`
+/// is positive for the right arm, which lies on +X).
+pub(crate) fn rot_y_about(p: Vec3, pivot: Vec3, a: f32) -> Vec3 {
+    if a.abs() <= 0.001 {
+        return p;
+    }
+    let (s, c) = a.sin_cos();
+    let (dx, dz) = (p.x - pivot.x, p.z - pivot.z);
+    Vec3::new(pivot.x + dx * c + dz * s, p.y, pivot.z - dx * s + dz * c)
+}
+
 /// The most an airborne leg trails or leads (radians).
 const AIRBORNE_LEG_TRAIL: f32 = 0.5;
 /// The forward speed (blocks per second) at which the trail is at its most:
@@ -1740,6 +1753,9 @@ pub fn build_player_avatar_vertices_framed(
     // Each part's effective X rotation, as the part builder will apply it (the
     // override wins over the walk cycle). A held item rides its arm's entry.
     let mut part_angle = [0.0_f32; 6];
+    // The turn about the vertical axis through each part's pivot (only an eating
+    // arm has one), which the item in its hand and the armour on it follow.
+    let mut part_yaw = [0.0_f32; 6];
     // The whole angle each part's skin is built with (the same value, plus the
     // head's look pitch) and where it stands, for the armour over it.
     let mut part_xrot = [0.0_f32; 6];
@@ -1788,12 +1804,18 @@ pub fn build_player_avatar_vertices_framed(
         }
         // Eating: the eating hand comes up to the mouth and chews, over whatever
         // the arm was doing.
+        let mut arm_yaw = 0.0;
         if let Some(e) = opts.eating.filter(|e| e.side.arm_index() == i) {
             arm_override = Some(crate::eating::avatar_arm_angle(e.look, arm_override.unwrap_or(walk_swing)));
+            // ... and swings in across the body so the food comes to the mouth.
+            arm_yaw = crate::eating::avatar_arm_yaw(e.look, e.side);
         }
-        let pose = PartPose { walk_swing, head_pitch: ps.pitch, arm_override, ..Default::default() };
+        let pose = PartPose { walk_swing, head_pitch: ps.pitch, arm_override, arm_yaw, ..Default::default() };
         if let Some(slot) = part_angle.get_mut(i) {
             *slot = arm_override.unwrap_or(walk_swing);
+        }
+        if let Some(slot) = part_yaw.get_mut(i) {
+            *slot = arm_yaw;
         }
         if let Some(slot) = part_xrot.get_mut(i) {
             *slot = arm_override.unwrap_or(walk_swing) + if part.pitch_tracks_look { ps.pitch } else { 0.0 };
@@ -1859,15 +1881,22 @@ pub fn build_player_avatar_vertices_framed(
         let arm_pivot = arm.pivot;
         let x_rot = part_angle[side.arm_index()];
         // The sprite grip is measured on the whole item, so a bitten food stays
-        // where it was in the fist as its bites come off.
-        let whole = crate::item_model::held_item_mesh(held, registry, side);
-        let whole_y = whole
-            .iter()
-            .fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[1]), a.1.max(v.position[1])));
-        let mut item_verts = match eating {
-            Some(e) if e.look.bites > 0 => crate::eating::eaten_item_mesh(held, registry, side, e.look.bites),
-            _ => whole,
+        // where it was in the fist as its bites come off (the bitten mesh and the
+        // grip are cached per food and bite stage: not rebuilt every frame).
+        let (mut item_verts, whole_y) = match eating {
+            Some(e) if e.look.bites > 0 => (
+                crate::eating::eaten_item_mesh(held, registry, side, e.look.bites),
+                crate::eating::grip_bounds(held, registry, side),
+            ),
+            _ => {
+                let whole = crate::item_model::held_item_mesh(held, registry, side);
+                let y = whole
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[1]), a.1.max(v.position[1])));
+                (whole, y)
+            }
         };
+        let x_yaw = part_yaw[side.arm_index()];
         let pose = crate::hold_pose::hold_pose(held, registry);
         // Off-hand release (slice 5) — a shield is placed by its own pose (worn on
         // the outside of the forearm, or lifted in front of the raised arm), not
@@ -1909,7 +1938,7 @@ pub fn build_player_avatar_vertices_framed(
         // by `SPRITE_ARM_RAISE` above, so the item stands out in front of it), but the card
         // itself stays upright, like the lantern, with a fifth of its height under the fist.
         if pose == crate::hold_pose::HoldPose::Sprite {
-            let fist = rot_x_about(hand_anchor, arm_pivot, x_rot);
+            let fist = rot_y_about(rot_x_about(hand_anchor, arm_pivot, x_rot), arm_pivot, x_yaw);
             let (lo, hi) = whole_y;
             let grip = Vec3::new(0.0, crate::hold_pose::sprite_grip_shift(lo, hi), 0.0);
             for v in &mut item_verts {
@@ -1921,14 +1950,14 @@ pub fn build_player_avatar_vertices_framed(
         }
         for v in &mut item_verts {
             // Translate local-space item to the hand anchor, then swing it with the arm.
-            let p = rot_x_about(Vec3::from(v.position) + hand_anchor, arm_pivot, x_rot);
+            let p = rot_y_about(rot_x_about(Vec3::from(v.position) + hand_anchor, arm_pivot, x_rot), arm_pivot, x_yaw);
             // Yaw about Y, then translate to foot position.
             let p = rotate_model_yaw(p, (sin_y, cos_y));
             v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
         }
         if rod_out {
             // The same transform as the mesh's, applied to the rod's tip.
-            let p = rot_x_about(crate::held_tool_model::rod_tip_local(side) + hand_anchor, arm_pivot, x_rot);
+            let p = rot_y_about(rot_x_about(crate::held_tool_model::rod_tip_local(side) + hand_anchor, arm_pivot, x_rot), arm_pivot, x_yaw);
             let p = rotate_model_yaw(p, (sin_y, cos_y));
             rod_tip = Some(p + foot_pos);
         }
@@ -1947,7 +1976,7 @@ pub fn build_player_avatar_vertices_framed(
     // carries it.
     if fade >= WORN_ARMOUR_MIN_FADE && opts.worn.iter().any(Option::is_some) {
         for (i, part) in parts.iter().enumerate().take(part_xrot.len()) {
-            crate::armour_model::push_worn_part(&mut held_verts, i, part, &opts.worn, part_xrot[i], yaw, part_origin[i]);
+            crate::armour_model::push_worn_part(&mut held_verts, i, part, &opts.worn, part_xrot[i], part_yaw[i], yaw, part_origin[i]);
         }
     }
 
@@ -2078,11 +2107,17 @@ fn push_item_drop_armour(
     let foot = pos + Vec3::new(0.0, 0.08 + bob, 0.0);
     let (sin_y, cos_y) = yaw.sin_cos();
     let spin = |p: Vec3| Vec3::new(p.x * cos_y - p.z * sin_y, p.y, p.x * sin_y + p.z * cos_y);
-    for mut v in crate::armour_model::drop_mesh(slot, material) {
-        v.position = (spin(Vec3::from(v.position)) + foot).to_array();
-        v.normal = spin(Vec3::from(v.normal)).to_array();
-        verts.push(v);
-    }
+    // The model is built once per slot and material; its vertices go straight into
+    // the viewport's buffer, turned and lifted on the way.
+    crate::armour_model::with_drop_mesh(slot, material, |mesh| {
+        verts.reserve(mesh.len());
+        verts.extend(mesh.iter().map(|v| {
+            let mut v = *v;
+            v.position = (spin(Vec3::from(v.position)) + foot).to_array();
+            v.normal = spin(Vec3::from(v.normal)).to_array();
+            v
+        }));
+    });
     apply_light_channels(&mut verts[verts_start..], light);
 }
 
@@ -2740,11 +2775,16 @@ pub struct PartPose {
     /// `[1,1,1]` (the default) is a no-op and is skipped entirely, so every
     /// existing avatar/mob/cart emit stays byte-identical to pre-Phase-C output.
     pub scale: [f32; 3],
+    /// A turn about the VERTICAL axis through the part's pivot, applied after the X
+    /// rotation (radians; positive swings a forward-pointing part toward +x): the
+    /// eating arm's swing in to the mouth. Zero (the default) is skipped, so every
+    /// other emit is unchanged.
+    pub arm_yaw: f32,
 }
 
 impl Default for PartPose {
     fn default() -> Self {
-        Self { walk_swing: 0.0, head_pitch: 0.0, arm_override: None, scale: [1.0; 3] }
+        Self { walk_swing: 0.0, head_pitch: 0.0, arm_override: None, scale: [1.0; 3], arm_yaw: 0.0 }
     }
 }
 
@@ -3228,6 +3268,14 @@ fn build_skin_part_vertices(
             let dz = c.z - pivot.z;
             c.y = pivot.y + dy * cos_a - dz * sin_a;
             c.z = pivot.z + dy * sin_a + dz * cos_a;
+        }
+    }
+
+    // The arm's swing about the vertical axis through its pivot (eating).
+    if pose.arm_yaw.abs() > 0.001 {
+        let pivot = part.pivot;
+        for c in &mut corners {
+            *c = rot_y_about(*c, pivot, pose.arm_yaw);
         }
     }
 
@@ -5627,5 +5675,47 @@ mod worn_armour_tests {
         assert!(first.0.is_empty() && first.1.is_empty());
         let bare = self_avatar_vertices(crate::camera::CameraMode::OrbitBehind, &state, 0.0, 0, 0, 1.0, &registry, ArmModel::Classic, NO_ARMOUR, None);
         assert!(bare.1.is_empty(), "a bare body wears nothing");
+    }
+    /// The centre of the food the eating hand holds, in the body's model space
+    /// (the mannequin's trick: yaw -pi/2 emits model space), at `progress` of the eat.
+    fn food_centre(hand: crate::hands::Hand, progress: f32, arm: ArmModel) -> Vec3 {
+        let registry = crate::block::BlockRegistry::new();
+        let food = crate::item_model::HeldItem::of(&crate::item::Item::Material(crate::item::MaterialId::CookedBeef));
+        let eating = crate::eating::Eating::at_progress(food, hand, 0, progress).avatar();
+        let (_, held) = build_player_avatar_vertices_with(
+            &ps(0, 0.0),
+            0.0,
+            0,
+            0,
+            1.0,
+            &registry,
+            SkinRenderOpts { arm_model: arm, eating: Some(eating), ..Default::default() },
+        );
+        assert!(!held.is_empty(), "the food is drawn");
+        let sum = held.iter().fold(Vec3::ZERO, |a, v| a + Vec3::from(v.position));
+        sum / held.len() as f32
+    }
+
+    #[test]
+    fn the_eating_hand_holds_the_food_in_front_of_the_mouth_on_its_own_side_of_the_body() {
+        // Both hands, both arm widths: the food ends up in front of the face, on the
+        // centreline (not 0.4 out beside the shoulder), at the height of the head and
+        // where the crumbs start, and it is drawn in the raised hand, not the other.
+        let bite = Vec3::new(0.0, crate::eating::AVATAR_BITE_HEIGHT, -crate::eating::AVATAR_BITE_FORWARD);
+        for arm in [ArmModel::Classic, ArmModel::Slim] {
+            for hand in [crate::hands::Hand::Main, crate::hands::Hand::Off] {
+                let c = food_centre(hand, 0.5, arm);
+                assert!(c.distance(bite) < 0.22, "{hand:?} {arm:?}: the food is at {c:?}, the bite at {bite:?}");
+                assert!(c.x.abs() < 0.12, "{hand:?}: on the centreline, not at the shoulder's side: {c:?}");
+            }
+        }
+        // At rest the hand hangs at its own side (the right arm on +x, the left on -x).
+        let rest_r = food_centre(crate::hands::Hand::Main, 0.0, ArmModel::Classic);
+        let rest_l = food_centre(crate::hands::Hand::Off, 0.0, ArmModel::Classic);
+        assert!(rest_r.x > 0.25 && rest_l.x < -0.25, "{rest_r:?} {rest_l:?}");
+        // The raised hand comes in from its own side: the right hand's food is never
+        // on the left of the left hand's.
+        let (r, l) = (food_centre(crate::hands::Hand::Main, 0.4, ArmModel::Classic), food_centre(crate::hands::Hand::Off, 0.4, ArmModel::Classic));
+        assert!(r.x >= l.x - 1e-4, "{r:?} {l:?}");
     }
 }

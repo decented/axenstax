@@ -4701,20 +4701,8 @@ impl super::GameState {
     /// and the Director. The tick's per-seat `menu_open` gate (before player 0's egui
     /// focus fold) and the frame path's use press (`use_press_ends`) ask this one.
     pub(crate) fn seat_modal_open(&self, i: usize) -> bool {
-        self.players[i].crafting_ui.open
+        self.players[i].own_panel_open()
             || (i == 0 && self.joined_quest_open())
-            || self.players[i].dialogue_villager.is_some()
-            || self.players[i].dialogue_satoshi.is_some()
-            || self.players[i].pending_build_choice.is_some()
-            || self.players[i].pending_capture.is_some()
-            || self.players[i].pending_inspect.is_some()
-            || self.players[i].pending_plaque.is_some()
-            || self.players[i].open_furnace.is_some()
-            || self.players[i].open_vendor.is_some()
-            || self.players[i].open_chest.is_some()
-            || self.players[i].open_sign.is_some()
-            || self.players[i].open_site_board.is_some()
-            || self.players[i].explorer_state.is_some()
             // Spec 40 — the Workshop painter (player 0) is a modal editor.
             || (i == 0 && self.workshop_painter.open)
             // Workshop Phase 5 Task 6 — Wardrobe panel (player 0).
@@ -7612,6 +7600,12 @@ impl super::GameState {
         // P6 — fishing bite check: a cast line that's reached its wait time
         // hooks; the player then right-clicks to reel it in.
         for i in 0..self.players.len() {
+            // A line does not survive its player's death: after the respawn it
+            // would be drawn from the new spawn to the last life's fishing spot.
+            if self.players[i].is_dead() {
+                self.players[i].fishing = None;
+                continue;
+            }
             if let Some(line) = self.players[i].fishing
                 && !line.hooked && self.tick_counter >= line.catch_at_tick {
                     self.players[i].fishing = Some(crate::fishing::FishingLine {
@@ -7619,8 +7613,22 @@ impl super::GameState {
                         ..line
                     });
                     // The bobber is pulled under: a splash where it floats, for
-                    // every local seat (presentation only).
+                    // every local seat (presentation only), and only for the cast
+                    // whose rod is still where it was cast from (the same test
+                    // that draws the line).
+                    let rod_here = {
+                        let p = &self.players[i];
+                        let is_rod = |s: &crate::item::ItemStack| {
+                            matches!(&s.item, crate::item::Item::Tool(t) if t.tool_type == crate::crafting::ToolType::FishingRod)
+                        };
+                        line.rod_in_place(
+                            p.hotbar_slot,
+                            p.inventory.hotbar_slot(p.hotbar_slot).is_some_and(is_rod),
+                            p.offhand.as_ref().is_some_and(is_rod),
+                        )
+                    };
                     if let Some(at) = line.target
+                        && rod_here
                         && self.particles.is_enabled()
                     {
                         self.particles.burst_splash(at, 10, self.tick_counter ^ ((i as u64) << 9));
@@ -10642,6 +10650,12 @@ impl super::GameState {
         // target again, whatever the button did behind the menu.
         if matches!(self.mode, GameMode::Paused { .. }) {
             self.end_all_use_presses();
+            // Nothing ages behind the menu: a bite shown before it would go on from
+            // where it stopped after Resume (or, with a seat leaving, to another
+            // seat). The first frame back measures its step from here, not from
+            // before the pause.
+            self.eating.clear();
+            self.last_particle_frame = Instant::now();
         }
 
         // Pause mode: render world + pause overlay. After a failed save, or in
@@ -14382,18 +14396,22 @@ impl super::GameState {
                             let eye = self.players[pidx].player.eye_pos();
                             let dir = self.players[pidx].camera.forward();
                             let world = &self.world;
-                            let target = crate::fishing::cast_target(eye, dir, |x, y, z| world.is_water(x, y, z));
+                            let target = crate::fishing::cast_target_levelled(
+                                eye,
+                                dir,
+                                |x, y, z| world.is_water(x, y, z),
+                                |x, y, z| crate::water::level_at(world, x, y, z),
+                            );
                             if let Some(target) = target {
                                 let seed = self
                                     .tick_counter
                                     .wrapping_mul(0x9E37)
                                     .wrapping_add(pidx as u64 * 0x85EB);
                                 let wait = crate::fishing::wait_ticks(seed);
-                                self.players[pidx].fishing = Some(crate::fishing::FishingLine::cast(
-                                    self.tick_counter,
-                                    self.tick_counter + wait,
-                                    Some(target),
-                                ));
+                                self.players[pidx].fishing = Some(
+                                    crate::fishing::FishingLine::cast(self.tick_counter, self.tick_counter + wait, Some(target))
+                                        .with_rod(hand, hot),
+                                );
                                 self.audio.play_place();
                                 self.players[pidx].place_cooldown = 10;
                                 fished = true;
@@ -14839,12 +14857,19 @@ impl super::GameState {
                     // is eaten, fed or healed here; an accepted outcome takes
                     // the food (`apply_item_action_outcome`) and the server's
                     // heal and hunger arrive with its state.
-                    self.send_eat_request(pidx, hand);
+                    let queued = self.send_eat_request(pidx, hand);
                     self.players[pidx].start_eat_cooldown();
                     // The bite is shown at once, on the request (presentation
-                    // only: the food goes when the server says so).
-                    let held = self.players[pidx].held_for_use(hand).map(|s| crate::item_model::HeldItem::of(&s.item));
-                    self.begin_eating(pidx, hand, held);
+                    // only: the food goes when the server says so) — but only for a
+                    // request that was queued: no request, no meal. A refusal ends
+                    // it (`apply_item_action_outcome`).
+                    if let Some(seq) = queued {
+                        let held = self.players[pidx].held_for_use(hand).map(|s| crate::item_model::HeldItem::of(&s.item));
+                        self.begin_eating(pidx, hand, held);
+                        if let Some(eat) = self.eating.get_mut(&pidx) {
+                            *eat = eat.asked_as(seq);
+                        }
+                    }
                     ate = true;
                 } else if can_eat
                     && let Some(food) = self.players[pidx].held_for_use(hand).map(|s| crate::item_model::HeldItem::of(&s.item))
@@ -17609,10 +17634,13 @@ impl super::GameState {
         {
             self.particles.set_cap(self.effective_quality().particles);
             let now = Instant::now();
-            let dt = (now - self.last_particle_frame).as_secs_f32().min(0.1);
+            // The particle step is clamped (a hitch must not teleport particles);
+            // an eat ages by the real time since the last frame, so a slow frame
+            // does not stretch its 0.8 s past the cooldown (`eating::frame_steps`).
+            let (dt, eat_dt) = crate::eating::frame_steps((now - self.last_particle_frame).as_secs_f32());
             self.last_particle_frame = now;
             // Eating you can see: age each local player's bite, throw its crumbs.
-            self.tick_eating_presentation(dt);
+            self.tick_eating_presentation(eat_dt);
             // Lightning flash decays fast (~0.3 s to dark).
             self.lightning_flash = (self.lightning_flash - dt * 3.5).max(0.0);
             // Living world: the shader clock and birdsong / insects by local level.
@@ -18032,6 +18060,9 @@ impl super::GameState {
             // once so the third-person body, the Workshop mannequin and the
             // first-person hand below all build the same avatar.
             let worn_arm = self.worn_arm_model();
+            // This viewport's own seat's arms (seat 0: the wardrobe's; the others
+            // have none), for its third-person body and its first-person hand.
+            let seat_arm = crate::local_seats::seat_arm_model(pidx, worn_arm);
 
             // Fishing — a line cast out (presentation only, `fishing_view`): the rod
             // in hand is drawn bare and the line and bobber are added below, from
@@ -18046,7 +18077,7 @@ impl super::GameState {
                 let main_tool = slot.inventory.hotbar_slot(slot.hotbar_slot).and_then(tool_of);
                 let off_tool = slot.offhand.as_ref().and_then(tool_of);
                 let frac = self.tick_accumulator.as_secs_f32() / TICK_DURATION.as_secs_f32();
-                crate::fishing_view::cast_view(slot.fishing, main_tool, off_tool, self.tick_counter, frac)
+                crate::fishing_view::cast_view(slot.fishing, slot.hotbar_slot, main_tool, off_tool, self.tick_counter, frac)
             };
             let mut rod_tip: Option<glam::Vec3> = None;
 
@@ -18090,7 +18121,7 @@ impl super::GameState {
                         crate::pure_helpers::skin_layer_of(pidx),
                         fade,
                         &self.registry,
-                        worn_arm,
+                        seat_arm,
                         // Your own armour on your own body (Spec 03 §7.5a).
                         self.players[pidx].worn_armour(),
                         self.eating.get(&pidx).map(crate::eating::Eating::avatar),
@@ -18281,9 +18312,11 @@ impl super::GameState {
                         crate::pure_helpers::skin_layer_of(j),
                         1.0, // other split-screen players never self-fade in my viewport
                         // Split-screen player j wears whatever their own slot's
-                        // look is; only slot 0 has a wardrobe today, so Classic.
+                        // look is; only slot 0 has a wardrobe today, so the others
+                        // are Classic (`seat_arm_model`: the same answer as in j's
+                        // own viewport).
                         &self.registry,
-                        crate::skin_uv::ArmModel::Classic,
+                        crate::local_seats::seat_arm_model(j, worn_arm),
                         // A local body's armour is known here, whoever's viewport.
                         self.players[j].worn_armour(),
                     );
@@ -18372,8 +18405,8 @@ impl super::GameState {
                     self.eating.get(&pidx).map(crate::eating::Eating::avatar),
                     crate::pure_helpers::skin_layer_of(pidx),
                     &self.registry,
-                    // Your own hand follows YOUR skin's Arms setting.
-                    self.worn_arm_model(),
+                    // Your own hand follows YOUR seat's Arms setting.
+                    seat_arm,
                     aspect,
                 );
                 // Campaign N — your own hand + held tool dim in caves / at
@@ -18405,7 +18438,31 @@ impl super::GameState {
                 );
                 // The cast line leaves the rod's tip: its place in the viewmodel's view
                 // space, carried to the same screen spot in the world pass.
-                if let Some(c) = cast_view {
+                if let Some(c) = cast_view
+                    && director_cam.is_some()
+                {
+                    // The render camera is detached (the Director flies elsewhere): the
+                    // viewmodel's tip is a point in front of THAT camera, and the line
+                    // would be dragged along with it. Start it at the rod's tip on the
+                    // avatar's own body, in the world, where the player stands.
+                    let mut ps_self = self.local_player_state(pidx);
+                    let fwd = self.players[pidx].camera.forward();
+                    ps_self.yaw = crate::entity_model::yaw_facing(fwd.x, fwd.z);
+                    let (_, _, tip) = crate::entity_model::self_avatar_with_rod(
+                        crate::camera::CameraMode::OrbitBehind,
+                        &ps_self,
+                        0.0,
+                        self.falling_tick_counter,
+                        crate::pure_helpers::skin_layer_of(pidx),
+                        1.0,
+                        &self.registry,
+                        seat_arm,
+                        crate::armour_model::NO_ARMOUR,
+                        None,
+                        Some(c.side),
+                    );
+                    rod_tip = tip;
+                } else if let Some(c) = cast_view {
                     let (rod, rod_swing) = match c.side {
                         crate::viewmodel::HandSide::Right => (held, swing),
                         crate::viewmodel::HandSide::Left => (off_held.unwrap_or(held), swing_off),
@@ -23309,13 +23366,18 @@ impl super::GameState {
     /// can't be eaten twice on a slow link, `JoinerActions::can_afford`);
     /// taken only on an accepted `ItemActionOutcome`. Nothing is sent while
     /// every one in hand is already claimed.
-    pub(crate) fn send_eat_request(&mut self, pidx: usize, hand: crate::hands::Hand) {
-        if self.pack_window_frozen(pidx) { return; }
+    ///
+    /// Returns the request's sequence number when it was queued, `None` when
+    /// nothing was asked (the last food is already claimed by a request in flight,
+    /// the pack is frozen, the connection is gone): the bite is shown only for a
+    /// request that was.
+    pub(crate) fn send_eat_request(&mut self, pidx: usize, hand: crate::hands::Hand) -> Option<u32> {
+        if self.pack_window_frozen(pidx) { return None; }
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx, hand);
         let asked = crate::joiner_actions::Asked::Eat;
         let p = &self.players[pidx];
         if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, &p.offhand, asked, held.as_ref()) {
-            return;
+            return None;
         }
         let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held, hand };
         let action = crate::protocol::ItemAction::Eat { hotbar_slot: hot as u8, held_kind, held_id, held_full };
@@ -23326,9 +23388,13 @@ impl super::GameState {
             let p = &self.players[pidx];
             crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand, "eat")
         };
+        let before = self.joiner_actions.last_seq();
         self.route_item_request(pidx, pending, action);
         let p = &self.players[pidx];
         crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots, &p.offhand);
+        // Queued: a new request is waiting for its answer (one released unsent, or
+        // refused a reservation, is not).
+        self.joiner_actions.last_pending_seq().filter(|seq| *seq != before)
     }
 
     /// C3d run 24 — record and send player `pidx`'s (a joiner's) eat or
@@ -23826,12 +23892,23 @@ impl super::GameState {
         // client's own world (drawing only; none when it shows no water).
         let target = {
             let (eye, dir) = (self.players[pidx].player.eye_pos(), self.players[pidx].camera.forward());
-            crate::fishing::cast_target(eye, dir, |x, y, z| self.world.is_water(x, y, z))
+            crate::fishing::cast_target_levelled(
+                eye,
+                dir,
+                |x, y, z| self.world.is_water(x, y, z),
+                |x, y, z| crate::water::level_at(&self.world, x, y, z),
+            )
         };
         if self.send_use_request(pidx, asked, held, hot, hand, action) {
-            // A cast's line waits for the server's bite; a reel's comes in.
-            self.players[pidx].fishing =
-                (!reel).then_some(crate::fishing::FishingLine::cast(self.tick_counter, u64::MAX, target));
+            // A cast's line waits for the server's bite, and for the answer to THIS
+            // request (a late reply to an earlier cast must not touch it); a reel's
+            // comes in.
+            let seq = self.joiner_actions.last_pending_seq();
+            self.players[pidx].fishing = (!reel).then_some(
+                crate::fishing::FishingLine::cast(self.tick_counter, u64::MAX, target)
+                    .with_rod(hand, hot)
+                    .awaiting(seq),
+            );
         }
     }
 
@@ -23904,9 +23981,16 @@ impl super::GameState {
 
     /// C3c-2 — the server accepted our cast: the line waits `bite_after`
     /// ticks for its bite from now (unless it was reeled in meanwhile).
-    fn line_cast(&mut self, bite_after: u16) {
+    ///
+    /// Only the cast this outcome answers (`seq`): a reply to an earlier cast, a
+    /// line reeled in and cast again meanwhile, leaves the newer line alone.
+    fn line_cast(&mut self, seq: u32, bite_after: u16) {
         let now = self.tick_counter;
         let Some(line) = self.players.first_mut().and_then(|p| p.fishing.as_mut()) else { return };
+        if !line.answers(seq) {
+            return;
+        }
+        line.request = None;
         line.catch_at_tick = now + u64::from(bite_after);
         self.audio.play_place();
         self.toast = Some(("Line cast. Wait for a bite…".to_string(), Instant::now() + Duration::from_secs(2)));
@@ -23934,6 +24018,11 @@ impl super::GameState {
             self.handle_tool_use(wear);
         }
         let note = crate::item_actions::ItemNote::from_wire(out.note);
+        // A refused eat (not hungry, the food is gone, out of order) is no meal: its
+        // remaining bites, crumbs and munches stop with the request that asked.
+        if request.kind == crate::joiner_actions::Asked::Eat && !out.accepted {
+            crate::eating::cancel_refused(&mut self.eating, 0, out.seq);
+        }
         if request.kind == crate::joiner_actions::Asked::CreativeGive && !out.accepted && note == crate::item_actions::ItemNote::InventoryFull {
             self.toast = Some(("Inventory full — make room first".into(), Instant::now() + Duration::from_secs(3)));
         }
@@ -23955,7 +24044,7 @@ impl super::GameState {
                 }
                 crate::joiner_actions::Asked::UseBlock { .. } => self.block_use_feedback(&request, out),
                 crate::joiner_actions::Asked::Light { lighter, .. } => self.light_feedback(lighter, note),
-                crate::joiner_actions::Asked::Cast => self.line_cast(out.bite_after),
+                crate::joiner_actions::Asked::Cast => self.line_cast(out.seq, out.bite_after),
                 crate::joiner_actions::Asked::Reel => {
                     // The catch itself arrives as an `InventoryGrant`.
                     self.fire_challenge(crate::scenario::ChallengeEvent::CatchFish);
@@ -23973,7 +24062,11 @@ impl super::GameState {
             return;
         }
         // C3c-2 — a refused cast puts no line out.
-        if request.kind == crate::joiner_actions::Asked::Cast {
+        // ... only if it is THIS cast's refusal: a late one for an earlier cast
+        // would otherwise erase the newer line the server accepted.
+        if request.kind == crate::joiner_actions::Asked::Cast
+            && self.players[0].fishing.as_ref().is_some_and(|l| l.answers(out.seq))
+        {
             self.players[0].fishing = None;
         }
         // Living world S3 — a refused feast has no marker coming.
