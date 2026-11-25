@@ -388,6 +388,25 @@ pub fn update_for_block_change(
     }
 }
 
+/// pt1124 review 12 — relight a cell that a change from elsewhere rewrote (a
+/// joined client's received `BlockChange`, a joiner's edit on a lent world)
+/// when the old or the new block gives light: a torch another player broke, or
+/// one the server dropped, takes its light with it there too. Returns whether
+/// it relit, so the caller remeshes the sections the light reaches.
+pub fn relight_received_change(
+    world: &mut World,
+    pos: (i32, i32, i32),
+    old_block: BlockId,
+    new_block: BlockId,
+    registry: &BlockRegistry,
+) -> bool {
+    if old_block == new_block || (registry.light_emission(old_block) == 0 && registry.light_emission(new_block) == 0) {
+        return false;
+    }
+    update_for_block_change(world, pos, old_block, new_block, registry);
+    true
+}
+
 /// Shared BFS step. `is_block_light` selects between block-light and
 /// sky-light accessors.
 fn bfs_propagate(
@@ -501,6 +520,27 @@ mod tests {
         assert_eq!(r.light_absorption(block::STONE), 15);
         // Glass is solid + transparent — should not block light.
         assert_eq!(r.light_absorption(block::GLASS), 0);
+    }
+
+    /// pt1124 review 12 — a received change that takes a torch away (another player's
+    /// break, a server's support drop) takes its light on the receiving world too; a
+    /// change between two blocks that give no light relights nothing.
+    #[test]
+    fn a_received_change_relights_only_when_an_emitter_comes_or_goes() {
+        let (mut w, r) = fresh();
+        w.set_block(5, 5, 5, block::TORCH);
+        propagate_block_light_from(&mut w, [(5, 5, 5)], &r);
+        assert_eq!(w.block_light_at(6, 5, 5), 13);
+        let air = crate::protocol::BlockChange { x: 5, y: 5, z: 5, new_block: block::AIR, meta: 0 };
+        assert!(w.apply_remote_block_change(&air));
+        assert_eq!(w.block_light_at(6, 5, 5), 13, "the block alone leaves the light behind");
+        assert!(relight_received_change(&mut w, (5, 5, 5), block::TORCH, block::AIR, &r));
+        assert_eq!(w.block_light_at(6, 5, 5), 0, "relit: no light where the torch was");
+        assert!(!relight_received_change(&mut w, (9, 5, 5), block::AIR, block::STONE, &r), "no emitter, no relight");
+        // And a received torch lights.
+        assert!(relight_received_change(&mut w, (5, 5, 5), block::AIR, block::TORCH, &r));
+        w.set_block(5, 5, 5, block::TORCH);
+        assert!(w.block_light_at(6, 5, 5) > 0);
     }
 
     #[test]

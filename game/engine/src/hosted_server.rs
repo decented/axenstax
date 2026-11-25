@@ -6165,6 +6165,15 @@ impl HostedServer {
             self.server.world.release_plot((bc.x, bc.y, bc.z));
         }
         self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
+        // pt1124 review 12 — a lent world is the host's drawn world: a joiner's
+        // torch (placed or broken) relights it, and the host redraws the
+        // sections round it (`take_lent_stamp_cells`), not only the cell's own.
+        if remote
+            && self.server.lent
+            && crate::lighting::relight_received_change(&mut self.server.world, (bc.x, bc.y, bc.z), old_block, bc.new_block, &self.server.registry)
+        {
+            self.server.lent_stamp_cells.push((bc.x, bc.y, bc.z));
+        }
         // FU1 (C1 verify N1) — only when the block really
         // changed: an edit that leaves it as it was (a
         // meta-only toggle, or a modified client

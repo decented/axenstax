@@ -959,8 +959,15 @@ impl super::GameState {
                     // own still duplicated power sim would darken the
                     // host's lit wire the moment anything nearby dirtied
                     // the network.
+                    let old_block = self.world.get_block(bc.x, bc.y, bc.z);
                     if self.world.apply_remote_block_change(bc) {
                         self.rebuild_chunk_at(bc.x, bc.y, bc.z);
+                        // pt1124 review 12 — a torch broken (or dropped) on the
+                        // server takes its light here too, and the sections
+                        // the light reached are redrawn.
+                        if crate::lighting::relight_received_change(&mut self.world, (bc.x, bc.y, bc.z), old_block, bc.new_block, &self.registry) {
+                            self.rebuild_chunks_for_lighting(bc.x, bc.y, bc.z);
+                        }
                     }
                 }
                 crate::chunk_intake::Delta::View(v) => {

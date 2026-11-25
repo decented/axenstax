@@ -2232,6 +2232,13 @@ impl GameServer {
                 let dropped = crate::support::tick_support(&mut self.world, &self.registry);
                 crate::support::spawn_drops(&mut self.ecs, &dropped);
                 self.pending_block_changes.extend(dropped.iter().map(crate::support::Dropped::air_change));
+                // pt1124 review 12 — on a lent world the host redraws the
+                // sections a dropped torch's light reached, not only its own.
+                if self.lent {
+                    self.lent_stamp_cells.extend(
+                        dropped.iter().filter(|d| self.registry.light_emission(d.block) > 0).map(|d| d.cell),
+                    );
+                }
             }
 
             if self.runs(SimSystem::Fluids) {
