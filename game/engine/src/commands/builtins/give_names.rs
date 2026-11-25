@@ -6,11 +6,19 @@
 //! Every table row is `(names, value)`. The FIRST name is the canonical one
 //! (what completion offers); the rest are aliases that keep working when
 //! typed. `resolve_item` tries blocks, then tools, then bow-type tools, then
-//! materials, then armour (`<tier>_<slot>`), then the two plan keywords; within a table the first matching row
+//! materials, then armour (`<tier>_<slot>`), then the two plan keywords, and last the
+//! registry fallback (below); within a table the first matching row
 //! wins. The test module `give_golden_tests` pins every accepted name and what
 //! it resolves to.
+//!
+//! **The registry fallback.** The tables are hand-kept, so a block or material nobody added a row
+//! for was unreachable (`/give spruce planks`). After every table, a name is looked up among every
+//! registered block and every material by its display name and its registry name, ignoring case,
+//! spaces, hyphens, underscores and an optional namespace (`Spruce Planks`, `genesis:spruce_planks`).
+//! A new block is therefore giveable the day it is registered, and the coverage test
+//! (`give_registry_tests`) fails if one is not.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
 
 use crate::armour::{ArmourMaterial, ArmourSlot};
@@ -35,6 +43,15 @@ pub(super) static BLOCK_NAMES: &[(&[&str], BlockId)] = &[
     // it as a source). Enables `/give lava` for testing + the "Floor Is Lava"
     // arena. The survival way to move lava stays the lava bucket.
     (&["lava"], block::LAVA),
+    // Pure deepslate is the one deepslate block (there is no cobbled one); `deepslate` is the
+    // name a player reaches for.
+    (&["pure_deepslate", "deepslate"], block::PURE_DEEPSLATE),
+    // The three chests of metal: `iron_chest` (and its kin) already name the chestplate.
+    (&["iron_chest_block"], block::IRON_CHEST),
+    (&["diamond_chest_block"], block::DIAMOND_CHEST),
+    (&["satori_chest_block"], block::SATORI_CHEST),
+    // The Mill (the grinding block); `mill` is the windmill.
+    (&["grain_mill"], block::MILL),
     (&["oak_log", "log"], block::OAK_LOG),
     (&["oak_leaves", "leaves"], block::OAK_LEAVES),
     (&["oak_planks", "planks"], block::OAK_PLANKS),
@@ -203,6 +220,85 @@ pub(super) static BLOCK_NAMES: &[(&[&str], BlockId)] = &[
     // `wall` aliases above stay the stone / oak / cobblestone originals.
 ];
 
+/// Registered blocks that are never an item, so the registry fallback never gives them: air, the
+/// piston's head (the piston places and removes it; a loose one is a block with nothing behind it),
+/// and the three Living World records that exist only as the world's own marks (a Feast Marker, a
+/// Worn Path, a Blighted Crop; breaking one gives back something else or nothing). The creative
+/// inventory leaves out the same ones (`inventory_explorer`).
+pub(crate) const NOT_GIVEABLE_BLOCKS: &[BlockId] = &[
+    block::AIR,
+    block::PISTON_HEAD,
+    block::FEAST_MARKER,
+    block::WORN_PATH,
+    block::BLIGHTED_CROP,
+];
+
+/// A name as the registry fallback's key: lower case, the namespace (`genesis:`) dropped, every run
+/// of spaces, hyphens, underscores and other punctuation one `_`, apostrophes dropped.
+fn registry_key(name: &str) -> String {
+    let local = name.rsplit_once(':').map_or(name, |(_, rest)| rest);
+    let mut out = String::with_capacity(local.len());
+    for c in local.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() {
+            out.push(c);
+        } else if c != '\'' && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    out
+}
+
+/// `RawIron` as `raw_iron`.
+fn snake_case(camel: &str) -> String {
+    let mut out = String::with_capacity(camel.len() + 4);
+    for (i, c) in camel.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
+/// Every block and material the registry knows (minus [`NOT_GIVEABLE_BLOCKS`]), by key.
+struct RegistryNames {
+    /// Every key that gives an item: display name and registry name; blocks first, so a block
+    /// wins a name a material shares, as in the tables.
+    by_key: HashMap<String, Item>,
+    /// One canonical name per item (its registry name without the namespace; a material's snake
+    /// case name), in registry order: what the suggestion list offers for items no table names.
+    canonical: Vec<(String, Item)>,
+}
+
+static REGISTRY_NAMES: LazyLock<RegistryNames> = LazyLock::new(|| {
+    let registry = block::BlockRegistry::new();
+    let mut by_key: HashMap<String, Item> = HashMap::new();
+    let mut canonical = Vec::new();
+    let mut add = |display: String, canon: String, item: Item| {
+        by_key.entry(registry_key(&display)).or_insert_with(|| item.clone());
+        by_key.entry(registry_key(&canon)).or_insert_with(|| item.clone());
+        canonical.push((registry_key(&canon), item));
+    };
+    for id in 0..registry.len() {
+        let id = id as BlockId;
+        if NOT_GIVEABLE_BLOCKS.contains(&id) {
+            continue;
+        }
+        let item = Item::Block(id);
+        add(item.name(&registry), registry.get(id).name.to_string(), item);
+    }
+    for &material in crate::inventory_explorer::ALL_MATERIAL_IDS {
+        let item = Item::Material(material);
+        add(item.name(&registry), snake_case(&format!("{material:?}")), item);
+    }
+    RegistryNames { by_key, canonical }
+});
+
+/// The last resort of `/give`: any registered block or material by display name or registry name.
+pub(super) fn registry_item_by_name(key: &str) -> Option<Item> {
+    REGISTRY_NAMES.by_key.get(&registry_key(key)).cloned()
+}
+
 pub(super) fn block_by_name(key: &str) -> Option<BlockId> {
     // The building-variant table mints the rest (`spruce_stairs`, ...).
     lookup(BLOCK_NAMES, key).or_else(|| crate::building_variants::id_by_name(key))
@@ -212,6 +308,8 @@ pub(super) fn block_by_name(key: &str) -> Option<BlockId> {
 /// so a name a block also uses (`cable`, `nitre`) gives the block.
 pub(super) static MATERIAL_NAMES: &[(&[&str], M)] = &[
     (&["bellows"], M::Bellows), // Spec 40 — the Workshop inflate tool
+    // `amethyst` is the cluster block; the gem is its own item.
+    (&["amethyst_gem"], M::Amethyst),
     // Spec 49 (Explosives).
     (&["sulphur", "sulfur"], M::Sulphur),
     (&["saltpetre", "saltpeter", "nitre", "niter"], M::Saltpetre),
@@ -564,7 +662,7 @@ fn build_catalogue() -> Vec<(String, Item)> {
         if out.values().any(|offered| *offered == item) {
             return;
         }
-        let resolves = |n: &str| super::give::resolve_item(n, 1).is_ok_and(|stack| stack.item == item);
+        let resolves = |n: &str| super::give::resolve_known(n, 1).ok().flatten().is_some_and(|stack| stack.item == item);
         if let Some(name) = names.iter().find(|n| resolves(n)) {
             out.entry((*name).to_string()).or_insert(item);
         }
@@ -591,6 +689,10 @@ fn build_catalogue() -> Vec<(String, Item)> {
     for (slot, material) in crate::armour::all_armour_combos() {
         let name = armour_name(slot, material);
         offer(&[name.as_str()], Item::Armour(crate::armour::ArmourItem::new(slot, material)));
+    }
+    // Whatever no table names is offered under its registry name, so Tab finds it too.
+    for (name, item) in &REGISTRY_NAMES.canonical {
+        offer(&[name.as_str()], item.clone());
     }
     offer(&["debug_plan"], Item::Plan(crate::plan::PlanData::debug_3x3_stone()));
     offer(&["hut_plan"], Item::Plan(crate::plan::PlanData::small_hut()));
