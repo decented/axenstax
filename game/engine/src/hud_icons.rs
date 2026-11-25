@@ -110,12 +110,16 @@ pub(crate) fn drumstick(
 }
 
 /// What an inventory slot, the hotbar and the off-hand box show for a block: its
-/// atlas layer (the top face, the established icon) or, for a block whose top face
-/// is no picture of it, a drawn icon.
+/// atlas layer (the top face, the established icon), the layer cut to the block's
+/// shape, or, for a block whose top face is no picture of it, a drawn icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BlockIcon {
     /// The block's `tex_top` layer, drawn full size.
     Layer(u32),
+    /// A shaped block (slab, stairs, door, trapdoor, fence gate, wall, fence post): its
+    /// base layer clipped to the shape's silhouette ([`icon_pieces`]), so it does not
+    /// look like the full block of the same material.
+    Shaped { layer: u32, shape: IconShape },
     /// The hand lantern: a frame with a lit window under a handle (`lantern`). Its
     /// top face is the opaque lid fill, which as an icon was a black square.
     Lantern,
@@ -126,15 +130,101 @@ pub(crate) enum BlockIcon {
 
 /// The slot tint matching the shader's `DEEPSLATE_SHADE` (0.42, 0.42, 0.47).
 pub(crate) const DEEPSLATE_ICON_TINT: [u8; 3] = [107, 107, 120];
+/// The silhouettes a shaped block's icon is cut to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IconShape {
+    Slab,
+    Stairs,
+    Door,
+    Trapdoor,
+    FenceGate,
+    Wall,
+    /// A fence post: a post with a rail stub either side.
+    Post,
+}
+
+/// A rectangle of the unit icon square, `[x0, y0, x1, y1]`, y down.
+pub(crate) type UnitRect = [f32; 4];
+
+/// The textured pieces of a shape's icon: each is the base layer's own pixels at the
+/// same place (the texture is clipped to the piece, not squeezed into it), so the icon
+/// is the material seen through the shape. Painted in order.
+pub(crate) fn icon_pieces(shape: IconShape) -> &'static [UnitRect] {
+    match shape {
+        // The lower half.
+        IconShape::Slab => &[[0.0, 0.5, 1.0, 1.0]],
+        // The lower half and the upper back step.
+        IconShape::Stairs => &[[0.0, 0.5, 1.0, 1.0], [0.5, 0.0, 1.0, 0.5]],
+        // One tall narrow panel.
+        IconShape::Door => &[[0.28, 0.04, 0.72, 0.96]],
+        // A thin lid.
+        IconShape::Trapdoor => &[[0.04, 0.60, 0.96, 0.80]],
+        // Two posts with two rails between them and a gap between the rails.
+        IconShape::FenceGate => &[
+            [0.04, 0.16, 0.20, 0.92],
+            [0.80, 0.16, 0.96, 0.92],
+            [0.20, 0.30, 0.80, 0.42],
+            [0.20, 0.62, 0.80, 0.74],
+        ],
+        // A tall post with a low wall running out either side.
+        IconShape::Wall => &[[0.0, 0.50, 1.0, 0.88], [0.30, 0.14, 0.70, 0.94]],
+        // A narrow post with rail stubs.
+        IconShape::Post => &[[0.0, 0.26, 1.0, 0.38], [0.0, 0.60, 1.0, 0.72], [0.36, 0.04, 0.64, 0.96]],
+    }
+}
+
+/// Small dark details drawn over a shape's pieces (a door's handle, a trapdoor's hinges).
+pub(crate) fn icon_details(shape: IconShape) -> &'static [UnitRect] {
+    match shape {
+        IconShape::Door => &[[0.58, 0.48, 0.66, 0.56]],
+        IconShape::Trapdoor => &[[0.10, 0.62, 0.20, 0.68], [0.80, 0.62, 0.90, 0.68]],
+        IconShape::Slab | IconShape::Stairs | IconShape::FenceGate | IconShape::Wall | IconShape::Post => &[],
+    }
+}
+
+/// The shape block `id`'s icon is cut to, if it is not a plain cube: the six building
+/// families (every wood and stone variant: `block_shape::shape_of` knows them all) and
+/// the species fence posts.
+pub(crate) fn icon_shape(id: BlockId) -> Option<IconShape> {
+    use crate::block_shape::BlockShape;
+    if crate::block::is_fence_post(id) {
+        return Some(IconShape::Post);
+    }
+    match crate::block_shape::shape_of(id) {
+        BlockShape::Slab => Some(IconShape::Slab),
+        BlockShape::Stairs => Some(IconShape::Stairs),
+        BlockShape::Door => Some(IconShape::Door),
+        BlockShape::Trapdoor => Some(IconShape::Trapdoor),
+        BlockShape::FenceGate => Some(IconShape::FenceGate),
+        BlockShape::Wall => Some(IconShape::Wall),
+        _ => None,
+    }
+}
+
+/// The wood species a fence post is made of.
+fn fence_post_species(id: BlockId) -> Option<crate::block::WoodSpecies> {
+    crate::block::ALL_WOOD_SPECIES.iter().copied().find(|s| crate::block::fence_post_for_species(*s) == id)
+}
 
 /// The icon of block `id` (the one question every slot painter asks).
 pub(crate) fn block_icon(id: BlockId, registry: &BlockRegistry) -> BlockIcon {
     if id == crate::block::LANTERN {
-        BlockIcon::Lantern
-    } else if crate::mesh::layer_flags(id) & crate::mesh::DARK_FLAG != 0 {
-        BlockIcon::Tinted(registry.tex_top(id), DEEPSLATE_ICON_TINT)
-    } else {
-        BlockIcon::Layer(registry.tex_top(id))
+        return BlockIcon::Lantern;
+    }
+    if crate::mesh::layer_flags(id) & crate::mesh::DARK_FLAG != 0 {
+        return BlockIcon::Tinted(registry.tex_top(id), DEEPSLATE_ICON_TINT);
+    }
+    match icon_shape(id) {
+        Some(shape) => {
+            // Every species' fence post is built from the oak planks layer and
+            // tinted; its icon shows its own species' planks instead.
+            let layer = match fence_post_species(id) {
+                Some(species) => registry.tex_top(crate::block::planks_block_for(species)),
+                None => registry.tex_top(id),
+            };
+            BlockIcon::Shaped { layer, shape }
+        }
+        None => BlockIcon::Layer(registry.tex_top(id)),
     }
 }
 
@@ -167,6 +257,20 @@ pub(crate) fn paint_block_icon(
                     Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                     Color32::from_rgb(r, g, b),
                 );
+            }
+        }
+        BlockIcon::Shaped { layer, shape } => {
+            let unit = |r: UnitRect| Rect::from_min_max(point(rect, r[0], r[1]), point(rect, r[2], r[3]));
+            let edge = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(20, 20, 24, 200));
+            if let Some(tex_id) = texture(layer) {
+                for piece in icon_pieces(shape) {
+                    let uv = Rect::from_min_max(Pos2::new(piece[0], piece[1]), Pos2::new(piece[2], piece[3]));
+                    painter.image(tex_id, unit(*piece), uv, Color32::WHITE);
+                    painter.rect_stroke(unit(*piece), 0.0, edge, egui::StrokeKind::Inside);
+                }
+            }
+            for detail in icon_details(shape) {
+                painter.rect_filled(unit(*detail), 0.0, Color32::from_rgb(40, 34, 30));
             }
         }
         BlockIcon::Lantern => lantern(painter, rect),
@@ -203,14 +307,15 @@ pub(crate) fn lantern(painter: &Painter, rect: Rect) {
 mod block_icon_tests {
     use super::*;
     use crate::block::{self, BlockRegistry};
+    use crate::building_variants::{self as bv, VShape};
 
     #[test]
-    fn the_lantern_is_drawn_and_every_other_block_keeps_its_top_layer() {
+    fn the_lantern_is_drawn_and_every_plain_block_keeps_its_top_layer() {
         let reg = BlockRegistry::new();
         assert_eq!(block_icon(block::LANTERN, &reg), BlockIcon::Lantern);
         // Its top layer is the opaque lid fill (a black square as an icon): not the icon.
         assert_ne!(block_icon(block::LANTERN, &reg), BlockIcon::Layer(reg.tex_top(block::LANTERN)));
-        for id in [block::STONE, block::TORCH, block::PAPER_LANTERN_YELLOW, block::GLASS, block::COBBLESTONE] {
+        for id in [block::STONE, block::TORCH, block::PAPER_LANTERN_YELLOW, block::GLASS, block::SPRUCE_PLANKS, block::COBBLESTONE] {
             assert_eq!(block_icon(id, &reg), BlockIcon::Layer(reg.tex_top(id)), "block {id}");
         }
         // pt1124 — Cobbled Deepslate: the cobblestone layer, tinted as the shader darkens it.
@@ -218,5 +323,84 @@ mod block_icon_tests {
             block_icon(block::COBBLED_DEEPSLATE, &reg),
             BlockIcon::Tinted(block::TEX_COBBLESTONE, DEEPSLATE_ICON_TINT)
         );
+    }
+
+    fn area(r: &UnitRect) -> f32 {
+        (r[2] - r[0]) * (r[3] - r[1])
+    }
+
+    #[test]
+    fn every_shape_has_its_own_silhouette_inside_the_icon() {
+        let shapes = [
+            IconShape::Slab,
+            IconShape::Stairs,
+            IconShape::Door,
+            IconShape::Trapdoor,
+            IconShape::FenceGate,
+            IconShape::Wall,
+            IconShape::Post,
+        ];
+        for (i, a) in shapes.iter().enumerate() {
+            let pieces = icon_pieces(*a);
+            assert!(!pieces.is_empty());
+            let cover: f32 = pieces.iter().map(area).sum();
+            assert!(cover < 0.9, "{a:?} is a shape, not the whole tile (covers {cover})");
+            for r in pieces.iter().chain(icon_details(*a)) {
+                assert!(r[0] >= 0.0 && r[1] >= 0.0 && r[2] <= 1.0 && r[3] <= 1.0 && r[0] < r[2] && r[1] < r[3], "{a:?} {r:?}");
+            }
+            for b in &shapes[i + 1..] {
+                assert_ne!(pieces, icon_pieces(*b), "{a:?} and {b:?} share a silhouette");
+            }
+        }
+        // A slab is the lower half; a trapdoor is thinner than a slab; a door is taller than wide.
+        assert_eq!(icon_pieces(IconShape::Slab), &[[0.0, 0.5, 1.0, 1.0]]);
+        assert!(area(&icon_pieces(IconShape::Trapdoor)[0]) < area(&icon_pieces(IconShape::Slab)[0]) * 0.5);
+        let door = icon_pieces(IconShape::Door)[0];
+        assert!((door[3] - door[1]) > 2.0 * (door[2] - door[0]));
+    }
+
+    #[test]
+    fn every_building_variant_is_shaped_and_not_the_icon_of_its_base_block() {
+        let reg = BlockRegistry::new();
+        let mut n = 0;
+        for (id, material, shape) in bv::all() {
+            n += 1;
+            let want = match shape {
+                VShape::Slab => IconShape::Slab,
+                VShape::Stairs => IconShape::Stairs,
+                VShape::Door => IconShape::Door,
+                VShape::Trapdoor => IconShape::Trapdoor,
+                VShape::FenceGate => IconShape::FenceGate,
+                VShape::Wall => IconShape::Wall,
+            };
+            let icon = block_icon(id, &reg);
+            assert_eq!(icon, BlockIcon::Shaped { layer: reg.tex_top(material.base), shape: want }, "{} ({id})", material.key);
+            assert_ne!(icon, block_icon(material.base, &reg), "{} is not its base block's icon", material.key);
+        }
+        assert_eq!(n, 59, "the 59 slab/stair/door/trapdoor/gate/wall variants");
+    }
+
+    #[test]
+    fn a_species_fence_post_shows_its_own_planks() {
+        let reg = BlockRegistry::new();
+        let mut layers = Vec::new();
+        for s in block::ALL_WOOD_SPECIES {
+            let post = block::fence_post_for_species(*s);
+            let want = reg.tex_top(block::planks_block_for(*s));
+            assert_eq!(block_icon(post, &reg), BlockIcon::Shaped { layer: want, shape: IconShape::Post }, "{s:?}");
+            layers.push(want);
+        }
+        layers.sort_unstable();
+        layers.dedup();
+        assert_eq!(layers.len(), block::ALL_WOOD_SPECIES.len(), "seven species, seven different planks");
+        assert_ne!(block_icon(block::BIRCH_FENCE_POST, &reg), block_icon(block::OAK_FENCE_POST, &reg));
+    }
+
+    #[test]
+    fn spruce_planks_and_the_spruce_fence_gate_no_longer_share_an_icon() {
+        let reg = BlockRegistry::new();
+        let gate = bv::id_by_name("spruce_fence_gate").expect("the spruce fence gate");
+        assert_ne!(block_icon(gate, &reg), block_icon(block::SPRUCE_PLANKS, &reg));
+        assert_eq!(block_icon(block::OAK_FENCE_GATE, &reg), BlockIcon::Shaped { layer: reg.tex_top(block::OAK_PLANKS), shape: IconShape::FenceGate });
     }
 }

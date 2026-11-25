@@ -165,6 +165,7 @@ mod menu;
 mod friends_ui;
 mod hud_ui;
 mod hud_icons;
+mod item_icon;
 mod minimap;
 mod map_ui;
 mod waypoint;

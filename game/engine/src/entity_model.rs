@@ -1717,7 +1717,7 @@ pub fn build_player_avatar_vertices_travelling(
         // item still rides the arm's own angle in every pose (`part_angle` below).
         if i == LEFT_ARM_INDEX || i == RIGHT_ARM_INDEX {
             let wire = if i == RIGHT_ARM_INDEX { main_wire } else { off_wire };
-            let lift = crate::hold_pose::hold_pose(crate::item_model::HeldItem::from_wire(wire)).arm_raise();
+            let lift = crate::hold_pose::hold_pose(crate::item_model::HeldItem::from_wire(wire), registry).arm_raise();
             if lift != 0.0 {
                 arm_override = Some(arm_override.unwrap_or(walk_swing) + lift);
             }
@@ -1782,7 +1782,7 @@ pub fn build_player_avatar_vertices_travelling(
         let arm_pivot = arm.pivot;
         let x_rot = part_angle[side.arm_index()];
         let mut item_verts = crate::item_model::held_item_mesh(held, registry, side);
-        let pose = crate::hold_pose::hold_pose(held);
+        let pose = crate::hold_pose::hold_pose(held, registry);
         // Off-hand release (slice 5) — a shield is placed by its own pose (worn on
         // the outside of the forearm, or lifted in front of the raised arm), not
         // hung from the hand anchor.
@@ -1813,6 +1813,23 @@ pub fn build_player_avatar_vertices_travelling(
             let fist = rot_x_about(hand_anchor, arm_pivot, x_rot) - Vec3::new(0.0, handle, 0.0);
             for v in &mut item_verts {
                 let p = rotate_model_yaw(Vec3::from(v.position) + fist, (sin_y, cos_y));
+                v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
+            }
+            held_verts.extend(item_verts);
+            continue;
+        }
+        // A held sprite (a torch, bread): gripped by its foot in the fist, standing upright
+        // above it. The hand carries it through the arm's own angle (the forearm is lifted
+        // by `SPRITE_ARM_RAISE` above, so the item stands out in front of it), but the card
+        // itself stays upright, like the lantern, with a fifth of its height under the fist.
+        if pose == crate::hold_pose::HoldPose::Sprite {
+            let fist = rot_x_about(hand_anchor, arm_pivot, x_rot);
+            let (lo, hi) = item_verts
+                .iter()
+                .fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[1]), a.1.max(v.position[1])));
+            let grip = Vec3::new(0.0, crate::hold_pose::sprite_grip_shift(lo, hi), 0.0);
+            for v in &mut item_verts {
+                let p = rotate_model_yaw(Vec3::from(v.position) + fist + grip, (sin_y, cos_y));
                 v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
             }
             held_verts.extend(item_verts);
@@ -4451,12 +4468,12 @@ mod tests {
         assert!(!only_main.is_empty() && !only_off.is_empty());
         assert_eq!(both.len(), only_main.len() + only_off.len(), "one item per hand, nothing else");
         // Model space (yaw 0): the body centre is x = 0, the right arm's hand
-        // anchor x = +0.375 and the left's -0.375; a held sprite sits outside.
+        // anchor x = +0.375 and the left's -0.375; a held sprite is gripped in the fist.
         let (right, left): (Vec<_>, Vec<_>) = both.iter().copied().partition(|v| v.position[0] > 0.0);
         assert_eq!(right.len(), only_main.len(), "the main item is all on the right of the body centre");
         assert_eq!(left.len(), only_off.len(), "the off-hand item is all on the left");
         assert!(centre_x(&right) > 0.3, "the right item's centre is at the right hand: {}", centre_x(&right));
-        assert!(centre_x(&left) < -0.5, "the off-hand sprite is outside the left hand: {}", centre_x(&left));
+        assert!(centre_x(&left) < -0.3, "the off-hand sprite is in the left fist: {}", centre_x(&left));
         // The off-hand item sits where the same item sits in the right hand,
         // mirrored about the body centre (a sprite's own art is not symmetric, so
         // a few hundredths of slack).
@@ -4662,8 +4679,11 @@ mod tests {
         for side in [HandSide::Right, HandSide::Left] {
             let arm = &arms[side.arm_index()];
             let hand = avatar_hand_anchor(side, crate::skin_uv::ArmModel::Classic);
-            // Where the torch sits from the hand at rest.
-            let rest = torch_centroid(side, 0, 0, 0.0, false) - hand;
+            // A held torch (`HoldPose::Sprite`) is gripped by its foot in the fist: the forearm
+            // lifts `SPRITE_ARM_RAISE` on top of the pose, the card stays upright. Where the torch
+            // sits from the lifted fist, at rest.
+            let raise = crate::hold_pose::SPRITE_ARM_RAISE;
+            let rest = torch_centroid(side, 0, 0, 0.0, false) - rot_x(hand, arm.pivot, raise);
             for (label, anim, ticks, swing, guard_other) in poses {
                 // The swing is the main hand's (right arm) only.
                 let swing = if side == HandSide::Right { swing } else { 0.0 };
@@ -4675,7 +4695,7 @@ mod tests {
                     _ => 0.0,
                 };
                 let got = torch_centroid(side, anim, ticks, swing, guard_other);
-                let want = rot_x(hand + rest, arm.pivot, angle);
+                let want = rot_x(hand, arm.pivot, angle + raise) + rest;
                 assert!(
                     (got - want).length() < 0.03,
                     "{side:?} hand, {label} (arm angle {angle:.2}): the torch is {got:?}, the hand carries it to {want:?}"

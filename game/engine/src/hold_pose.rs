@@ -9,6 +9,13 @@
 //!   third person; [`HANGING_FIST_RAISE_NDC`], first person) and the item keeps
 //!   upright under its handle while the hand carries it through every arm pose.
 //!
+//! * [`HoldPose::Sprite`] - a flat item (a torch, a sapling, bread: any block or
+//!   material held as a cut-out sprite): gripped by its foot in the fist, standing
+//!   upright above it. Third person, the forearm lifts [`SPRITE_ARM_RAISE`] so the
+//!   item stands out in front of the arm instead of inside it, and the item's own
+//!   angle stays upright through every arm pose ([`sprite_grip_shift`]). First
+//!   person has its own placement (`viewmodel::held_item_placement`) and is unchanged.
+//!
 //! Only the lantern hangs today; another hanging item (a pail, a bell) joins by
 //! returning `Hanging { handle }` from [`hold_pose`], with its own handle height.
 //! The pose is keyed off the held item already on the avatar wire, so it needs no
@@ -26,6 +33,23 @@ pub enum HoldPose {
     /// mesh's own origin, so the caller puts the grip at the fist by moving the
     /// mesh down by that much.
     Hanging { handle: f32 },
+    /// A cut-out sprite held by its foot in the fist (see the module).
+    Sprite,
+}
+
+/// Third person: how much further the arm of a held sprite lifts forward about the
+/// shoulder (radians, on top of idle, walk, jump or swing), so the item stands out in
+/// front of the forearm and its flame is not hidden inside it.
+pub const SPRITE_ARM_RAISE: f32 = 0.95;
+
+/// How much of a held sprite's height sits below the fist: the foot of a torch's
+/// stick pokes out under the hand, the rest stands above it.
+pub const SPRITE_GRIP_FRACTION: f32 = 0.2;
+
+/// How far to move a held sprite mesh (centred on the origin, spanning `min_y..max_y`)
+/// up so that [`SPRITE_GRIP_FRACTION`] of its height lies below the fist.
+pub fn sprite_grip_shift(min_y: f32, max_y: f32) -> f32 {
+    -min_y - SPRITE_GRIP_FRACTION * (max_y - min_y)
 }
 
 /// Third person: how much further the arm of a hanging item lifts forward about
@@ -38,12 +62,13 @@ pub const HANGING_ARM_RAISE: f32 = 0.5;
 pub const HANGING_FIST_RAISE_NDC: f32 = 0.30;
 
 /// How the item in a hand is carried.
-pub fn hold_pose(held: HeldItem) -> HoldPose {
+pub fn hold_pose(held: HeldItem, registry: &crate::block::BlockRegistry) -> HoldPose {
     if held.tool == Some(crate::crafting::ToolType::Shield) {
         return HoldPose::Shield;
     }
     match held.item {
         ItemRef::Block(id) if id == crate::block::LANTERN => HoldPose::Hanging { handle: crate::lantern::HANDLE_HEIGHT },
+        item if crate::item_model::held_is_sprite(item, registry) => HoldPose::Sprite,
         _ => HoldPose::Default,
     }
 }
@@ -53,6 +78,7 @@ impl HoldPose {
     pub fn arm_raise(self) -> f32 {
         match self {
             HoldPose::Hanging { .. } => HANGING_ARM_RAISE,
+            HoldPose::Sprite => SPRITE_ARM_RAISE,
             HoldPose::Default | HoldPose::Shield => 0.0,
         }
     }
@@ -61,7 +87,7 @@ impl HoldPose {
     pub fn fist_raise_ndc(self) -> f32 {
         match self {
             HoldPose::Hanging { .. } => HANGING_FIST_RAISE_NDC,
-            HoldPose::Default | HoldPose::Shield => 0.0,
+            HoldPose::Default | HoldPose::Shield | HoldPose::Sprite => 0.0,
         }
     }
 }
@@ -84,18 +110,33 @@ mod tests {
     }
 
     #[test]
-    fn the_hook_hangs_the_lantern_and_leaves_every_other_item_alone() {
-        assert!(matches!(hold_pose(lantern()), HoldPose::Hanging { handle } if handle > 0.1 && handle < 0.3));
-        assert_eq!(hold_pose(ItemRef::Block(block::TORCH).into()), HoldPose::Default);
-        assert_eq!(hold_pose(ItemRef::Block(block::STONE).into()), HoldPose::Default);
-        assert_eq!(hold_pose(HeldItem::EMPTY), HoldPose::Default);
+    fn the_hook_hangs_the_lantern_grips_sprites_and_leaves_every_other_item_alone() {
+        let reg = BlockRegistry::new();
+        assert!(matches!(hold_pose(lantern(), &reg), HoldPose::Hanging { handle } if handle > 0.1 && handle < 0.3));
+        assert_eq!(hold_pose(ItemRef::Block(block::TORCH).into(), &reg), HoldPose::Sprite);
+        assert_eq!(hold_pose(ItemRef::Block(block::STONE).into(), &reg), HoldPose::Default);
+        assert_eq!(hold_pose(HeldItem::EMPTY, &reg), HoldPose::Default);
+        // A material held as a sprite (bread) is gripped the same way; one held as a cube is not.
+        let bread = crate::item::Item::Material(crate::item::MaterialId::Bread);
+        assert_eq!(hold_pose(HeldItem::of(&bread), &reg), HoldPose::Sprite);
         let sword = crate::item::Item::Tool(Tool::new(ToolType::Sword, ToolMaterial::Iron));
-        assert_eq!(hold_pose(HeldItem::of(&sword)), HoldPose::Default);
+        assert_eq!(hold_pose(HeldItem::of(&sword), &reg), HoldPose::Default);
         let shield = crate::item::Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Wood));
-        assert_eq!(hold_pose(HeldItem::of(&shield)), HoldPose::Shield);
+        assert_eq!(hold_pose(HeldItem::of(&shield), &reg), HoldPose::Shield);
         // The wire form (a peer's avatar) says the same as the local item.
         let wire = HeldWire::of(Some(&crate::item::Item::Block(block::LANTERN)));
-        assert_eq!(hold_pose(HeldItem::from_wire(wire)), hold_pose(lantern()));
+        assert_eq!(hold_pose(HeldItem::from_wire(wire), &reg), hold_pose(lantern(), &reg));
+        let wire = HeldWire::of(Some(&crate::item::Item::Block(block::TORCH)));
+        assert_eq!(hold_pose(HeldItem::from_wire(wire), &reg), HoldPose::Sprite);
+        assert!(HoldPose::Sprite.arm_raise() > 0.3 && HoldPose::Sprite.fist_raise_ndc() == 0.0);
+    }
+
+    #[test]
+    fn the_grip_shift_puts_a_fifth_of_the_sprite_below_the_fist() {
+        // A 0.6 card centred on the origin: its foot ends 0.12 below the fist.
+        let shift = sprite_grip_shift(-0.3, 0.3);
+        assert!((shift - 0.18).abs() < 1e-6, "{shift}");
+        assert!((-0.3 + shift + 0.12).abs() < 1e-6);
     }
 
     fn rot_x(p: Vec3, pivot: Vec3, a: f32) -> Vec3 {
@@ -190,15 +231,89 @@ mod tests {
         }
     }
 
+    /// The poses the held-item tests walk: (label, anim_state, ticks, swing progress).
+    const POSES: [(&str, u8, u32, f32); 5] = [
+        ("idle", 0, 0, 0.0),
+        ("walk, arm back", 1, 13, 0.0),
+        ("walk, arm forward", 1, 38, 0.0),
+        ("airborne", 2, 10, 0.0),
+        ("mid swing", 0, 0, 0.35),
+    ];
+
+    /// The arm's own angle in a pose, before any lift.
+    fn arm_base_angle(arm: &entity_model::ModelPart, anim: u8, ticks: u32, swing: f32) -> f32 {
+        match anim {
+            _ if swing > 0.0 => swing_angle(swing),
+            1 => (ticks as f32 / 20.0 * 2.5 + arm.phase * std::f32::consts::TAU).sin() * 0.4,
+            2 => -0.4,
+            _ => 0.0,
+        }
+    }
+
     #[test]
-    fn the_hanging_arm_is_lifted_and_a_torch_arm_is_not() {
+    fn a_torch_is_gripped_in_the_fist_in_either_hand_in_every_pose() {
+        let arms = player_model_for(ArmModel::Classic);
+        let reg = BlockRegistry::new();
+        let mesh = crate::item_model::held_item_mesh(ItemRef::Block(block::TORCH).into(), &reg, HandSide::Right);
+        let (mlo, mhi) = (
+            mesh.iter().map(|v| v.position[1]).fold(f32::MAX, f32::min),
+            mesh.iter().map(|v| v.position[1]).fold(f32::MIN, f32::max),
+        );
+        let height = mhi - mlo;
+        for side in [HandSide::Right, HandSide::Left] {
+            let arm = &arms[side.arm_index()];
+            let hand = avatar_hand_anchor(side, ArmModel::Classic);
+            for (label, anim, ticks, swing) in POSES {
+                let swing = if side == HandSide::Right { swing } else { 0.0 };
+                let angle = arm_base_angle(arm, anim, ticks, swing) + SPRITE_ARM_RAISE;
+                let fist = rot_x(hand, arm.pivot, angle);
+                let verts = held_verts(side, crate::item::Item::Block(block::TORCH), anim, ticks, swing);
+                let ys: Vec<f32> = verts.iter().map(|v| v.position[1]).collect();
+                let (lo, hi) = (ys.iter().cloned().fold(f32::MAX, f32::min), ys.iter().cloned().fold(f32::MIN, f32::max));
+                assert!(((hi - lo) - height).abs() < 1e-3, "{side:?} {label}: upright, full height");
+                // The foot pokes a fifth of its height under the fist; the rest stands above.
+                assert!((lo - (fist.y - SPRITE_GRIP_FRACTION * height)).abs() < 0.01, "{side:?} {label}: foot {lo}, fist {}", fist.y);
+                let n = verts.len() as f32;
+                let cx = verts.iter().map(|v| v.position[0]).sum::<f32>() / n;
+                let cz = verts.iter().map(|v| v.position[2]).sum::<f32>() / n;
+                // In the fist's own column, not beside it (the old 0.25 offset).
+                assert!((cx - fist.x).abs() < 0.05, "{side:?} {label}: x {cx} vs fist {}", fist.x);
+                assert!((cz - fist.z).abs() < 0.03, "{side:?} {label}: z {cz} vs fist {}", fist.z);
+                // The flame (the top of the card) clears the forearm: its distance from the arm's axis
+                // (shoulder pivot to fist, in the Y-Z plane) beats the arm's half depth.
+                let (axis_a, axis_b) = (glam::Vec2::new(arm.pivot.y, arm.pivot.z), glam::Vec2::new(fist.y, fist.z));
+                let half_depth = arm.size.z * 0.5 + 0.02;
+                for v in verts.iter().filter(|v| v.position[1] > fist.y + 0.3) {
+                    let p = glam::Vec2::new(v.position[1], v.position[2]);
+                    let t = ((p - axis_a).dot(axis_b - axis_a) / (axis_b - axis_a).length_squared()).clamp(0.0, 1.0);
+                    let d = (p - (axis_a + (axis_b - axis_a) * t)).length();
+                    assert!(d > half_depth, "{side:?} {label}: the flame at {:?} is inside the forearm (d {d})", v.position);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_torch_arm_is_lifted_like_the_lantern_arm() {
         // A raised forearm puts the fist further forward (-Z is the front) than the
-        // same pose with a torch in the hand.
+        // same pose with a block in the hand.
+        let stone = held_verts(HandSide::Right, crate::item::Item::Block(block::STONE), 0, 0, 0.0);
+        let stone_z = stone.iter().map(|v| v.position[2]).sum::<f32>() / stone.len() as f32;
         let torch = held_verts(HandSide::Right, crate::item::Item::Block(block::TORCH), 0, 0, 0.0);
         let torch_z = torch.iter().map(|v| v.position[2]).sum::<f32>() / torch.len() as f32;
-        let lamp = held_verts(HandSide::Right, crate::item::Item::Block(block::LANTERN), 0, 0, 0.0);
-        let lamp_z = lamp.iter().map(|v| v.position[2]).sum::<f32>() / lamp.len() as f32;
-        assert!(lamp_z < torch_z - 0.15, "the lantern is carried further forward: {lamp_z} vs the torch's {torch_z}");
+        assert!(torch_z < stone_z - 0.2, "the torch is carried further forward: {torch_z} vs the block's {stone_z}");
+    }
+
+    #[test]
+    fn first_person_a_torch_is_placed_as_before() {
+        // The first-person hands do not read the sprite pose: the torch stands upright above the
+        // fist, centred (the old third-person offset was taken out there and is gone).
+        let (_, item) = first_person(ItemRef::Block(block::TORCH).into(), HandSide::Right, 16.0 / 9.0);
+        assert!(!item.is_empty());
+        let (arm, _) = first_person(ItemRef::Block(block::TORCH).into(), HandSide::Right, 16.0 / 9.0);
+        let (arm2, _) = first_person(ItemRef::Block(block::STONE).into(), HandSide::Right, 16.0 / 9.0);
+        let mean_y = |v: &[Vec3]| v.iter().map(|p| p.y).sum::<f32>() / v.len() as f32;
+        assert!((mean_y(&arm) - mean_y(&arm2)).abs() < 1e-4, "the hand is not raised for a torch");
     }
 
     fn arm_half_length() -> f32 {

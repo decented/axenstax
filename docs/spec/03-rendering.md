@@ -1459,8 +1459,8 @@ first-person viewmodel (§7.5), and it reuses the authoritative
     edges. A held tool, sprite (torch, sapling) or block stands **upright above
     the fist, leaning `ITEM_LEAN_DEG` (12°) in toward the centre**: a first-person
     adjustment made in `viewmodel::held_item_placement` (the item is turned back
-    by the arm's rotation, lifted 0.15 to 0.2 above the fist, and a sprite's
-    third-person `HELD_SPRITE_OFFSET` is taken out), so `item_model` and the
+    by the arm's rotation, lifted 0.15 to 0.2 above the fist; a sprite is centred
+    on the hand, there is no sideways offset to take out), so `item_model` and the
     third-person hand are unchanged.
   - **The aspect rule.** The slot is a pure function of the viewport's aspect
     (`viewmodel::slot_depth`, `arm_slot`). The fist is placed from NDC, so it
@@ -1582,7 +1582,18 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
     (`shield_pose::GUARD_ARM_ANGLE`, over a swing) and the board stands in front of the hand,
     boss forward, at chest height, a little toward the body's centre line. The flag with no shield
     in either hand lifts nothing.
-  - *The inventory icon* is painted, not a tier tile and a letter: `hud_ui::paint_shield_icon`
+  - *Inventory icons (pt1124): one painter.* `item_icon::paint_item_icon` is the only function a slot calls (the
+    inventory grid, chests, the crafting grid and book, the hotbar, the off-hand box, the cursor stack and the equipment
+    column); the four copies of the flat-square-and-letter fallback are gone. A **tool** is the held model's own shape
+    flattened (`held_tool_model::icon_quads`: each box's front face, flat colour from its paint texel, so the head or
+    blade is the material's colour and the handle the stick's), turned 45 degrees and fitted to the slot; the 32 tool
+    combinations are therefore 12 distinct shapes by 5 materials. **Armour** is a procedural silhouette per slot
+    (`item_icon::armour_pieces`: a helmet with a visor, a chestplate with sleeves, leggings, a pair of boots) in the
+    material's colour with a darker accent. A **Plan** is a rolled blueprint in its develop stage's colour. A **material**
+    draws its own texture layer (`entity_model::material_texture`, many are shared stand-ins); only an un-uploaded layer
+    (a headless pass) falls back to the flat colour. No texture layer was added (the array is full). The shield keeps
+    its board:
+    `hud_ui::paint_shield_icon`
     lays the oak planks layer in a board a little taller than wide with an iron-grey rim and a
     round boss; the hotbar, the off-hand box and the inventory screen's slots share it (the two
     places that draw a tool as its tier colour and a letter: the "Sd" letter arm is only the
@@ -1590,8 +1601,8 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
 - **Held materials and the polished sword and rod (2026-11-13).** A material in
   the hand (bread, a stick, an ingot, ...) is the flat cut-out sprite of its icon,
   the path a held torch takes (`item_model::held_item_mesh`, `HELD_MATERIAL_WIDTH` 0.45
-  against the torch's 0.6, the sprite offset; the first-person view takes the offset out and stands it
-  upright, `item_model::held_is_sprite`), when its icon has a transparent
+  against the torch's 0.6; `item_model::held_is_sprite` picks `HoldPose::Sprite`, below, in third person
+  and stands it upright in first), when its icon has a transparent
   background to cut away (`icon_has_clear_background`); an icon with none keeps
   the small cube. Before, a held material was always a cube, and a bread icon's
   transparent texels drew black. A test walks every material and pins that either
@@ -1625,8 +1636,18 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   every other block its `tex_top` layer as before. The hotbar, the inventory window and its carried-item painter all go
   through `hud_icons::paint_block_icon`. An audit of every block's `tex_top` found no other block whose icon layer is
   one plain colour.
+- **Shaped blocks' slot icons (pt1124).** A slab, stair, door, trapdoor, fence gate, wall or fence post used to show its
+  base material's full tile, identical to the planks or stone it is made of. `hud_icons::block_icon` now returns
+  `BlockIcon::Shaped { layer, shape }` for every block `block_shape::shape_of` reports as one of those six families
+  (all 59 wood and stone variants of `building_variants`) and for the species fence posts (`block::is_fence_post`). The
+  icon is the base layer's own pixels clipped to the shape (`hud_icons::icon_pieces`, unit-square rectangles; the
+  texture is clipped, not squeezed): a slab the lower half, stairs the lower half plus an upper back step, a door a tall
+  narrow panel with a handle, a trapdoor a thin lid with hinges, a gate two posts and two rails, a wall a tall post
+  between low arms, a post a narrow post with rail stubs. A species fence post shows its **own species' planks** (the
+  world builds every post from the oak layer and tints it; the icon does not need the tint). No texture layer, egui
+  painting only. Panes, buttons, levers, plates, signs and snow layers still draw their face as a full tile.
 - **How a held item is carried (`hold_pose.rs`, pt1115).** One hook, `hold_pose(HeldItem) -> HoldPose`
-  (`Default`, `Shield`, `Hanging { handle }`), is asked by the third-person avatar (`entity_model`) and the first-person
+  (`Default`, `Shield`, `Hanging { handle }`, `Sprite`; it takes the block registry, which says what is a sprite), is asked by the third-person avatar (`entity_model`) and the first-person
   hands (`viewmodel`); it is keyed off the held item already on the avatar wire, so no packet, state field or save
   changes. The shield keeps its own poses (§5.10 "The shield"). The hand lantern is `Hanging` (handle height
   `lantern::HANDLE_HEIGHT`, 0.21): third person, its forearm lifts `HANGING_ARM_RAISE` (0.5 rad) on top of whatever
@@ -1634,6 +1655,13 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   stays upright with its top bar at the fist and the body hanging below. First person, the item hangs from the fist
   (no lean) and the whole hand is raised `HANGING_FIST_RAISE_NDC` (0.30 of the half-view height) so the body is in view
   instead of off the bottom edge. A later hanging item (a pail, a bell) joins by returning `Hanging` with its own handle.
+  **A sprite (a torch, a sapling, bread: `item_model::held_is_sprite`) is `Sprite`** (pt1124; the earlier fix put it
+  0.25 to the outside of the fist, where in third person it floated beside the hand, in either hand): third person, the
+  forearm lifts `SPRITE_ARM_RAISE` (0.95 rad: enough that even with the arm swung back in a walk the flame stands clear of the forearm) on top of whatever the arm does, the card stays upright (it does not tilt with
+  the arm), centred on the fist's own column, with `SPRITE_GRIP_FRACTION` (a fifth) of its height under the fist
+  (`hold_pose::sprite_grip_shift`) so the foot of a torch's stick pokes out under the hand and the flame stands
+  clear in front of the forearm. The mesh is centred on the hand (`HELD_SPRITE_OFFSET` is gone); first person is
+  unchanged (it never used the offset: it stands the centred card above the fist, the hand not raised).
 - **Armour (as built, 2026-11-25; `armour_model.rs`).** One table of boxes per slot gives three looks that
   always agree. Colour is flat and needs no new texture layer (the array is full): each box face carries one texel of
   an existing item layer (the `held_tool_model` trick: the same uv on all four corners), and a material's three
@@ -1670,11 +1698,9 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   picture. The opaque texels come from the stock textures (`texture_gen`,
   alpha >= 128, worked out once). A layer past the stock set is a plain card.
   The torch is 12 quads. Widths: held 0.6, dropped 0.4 (standing up, spinning
-  and bobbing like the cube, its foot as high), framed 0.5. A held sprite sits
-  beside the fist on the outside and a little up (`HELD_SPRITE_OFFSET`, 0.25
-  out and 0.1 up from the hand; "out" is -X on the left hand, `item_model::sprite_offset`), so a torch's art clears the 0.25-wide arm
-  instead of hiding its flame in the forearm; a held cube stays centred on the
-  hand.
+  and bobbing like the cube, its foot as high), framed 0.5. A held sprite's mesh is centred on
+  the hand; the pose (`HoldPose::Sprite`, §5.10) grips it by the foot in the fist so a torch's art clears the
+  forearm instead of hiding its flame in it; a held cube stays centred on the hand.
 - **The cutout bit.** `mesh::CUTOUT_FLAG` is bit 17 of `Vertex.tex_layer` (bit
   16 is the fast-leaf fill, §2.2; bits 20..23 an avatar's block light, §4.2;
   texture layers are < 512). Every sprite vertex sets it and nothing else does.
@@ -1764,7 +1790,7 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   transparent). In first person (from 2026-11-13) the held item stands upright
   above the fist in the lower-right quadrant (§7.5, `viewmodel::held_item_placement`);
   before that the hand end of the arm sat below the screen edge and a held item
-  was out of view. The third-person avatar shows it beside the fist.
+  was out of view. The third-person avatar grips it in the fist (`HoldPose::Sprite`, §5.10).
 
 ### 7.6 Particle System
 

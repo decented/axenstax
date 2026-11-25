@@ -1263,8 +1263,7 @@ fn draw_hotbar(
 /// Off-hand release (slice 5) — the shield's inventory icon: a board of the oak
 /// planks tile with an iron rim and a boss, painted from the existing planks layer
 /// (no new texture). Shared by the hotbar, the off-hand box and the inventory screen.
-pub(crate) fn paint_shield_icon(ui: &egui::Ui, icon_rect: egui::Rect, egui_integration: &EguiIntegration) {
-    let painter = ui.painter();
+pub(crate) fn paint_shield_icon(painter: &egui::Painter, icon_rect: egui::Rect, egui_integration: &EguiIntegration) {
     // A shield is taller than wide: a board in the middle of the slot.
     let h = icon_rect.height();
     let board = egui::Rect::from_center_size(icon_rect.center(), egui::vec2(h * 0.78, h));
@@ -1287,15 +1286,6 @@ pub(crate) fn paint_shield_icon(ui: &egui::Ui, icon_rect: egui::Rect, egui_integ
     painter.circle_stroke(board.center(), h * 0.15, egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(90, 92, 98)));
 }
 
-/// The multiplier colour of a log material's icon tint ([`crate::item::log_material_icon`]).
-fn log_tint_color(tint: [f32; 3]) -> egui::Color32 {
-    egui::Color32::from_rgb(
-        (tint[0] * 255.0) as u8,
-        (tint[1] * 255.0) as u8,
-        (tint[2] * 255.0) as u8,
-    )
-}
-
 /// One stack drawn inside a slot rect: its icon, count badge and durability
 /// bar. Shared by the hotbar slots and the off-hand box.
 pub(crate) fn draw_stack_in_slot(
@@ -1308,108 +1298,7 @@ pub(crate) fn draw_stack_in_slot(
 ) {
     let icon_rect = rect.shrink(4.0);
 
-    match &stack.item {
-        Item::Block(id) => {
-            crate::hud_icons::paint_block_icon(ui.painter(), icon_rect, *id, registry, |layer| egui_integration.block_texture(layer));
-        }
-        Item::Tool(tool) if tool.tool_type == crate::crafting::ToolType::Shield => {
-            paint_shield_icon(ui, icon_rect, egui_integration);
-        }
-        Item::Tool(tool) => {
-            // Coloured rectangle for tools
-            let color = stack.item.color(registry);
-            let tool_color = egui::Color32::from_rgb(
-                (color[0] * 255.0) as u8,
-                (color[1] * 255.0) as u8,
-                (color[2] * 255.0) as u8,
-            );
-            ui.painter().rect_filled(icon_rect, 2.0, tool_color);
-
-            // Tool type indicator
-            let indicator = match tool.tool_type {
-                crate::crafting::ToolType::Sword => "S",
-                crate::crafting::ToolType::Pickaxe => "P",
-                crate::crafting::ToolType::Axe => "A",
-                crate::crafting::ToolType::Shovel => "V",
-                crate::crafting::ToolType::Bow => "B",
-                crate::crafting::ToolType::Hoe => "H",
-                crate::crafting::ToolType::FlintAndSteel => "F",
-                crate::crafting::ToolType::Shears => "Sh",
-                crate::crafting::ToolType::FishingRod => "Fr",
-                crate::crafting::ToolType::Slingshot => "Sl",
-                crate::crafting::ToolType::Eraser => "Er",
-                crate::crafting::ToolType::DraftingStamp => "Ds",
-                crate::crafting::ToolType::Shield => "Sd",
-            };
-            ui.painter().text(
-                icon_rect.left_top() + egui::vec2(2.0, 2.0),
-                egui::Align2::LEFT_TOP,
-                indicator,
-                egui::FontId::proportional(12.0),
-                egui::Color32::WHITE,
-            );
-        }
-        // The log materials draw as a log (the oak log icon, tinted by
-        // stage), not a flat swatch.
-        Item::Material(m) if crate::item::log_material_icon(*m).is_some() => {
-            let (log, tint) = crate::item::log_material_icon(*m).expect("checked by the guard");
-            if let Some(tex_id) = egui_integration.block_texture(registry.tex_top(log)) {
-                ui.painter().image(
-                    tex_id,
-                    icon_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    log_tint_color(tint),
-                );
-            }
-        }
-        Item::Material(_) => {
-            let color = stack.item.color(registry);
-            let mat_color = egui::Color32::from_rgb(
-                (color[0] * 255.0) as u8,
-                (color[1] * 255.0) as u8,
-                (color[2] * 255.0) as u8,
-            );
-            ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-        }
-        Item::Plan(_) => {
-            // Spec 24 — Plan item. Dark-gold parchment
-            // swatch + "P" label so the hotbar entry
-            // reads as "I have a plan ready to place".
-            let color = stack.item.color(registry);
-            let plan_color = egui::Color32::from_rgb(
-                (color[0] * 255.0) as u8,
-                (color[1] * 255.0) as u8,
-                (color[2] * 255.0) as u8,
-            );
-            ui.painter().rect_filled(icon_rect, 2.0, plan_color);
-            ui.painter().text(
-                icon_rect.left_top() + egui::vec2(2.0, 2.0),
-                egui::Align2::LEFT_TOP,
-                "P",
-                egui::FontId::proportional(12.0),
-                egui::Color32::WHITE,
-            );
-        }
-        Item::Armour(_) => {
-            // Spec 28e — armour piece. Tier-tinted swatch
-            // with a slot-shorthand label until per-slot
-            // icons land.
-            let color = stack.item.color(registry);
-            let arm_color = egui::Color32::from_rgb(
-                (color[0] * 255.0) as u8,
-                (color[1] * 255.0) as u8,
-                (color[2] * 255.0) as u8,
-            );
-            ui.painter().rect_filled(icon_rect, 2.0, arm_color);
-            ui.painter().text(
-                icon_rect.left_top() + egui::vec2(2.0, 2.0),
-                egui::Align2::LEFT_TOP,
-                "A",
-                egui::FontId::proportional(12.0),
-                egui::Color32::WHITE,
-            );
-        }
-    }
+    crate::item_icon::paint_item_icon(ui.painter(), icon_rect, &stack.item, registry, egui_integration);
 
     // Stack count
     if stack.count > 1 {

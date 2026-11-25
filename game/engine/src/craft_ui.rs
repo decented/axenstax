@@ -18,7 +18,7 @@ pub trait IconSource {
     /// The egui texture holding this atlas layer's icon, if it has been uploaded.
     fn block_texture(&self, layer: u32) -> Option<egui::TextureId>;
     /// The shield's drawn icon (a board with a rim), painted into `rect`.
-    fn paint_shield(&self, ui: &egui::Ui, rect: egui::Rect);
+    fn paint_shield(&self, painter: &egui::Painter, rect: egui::Rect);
 }
 
 impl IconSource for EguiIntegration {
@@ -26,8 +26,8 @@ impl IconSource for EguiIntegration {
         EguiIntegration::block_texture(self, layer)
     }
 
-    fn paint_shield(&self, ui: &egui::Ui, rect: egui::Rect) {
-        crate::hud_ui::paint_shield_icon(ui, rect, self);
+    fn paint_shield(&self, painter: &egui::Painter, rect: egui::Rect) {
+        crate::hud_ui::paint_shield_icon(painter, rect, self);
     }
 }
 
@@ -41,8 +41,8 @@ impl IconSource for NoIcons {
         None
     }
 
-    fn paint_shield(&self, ui: &egui::Ui, rect: egui::Rect) {
-        ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(175, 140, 92));
+    fn paint_shield(&self, painter: &egui::Painter, rect: egui::Rect) {
+        painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(175, 140, 92));
     }
 }
 
@@ -1380,21 +1380,6 @@ pub fn paint_carried_item(
 }
 
 
-/// Spec 28e — material → swatch colour. Matches the values in
-/// `Item::color` for armour so the slot column and the inventory grid
-/// agree visually.
-fn armour_material_color(mat: armour::ArmourMaterial) -> [f32; 3] {
-    use armour::ArmourMaterial::*;
-    match mat {
-        Leather => [0.55, 0.35, 0.18],
-        Iron => [0.75, 0.75, 0.78],
-        Diamond => [0.40, 0.92, 0.90],
-        Satori => [0.95, 0.55, 0.18],
-        Chainmail => [0.55, 0.55, 0.60],
-        Rubber => [0.42, 0.30, 0.22],
-    }
-}
-
 /// Spec 28e — draw one armour slot in the inventory overlay's left column.
 /// Shows the equipped piece (icon + durability bar) or an empty-slot
 /// placeholder labelled with the slot name. Returns the click response.
@@ -1447,31 +1432,8 @@ fn draw_armour_slot(
     };
 
     if let Some(p) = piece {
-        // Material-tinted swatch — mirrors the inventory grid's Armour
-        // rendering so the player sees the same colour at a glance.
-        let color = armour_material_color(p.material);
-        let arm_color = egui::Color32::from_rgb(
-            (color[0] * 255.0) as u8,
-            (color[1] * 255.0) as u8,
-            (color[2] * 255.0) as u8,
-        );
-        ui.painter().rect_filled(icon_rect, 2.0, arm_color);
-
-        // Slot-glyph in the corner so the four pieces are
-        // distinguishable at a glance: H/C/L/B.
-        let glyph = match p.slot {
-            ArmSlot::Helmet => "H",
-            ArmSlot::Chestplate => "C",
-            ArmSlot::Leggings => "L",
-            ArmSlot::Boots => "B",
-        };
-        ui.painter().text(
-            icon_rect.left_top() + egui::vec2(2.0, 2.0),
-            egui::Align2::LEFT_TOP,
-            glyph,
-            egui::FontId::proportional(11.0),
-            egui::Color32::WHITE,
-        );
+        // The same silhouette the inventory grid and the hotbar draw for this piece.
+        crate::item_icon::paint_armour_icon(ui.painter(), icon_rect, p.slot, p.material);
 
         // Durability bar (green→red), same shape as the tool bar.
         let max_dur = armour::max_durability(p.slot, p.material);
@@ -1795,104 +1757,7 @@ fn draw_item_slot(
     if let Some(stack) = stack {
         let icon_rect = rect.shrink(4.0);
 
-        match &stack.item {
-            Item::Block(id) => {
-                crate::hud_icons::paint_block_icon(ui.painter(), icon_rect, *id, registry, |layer| icons.block_texture(layer));
-            }
-            Item::Tool(tool) if tool.tool_type == crate::crafting::ToolType::Shield => {
-                icons.paint_shield(ui, icon_rect);
-            }
-            Item::Tool(tool) => {
-                let color = stack.item.color(registry);
-                let tool_color = egui::Color32::from_rgb(
-                    (color[0] * 255.0) as u8,
-                    (color[1] * 255.0) as u8,
-                    (color[2] * 255.0) as u8,
-                );
-                ui.painter().rect_filled(icon_rect, 2.0, tool_color);
-                let indicator = match tool.tool_type {
-                    crate::crafting::ToolType::Sword => "S",
-                    crate::crafting::ToolType::Pickaxe => "P",
-                    crate::crafting::ToolType::Axe => "A",
-                    crate::crafting::ToolType::Shovel => "V",
-                    crate::crafting::ToolType::Bow => "B",
-                    crate::crafting::ToolType::Hoe => "H",
-                    crate::crafting::ToolType::FlintAndSteel => "F",
-                    crate::crafting::ToolType::Shears => "Sh",
-                    crate::crafting::ToolType::FishingRod => "Fr",
-                    crate::crafting::ToolType::Slingshot => "Sl",
-                    crate::crafting::ToolType::Eraser => "Er",
-                    crate::crafting::ToolType::DraftingStamp => "Ds",
-                    crate::crafting::ToolType::Shield => "Sd",
-                };
-                ui.painter().text(
-                    icon_rect.left_top() + egui::vec2(2.0, 2.0),
-                    egui::Align2::LEFT_TOP,
-                    indicator,
-                    egui::FontId::proportional(11.0),
-                    egui::Color32::WHITE,
-                );
-            }
-            // The log materials draw as a log (the oak log icon, tinted by
-            // stage), not a flat swatch.
-            Item::Material(m) if crate::item::log_material_icon(*m).is_some() => {
-                let (log, tint) = crate::item::log_material_icon(*m).expect("checked by the guard");
-                if let Some(tex_id) = icons.block_texture(registry.tex_top(log)) {
-                    ui.painter().image(
-                        tex_id,
-                        icon_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        log_tint_color(tint),
-                    );
-                }
-            }
-            Item::Material(_) => {
-                let color = stack.item.color(registry);
-                let mat_color = egui::Color32::from_rgb(
-                    (color[0] * 255.0) as u8,
-                    (color[1] * 255.0) as u8,
-                    (color[2] * 255.0) as u8,
-                );
-                ui.painter().rect_filled(icon_rect, 2.0, mat_color);
-            }
-            Item::Plan(_) => {
-                // Spec 24 — captured-building blueprint. Dark-gold
-                // parchment swatch with a small "P" label. Full
-                // inspect-dialog ships in Phase 7.
-                let color = stack.item.color(registry);
-                let plan_color = egui::Color32::from_rgb(
-                    (color[0] * 255.0) as u8,
-                    (color[1] * 255.0) as u8,
-                    (color[2] * 255.0) as u8,
-                );
-                ui.painter().rect_filled(icon_rect, 2.0, plan_color);
-                ui.painter().text(
-                    icon_rect.left_top() + egui::vec2(2.0, 2.0),
-                    egui::Align2::LEFT_TOP,
-                    "P",
-                    egui::FontId::proportional(11.0),
-                    egui::Color32::WHITE,
-                );
-            }
-            Item::Armour(_) => {
-                // Spec 28e — armour piece. Tier-tinted swatch with an
-                // "A" label until per-slot icons land.
-                let color = stack.item.color(registry);
-                let arm_color = egui::Color32::from_rgb(
-                    (color[0] * 255.0) as u8,
-                    (color[1] * 255.0) as u8,
-                    (color[2] * 255.0) as u8,
-                );
-                ui.painter().rect_filled(icon_rect, 2.0, arm_color);
-                ui.painter().text(
-                    icon_rect.left_top() + egui::vec2(2.0, 2.0),
-                    egui::Align2::LEFT_TOP,
-                    "A",
-                    egui::FontId::proportional(11.0),
-                    egui::Color32::WHITE,
-                );
-            }
-        }
+        crate::item_icon::paint_item_icon(ui.painter(), icon_rect, &stack.item, registry, icons);
 
         // Stack count
         if stack.count > 1 {
@@ -1951,15 +1816,6 @@ fn draw_item_slot(
     }
 }
 
-/// The multiplier colour of a log material's icon tint ([`crate::item::log_material_icon`]).
-fn log_tint_color(tint: [f32; 3]) -> egui::Color32 {
-    egui::Color32::from_rgb(
-        (tint[0] * 255.0) as u8,
-        (tint[1] * 255.0) as u8,
-        (tint[2] * 255.0) as u8,
-    )
-}
-
 /// Paint the cursor-following item icon directly via a `Painter`, with no
 /// containing widget so clicks fall through to the slot beneath.
 fn paint_item_icon(
@@ -1969,30 +1825,7 @@ fn paint_item_icon(
     registry: &BlockRegistry,
     icons: &dyn IconSource,
 ) {
-    match &stack.item {
-        Item::Block(id) => {
-            crate::hud_icons::paint_block_icon(painter, rect, *id, registry, |layer| icons.block_texture(layer));
-        }
-        Item::Material(m) if crate::item::log_material_icon(*m).is_some() => {
-            let (log, tint) = crate::item::log_material_icon(*m).expect("checked by the guard");
-            if let Some(tex_id) = icons.block_texture(registry.tex_top(log)) {
-                painter.image(
-                    tex_id,
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    log_tint_color(tint),
-                );
-            }
-        }
-        _ => {
-            let color = stack.item.color(registry);
-            painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(
-                (color[0] * 255.0) as u8,
-                (color[1] * 255.0) as u8,
-                (color[2] * 255.0) as u8,
-            ));
-        }
-    }
+    crate::item_icon::paint_item_icon(painter, rect, &stack.item, registry, icons);
 
     if stack.count > 1 {
         painter.text(
