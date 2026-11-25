@@ -695,3 +695,46 @@ fn a_signed_survivor_that_leaves_in_the_blocking_tick_saves_the_worn_shield() {
     assert!(!shield_left, "the saved window holds no intact shield: the one the blast broke is gone");
     let _ = std::fs::remove_file(&path);
 }
+
+/// Playtest 2026-11-24 — a joiner holding a raised shield toward a chasing
+/// brigand holds its ground. The server runs everything here (mob AI, entity
+/// physics, the shove out of a mob's box, the hostile melee pass), so this is
+/// the whole multiplayer path. Before the fix the brigand's chase never stopped
+/// at contact: it walked into the body every tick and the shove carried the
+/// joiner backwards at the brigand's speed (4.5 blocks/s), while every hit was
+/// blocked. The body gets no input, so nothing else moves it: the bound is a
+/// float epsilon, far under one tick of the brigand's walk (0.225 blocks).
+#[test]
+fn a_chasing_brigand_never_shoves_a_joiner_behind_a_raised_shield() {
+    let (mut rig, brigand) = rig_with_shield("held-ground", true);
+    let slot = rig.joiners[0].slot;
+    raise(&mut rig);
+    rig.tick(RAISE_TICKS + 1);
+    rig.hs.server.difficulty = NORMAL;
+    // 6 blocks in front (+Z), already chasing.
+    rig.place(brigand, Vec3::new(0.0, 0.0, 6.0));
+    rig.ecs_mut().get::<&mut crate::mob_ai::MobAi>(brigand).unwrap().state = crate::mob_ai::AiState::Chase;
+    let start = rig.hs.server.players[slot].player.pos;
+    let hp = health(&rig);
+    // 100 ticks (5 s): the brigand arrives in under 30, then swings for the rest.
+    for _ in 0..100 {
+        // Only the brigand: a spawn cycle must not bring in another mob.
+        let others: Vec<hecs::Entity> = rig
+            .ecs()
+            .query::<&crate::entity::MobKind>()
+            .iter()
+            .map(|(id, _)| id)
+            .filter(|id| *id != brigand)
+            .collect();
+        for id in others {
+            let _ = rig.ecs_mut().despawn(id);
+        }
+        rig.tick(1);
+    }
+    let now = rig.hs.server.players[slot].player.pos;
+    let moved = Vec3::new(now.x - start.x, 0.0, now.z - start.z).length();
+    assert!(moved <= 1e-3, "the shielded joiner was pushed {moved} blocks");
+    assert_eq!(health(&rig), hp, "and took no damage");
+    let blocks = shield_worn(&rig).len();
+    assert!(blocks >= 3, "the brigand kept attacking and the shield kept blocking ({blocks} wearing blocks)");
+}

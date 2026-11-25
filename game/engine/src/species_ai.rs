@@ -123,6 +123,21 @@ fn nearest_player_indexed(pos: Vec3, players: &[Vec3]) -> Option<(u64, f32, f32,
         .map(|(i, p)| (i as u64, p.x, p.y, p.z))
 }
 
+/// Horizontal velocity for a mob of `kind` at `pos` closing on a player at
+/// `target` at `speed`: straight at it, stopping at the player's box
+/// (`mob_ai::melee_approach_step`), so it never shoves the player
+/// (playtest 2026-11-24). Returns (velocity, unit direction for facing).
+fn close_on(ecs: &hecs::World, id: hecs::Entity, kind: MobType, pos: Vec3, target: Vec3, speed: f32) -> (Vec3, Vec3) {
+    let dir = Vec3::new(target.x - pos.x, 0.0, target.z - pos.z).normalize_or_zero();
+    let step = crate::mob_ai::melee_approach_step(pos, mob_half_width(ecs, id, kind), target, speed);
+    (dir * step, dir)
+}
+
+/// The mob's half-width: its `Hitbox` (a baby's is smaller), else its kind's.
+fn mob_half_width(ecs: &hecs::World, id: hecs::Entity, kind: MobType) -> f32 {
+    ecs.get::<&crate::entity::Hitbox>(id).map_or(mob::mob_def(kind).width, |h| h.width) / 2.0
+}
+
 fn set_facing(ecs: &mut hecs::World, id: hecs::Entity, dir: Vec3) {
     if dir.length_squared() > 1e-6
         && let Ok(mut ai) = ecs.get::<&mut MobAi>(id) {
@@ -487,10 +502,14 @@ pub fn dispatch_sharks(
         let Some((slot, ppos, dist)) = target else {
             continue; // no prey in reach → idle drift (generic)
         };
-        // Swim straight at the prey (3-D).
+        // Swim straight at the prey (3-D), its horizontal advance stopping at
+        // the swimmer's box (`mob_ai::melee_approach_step`, playtest
+        // 2026-11-24): it bites from there and never shoves the swimmer.
         let dir = Vec3::new(ppos.x - pos.x, ppos.y - pos.y, ppos.z - pos.z).normalize_or_zero();
+        let step = crate::mob_ai::approach_step_to_box(pos, mob_half_width(ecs, id, MobType::Shark), ppos, speed);
+        let k = if speed > 0.0 { step / speed } else { 0.0 };
         if let Ok(mut v) = ecs.get::<&mut Velocity>(id) {
-            v.0 = dir * speed;
+            v.0 = Vec3::new(dir.x * speed * k, dir.y * speed, dir.z * speed * k);
         }
         set_facing(ecs, id, Vec3::new(dir.x, 0.0, dir.z));
         // Drip a tooth while hunting (behaviour-gated, not on-kill).
@@ -726,10 +745,10 @@ pub fn dispatch_hyenas(
         match data.state {
             HyenaAiState::Hunt => {
                 if let Some(p) = nearest_player(pos, player_positions) {
-                    let dir = Vec3::new(p.0 - pos.x, 0.0, p.2 - pos.z).normalize_or_zero();
+                    let (vel, dir) = close_on(ecs, id, MobType::Hyena, pos, Vec3::new(p.0, p.1, p.2), speed);
                     if let Ok(mut v) = ecs.get::<&mut Velocity>(id) {
-                        v.0.x = dir.x * speed;
-                        v.0.z = dir.z * speed;
+                        v.0.x = vel.x;
+                        v.0.z = vel.z;
                     }
                     set_facing(ecs, id, dir);
                 }
@@ -739,10 +758,10 @@ pub fn dispatch_hyenas(
             // time of day.
             HyenaAiState::Aggro { attacker_pidx, .. } => {
                 if let Some(p) = attacker_or_nearest_player(pos, player_positions, attacker_pidx) {
-                    let dir = Vec3::new(p.0 - pos.x, 0.0, p.2 - pos.z).normalize_or_zero();
+                    let (vel, dir) = close_on(ecs, id, MobType::Hyena, pos, Vec3::new(p.0, p.1, p.2), speed);
                     if let Ok(mut v) = ecs.get::<&mut Velocity>(id) {
-                        v.0.x = dir.x * speed;
-                        v.0.z = dir.z * speed;
+                        v.0.x = vel.x;
+                        v.0.z = vel.z;
                     }
                     set_facing(ecs, id, dir);
                 }
@@ -825,10 +844,10 @@ pub fn dispatch_bears(
             // hitting either species did nothing.
             Some(BearAiState::Aggro { attacker_pidx, .. }) => {
                 if let Some(t) = attacker_or_nearest_player(pos, player_positions, attacker_pidx) {
-                    let dir = Vec3::new(t.0 - pos.x, 0.0, t.2 - pos.z).normalize_or_zero();
+                    let (vel, dir) = close_on(ecs, id, MobType::Bear, pos, Vec3::new(t.0, t.1, t.2), speed);
                     if let Ok(mut v) = ecs.get::<&mut Velocity>(id) {
-                        v.0.x = dir.x * speed;
-                        v.0.z = dir.z * speed;
+                        v.0.x = vel.x;
+                        v.0.z = vel.z;
                     }
                     set_facing(ecs, id, dir);
                 }
@@ -1557,5 +1576,84 @@ mod tests {
 
         let v = ecs.get::<&Velocity>(id).unwrap().0;
         assert_eq!(v.x, -0.6, "a reactive generic state keeps locomotion (yield rule)");
+    }
+
+    /// Playtest 2026-11-24 — the species that steer at a player themselves
+    /// (a hunting or provoked hyena, a provoked bear, a hunting shark) stop at
+    /// the player's box like the generic chase does: the player is never
+    /// shoved, and the mob stays in its reach. Run in a tick's order (generic
+    /// AI, species dispatch, entity physics, the shove), straight on and on
+    /// the diagonal.
+    fn chase_then_shove(
+        kind: MobType,
+        water: bool,
+        dispatch: &dyn Fn(&mut hecs::World, &crate::world::World, &[Vec3], u64),
+    ) {
+        let reg = crate::block::BlockRegistry::new();
+        for (label, offset) in [("straight", Vec3::new(0.0, 0.0, -6.0)), ("diagonal", Vec3::new(-4.5, 0.0, -4.5))] {
+            let mut world = crate::world::World::new();
+            for x in -20..=20 {
+                for z in -20..=20 {
+                    world.set_block(x, 4, z, crate::block::STONE);
+                    if water {
+                        for y in 5..=9 {
+                            world.set_block(x, y, z, crate::block::WATER);
+                        }
+                    }
+                }
+            }
+            let mut ecs = hecs::World::new();
+            let start = Vec3::new(0.5, 5.0, 0.5);
+            let mob = crate::entity::spawn_mob(&mut ecs, kind, start + offset);
+            let mut ppos = start;
+            let mut pvel = Vec3::ZERO;
+            for t in 0..100u64 {
+                crate::mob_ai::tick_mob_ai(&mut ecs, &world, &reg, &[ppos]);
+                dispatch(&mut ecs, &world, &[ppos], t);
+                crate::entity::tick_entities(&mut ecs, &world, &reg);
+                crate::entity::push_player_from_entities(&ecs, &mut ppos, &mut pvel);
+            }
+            let moved = Vec3::new(ppos.x - start.x, 0.0, ppos.z - start.z).length();
+            assert!(moved <= 1e-4, "{kind:?} {label}: the player was shoved {moved} blocks");
+            let at = ecs.get::<&Position>(mob).unwrap().0;
+            let gap = Vec3::new(at.x - ppos.x, 0.0, at.z - ppos.z).length();
+            assert!(gap < 2.0, "{kind:?} {label}: it came up to the player (stopped {gap} away)");
+        }
+    }
+
+    #[test]
+    fn a_hunting_hyena_stops_at_the_players_box() {
+        chase_then_shove(MobType::Hyena, false, &|ecs, _world, players, _t| {
+            dispatch_hyenas(ecs, players, 22_000); // night: Hunt
+        });
+    }
+
+    #[test]
+    fn a_provoked_hyena_stops_at_the_players_box() {
+        use crate::hyena_ai::{HyenaAiState, HyenaData};
+        chase_then_shove(MobType::Hyena, false, &|ecs, _world, players, _t| {
+            for (_, d) in ecs.query_mut::<&mut HyenaData>() {
+                d.state = HyenaAiState::Aggro { ticks_remaining: 1_000, attacker_pidx: 0 };
+            }
+            dispatch_hyenas(ecs, players, 12_000);
+        });
+    }
+
+    #[test]
+    fn a_provoked_bear_stops_at_the_players_box() {
+        use crate::bear_ai::{BearAiState, BearData};
+        chase_then_shove(MobType::Bear, false, &|ecs, world, players, t| {
+            for (_, d) in ecs.query_mut::<&mut BearData>() {
+                d.state = BearAiState::Aggro { ticks_remaining: 1_000, attacker_pidx: 0 };
+            }
+            let _ = dispatch_bears(ecs, world, players, t);
+        });
+    }
+
+    #[test]
+    fn a_hunting_shark_stops_at_the_swimmers_box() {
+        chase_then_shove(MobType::Shark, true, &|ecs, world, players, t| {
+            let _ = dispatch_sharks(ecs, world, players, t);
+        });
     }
 }

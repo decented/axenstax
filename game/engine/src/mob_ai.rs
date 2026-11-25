@@ -107,6 +107,54 @@ impl MobAi {
     }
 }
 
+/// Gap (blocks) a melee mob leaves between its box and a player's when it
+/// stops at contact. Small, so every hostile still stands in melee reach on
+/// the diagonal: the widest, the bear, stops at most
+/// (0.3 + 0.7 + 0.02) x sqrt 2 = 1.44 blocks from the player's centre, inside
+/// the 1.5-block hostile melee reach (`combat::HOSTILE_MELEE_RANGE`).
+pub const MELEE_CONTACT_GAP: f32 = 0.02;
+
+/// Playtest 2026-11-24: how far (blocks, `0..=speed`) a mob closing on a
+/// player at `target` may step this tick, horizontally, so that its box
+/// (half-width `mob_half_width`) stops [`MELEE_CONTACT_GAP`] short of the
+/// player's box. The player is shoved out of any mob box it overlaps
+/// (`entity::push_player_from_entities` moves only the player), so a chaser
+/// that kept walking into the body walked the player backwards at its own
+/// speed; a raised shield's blocked hits give no knockback to part them, so
+/// the tester was pushed until something stopped them.
+///
+/// The boxes are axis-aligned and touch when the larger axis offset falls to
+/// the sum of the half-widths. Stepping straight at the target shrinks both
+/// axis offsets in proportion, so the step that lands on that line is exact
+/// (a diagonal approach stops on the box, not on a circle that would still
+/// overlap at the corners).
+///
+/// It holds only where the mob could hit from (`combat::in_melee_height`, the
+/// band a hostile's hit lands in): a mob on a ledge above the player keeps
+/// stepping, drops and attacks (while still above, its box overhanging the
+/// ledge, it can push the player 1.5 to 2.3 blocks across the drop, as before
+/// this rule; once down it holds), and a player two blocks up a pillar is walked
+/// under as before (no hit, and no box overlap to shove).
+pub fn melee_approach_step(mob_pos: Vec3, mob_half_width: f32, target: Vec3, speed: f32) -> f32 {
+    if !crate::combat::in_melee_height(target.y - mob_pos.y) {
+        return speed.max(0.0);
+    }
+    approach_step_to_box(mob_pos, mob_half_width, target, speed)
+}
+
+/// [`melee_approach_step`]'s box rule alone, at any height: the step
+/// (`0..=speed`) that stops the mob's box [`MELEE_CONTACT_GAP`] short of the
+/// player's, horizontally. The shark uses it as is (its bite ignores height).
+pub fn approach_step_to_box(mob_pos: Vec3, mob_half_width: f32, target: Vec3, speed: f32) -> f32 {
+    let (dx, dz) = (target.x - mob_pos.x, target.z - mob_pos.z);
+    let axis = dx.abs().max(dz.abs());
+    let stop = crate::physics::PLAYER_WIDTH / 2.0 + mob_half_width + MELEE_CONTACT_GAP;
+    if axis <= stop {
+        return 0.0;
+    }
+    (dx.hypot(dz) * (1.0 - stop / axis)).clamp(0.0, speed.max(0.0))
+}
+
 /// Find the nearest player position from a mob's location. An empty slice
 /// (every candidate filtered out — see the Cat-ward `targets` filter below)
 /// reports back as "infinitely far", i.e. no target at all, rather than
@@ -366,9 +414,12 @@ pub fn tick_mob_ai(
                 // Face toward nearest player
                 ai.facing = to_player.z.atan2(to_player.x);
 
-                // Move toward player
+                // Move toward player, stopping at its box: the mob stands in
+                // melee reach and never walks the player backwards
+                // (`melee_approach_step`).
                 let dir = Vec3::new(to_player.x, 0.0, to_player.z).normalize_or_zero();
-                let new_vel = dir * speed_per_tick;
+                let step = melee_approach_step(pos.0, hitbox.width / 2.0, target_pos, speed_per_tick);
+                let new_vel = dir * step;
 
                 let next_pos = pos.0 + new_vel;
                 if can_walk_to(next_pos, hitbox, world, registry, false) {
@@ -1251,5 +1302,134 @@ mod tests {
         let vel = ecs.get::<&Velocity>(bear).unwrap();
         assert!(vel.0.x < 0.0,
             "Bear should still close in on the (warded) player at -x, got vx={}", vel.0.x);
+    }
+
+    /// Playtest 2026-11-24 — every hostile chasing a player stops at the
+    /// player's box: the player is never shoved (`entity::push_player_from_entities`
+    /// moves the PLAYER out of any mob box it overlaps), and the mob stands in
+    /// melee reach, so its attacks still land. Straight on and on the diagonal
+    /// (the shove is box-against-box, so a diagonal approach is the tight one).
+    /// Before the fix the chase never stopped and walked the player backwards.
+    #[test]
+    fn every_hostile_chase_stops_at_the_players_box_and_stays_in_reach() {
+        let reg = BlockRegistry::new();
+        let hostiles: Vec<MobType> = crate::mob::MOBS
+            .iter()
+            .filter(|d| d.category == MobCategory::Hostile)
+            .map(|d| d.mob_type)
+            .collect();
+        assert!(hostiles.len() >= 5, "the hostile roster: {hostiles:?}");
+        for kind in hostiles {
+            for (label, offset) in [("straight", Vec3::new(0.0, 0.0, -6.0)), ("diagonal", Vec3::new(-4.5, 0.0, -4.5))] {
+                let mut world = World::new();
+                stone_floor(&mut world, 4);
+                let mut ecs = hecs::World::new();
+                let start = Vec3::new(0.5, 5.0, 0.5);
+                let mob = entity::spawn_mob(&mut ecs, kind, start + offset);
+                ecs.get::<&mut MobAi>(mob).unwrap().state = AiState::Chase;
+                let mut ppos = start;
+                let mut pvel = Vec3::ZERO;
+                for _ in 0..100 {
+                    tick_mob_ai(&mut ecs, &world, &reg, &[ppos]);
+                    entity::tick_entities(&mut ecs, &world, &reg);
+                    entity::push_player_from_entities(&ecs, &mut ppos, &mut pvel);
+                }
+                let moved = Vec3::new(ppos.x - start.x, 0.0, ppos.z - start.z).length();
+                assert!(moved <= 1e-4, "{kind:?} {label}: the player was shoved {moved} blocks");
+                let reach: Vec<hecs::Entity> =
+                    crate::combat::hostiles_in_reach(&ecs, ppos).iter().map(|c| c.mob).collect();
+                let at = ecs.get::<&entity::Position>(mob).unwrap().0;
+                assert!(reach.contains(&mob), "{kind:?} {label}: stopped out of melee reach at {at:?}");
+            }
+        }
+    }
+
+    /// Every hostile, stopped at the player's box on the diagonal (the far
+    /// corner of the stop line), is still inside hostile melee reach, so
+    /// stopping never takes away an attack.
+    #[test]
+    fn every_hostile_stopped_at_contact_is_in_melee_reach() {
+        for def in crate::mob::MOBS.iter().filter(|d| d.category == MobCategory::Hostile) {
+            let stop = crate::physics::PLAYER_WIDTH / 2.0 + def.width / 2.0 + MELEE_CONTACT_GAP;
+            let corner = stop * std::f32::consts::SQRT_2;
+            assert!(
+                corner < crate::combat::HOSTILE_MELEE_RANGE,
+                "{:?} stops up to {corner} away, outside the {} reach",
+                def.mob_type,
+                crate::combat::HOSTILE_MELEE_RANGE,
+            );
+        }
+    }
+
+    #[test]
+    fn the_approach_step_lands_on_the_box_line_and_never_backs_off() {
+        let target = Vec3::new(0.0, 5.0, 0.0);
+        // Far off: a full step.
+        assert_eq!(melee_approach_step(Vec3::new(0.0, 5.0, -6.0), 0.3, target, 0.25), 0.25);
+        // Close: the step that lands exactly on the line (0.3 + 0.3 + gap).
+        let stop = 0.6 + MELEE_CONTACT_GAP;
+        let step = melee_approach_step(Vec3::new(0.0, 5.0, -0.7), 0.3, target, 0.25);
+        assert!((step - (0.7 - stop)).abs() < 1e-5, "step {step}");
+        // Diagonal: the larger axis offset lands on the line.
+        let from = Vec3::new(-0.7, 5.0, -0.7);
+        let step = melee_approach_step(from, 0.3, target, 0.25);
+        let after = from + Vec3::new(0.7, 0.0, 0.7).normalize() * step;
+        assert!((after.x.abs().max(after.z.abs()) - stop).abs() < 1e-5, "ends at {after:?}");
+        // On or inside the line (a player who walked into it): hold, never retreat.
+        assert_eq!(melee_approach_step(Vec3::new(0.0, 5.0, -stop), 0.3, target, 0.25), 0.0);
+        assert_eq!(melee_approach_step(Vec3::new(0.0, 5.0, -0.2), 0.3, target, 0.25), 0.0);
+        assert_eq!(melee_approach_step(target, 0.3, target, 0.25), 0.0);
+    }
+
+    /// A hostile on a 1-block ledge above a player standing at the foot of it
+    /// must still come down and attack: the stop at the player's box applies
+    /// only where the mob could hit from (the melee height band), else it
+    /// would stand on the ledge forever, out of reach. Every hostile.
+    #[test]
+    fn a_hostile_on_a_ledge_above_still_comes_down_and_reaches_the_player() {
+        let reg = BlockRegistry::new();
+        for def in crate::mob::MOBS.iter().filter(|d| d.category == MobCategory::Hostile) {
+            let mut world = World::new();
+            stone_floor(&mut world, 4);
+            // The ledge: one block up for every z < 0; its face is at z = 0.
+            for x in -20..=20 {
+                for z in -20..=-1 {
+                    world.set_block(x, 5, z, STONE);
+                }
+            }
+            let mut ecs = hecs::World::new();
+            let start = Vec3::new(0.5, 5.0, 0.4); // at the foot of the face
+            let mob = entity::spawn_mob(&mut ecs, def.mob_type, Vec3::new(0.5, 6.0, -5.0));
+            ecs.get::<&mut MobAi>(mob).unwrap().state = AiState::Chase;
+            let mut ppos = start;
+            let mut pvel = Vec3::ZERO;
+            for _ in 0..100 {
+                tick_mob_ai(&mut ecs, &world, &reg, &[ppos]);
+                entity::tick_entities(&mut ecs, &world, &reg);
+                entity::push_player_from_entities(&ecs, &mut ppos, &mut pvel);
+            }
+            let at = ecs.get::<&entity::Position>(mob).unwrap().0;
+            let reach: Vec<hecs::Entity> =
+                crate::combat::hostiles_in_reach(&ecs, ppos).iter().map(|c| c.mob).collect();
+            let shoved = Vec3::new(ppos.x - start.x, 0.0, ppos.z - start.z).length();
+            eprintln!("{:?}: shoved {shoved} blocks coming down", def.mob_type);
+            assert!(reach.contains(&mob), "{:?} stayed out of reach at {at:?} (player {ppos:?})", def.mob_type);
+            // Coming down past the player may shove it while the mob is still
+            // above (a wide mob's box overhangs the ledge before it drops; main
+            // did the same), but once down it holds: no walk.
+            let down = ppos;
+            for _ in 0..40 {
+                tick_mob_ai(&mut ecs, &world, &reg, &[ppos]);
+                entity::tick_entities(&mut ecs, &world, &reg);
+                entity::push_player_from_entities(&ecs, &mut ppos, &mut pvel);
+            }
+            let moved = Vec3::new(ppos.x - down.x, 0.0, ppos.z - down.z).length();
+            assert!(moved <= 1e-4, "{:?}: once down it still shoved the player {moved} blocks", def.mob_type);
+            assert!(
+                crate::combat::hostiles_in_reach(&ecs, ppos).iter().any(|c| c.mob == mob),
+                "{:?}: and stays in reach",
+                def.mob_type,
+            );
+        }
     }
 }
