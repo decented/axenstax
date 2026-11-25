@@ -1177,7 +1177,16 @@ and weather, as before D1, with the host→server block-entity mirror
 keeping its chests, plots and vendors live — so a joiner's chest break there
 spills the live contents once instead of load-time ones (review fix 2). It
 also overwrites a joiner's changes to a shared container there each tick
-(C3b-1, Spec 04 §4.2g): not fixed, it goes with the flag. BRIDGE:
+(C3b-1, Spec 04 §4.2g): not fixed, it goes with the flag. Two more
+splits since 0.2.42 (pt1124 review 3 and 4), not fixed, same deletion
+trigger: an unsupported torch or lantern (Spec 05 support rule) can drop
+twice on a `--no-lend` host, one collectible item per world copy, when the
+host breaks the support and both copies process that edit before the AIR
+broadcast returns; and a joiner's furnace transfers there can be
+overwritten by the host mirror (a take is copied back into the server's
+furnace from the host's unchanged slot, a paid deposit is removed by the
+next mirror): pre-existing, now reachable from the redesigned furnace
+screen. BRIDGE:
 the mirror goes with `--no-lend`, and so does that path's second Proof-of-Play
 state (C1 review LOW-5, accepted): the owning copy keeps its own exposure map
 (`World::pop_exposure` travels only with a lend), so a cell the host exposed
