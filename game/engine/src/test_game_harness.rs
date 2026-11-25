@@ -245,6 +245,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "pt1124_armour_shots.rs"]
     mod pt1124_armour_shots;
+    #[path = "fishing_shots.rs"]
+    mod fishing_shots;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every
@@ -3065,7 +3067,7 @@ mod tests {
         aim_at(&mut hg, glam::Vec3::new(pond[0] as f32 + 0.5, pond[1] as f32 + 0.5, pond[2] as f32 + 0.5));
         right_click(&mut hg);
         assert!(hg.state.players[0].fishing.is_some(), "cast");
-        hg.state.players[0].fishing = Some(crate::fishing::FishingLine { catch_at_tick: 0, hooked: true });
+        hg.state.players[0].fishing = hg.state.players[0].fishing.map(|l| crate::fishing::FishingLine { catch_at_tick: 0, hooked: true, ..l });
         right_click(&mut hg);
         assert!(hg.state.players[0].fishing.is_none(), "reeled in");
         assert!(hg.state.players[0].inventory.slot(0).is_none(), "the rod at 0 broke");

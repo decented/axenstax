@@ -239,6 +239,17 @@ fn held_item_placement(held: ItemRef, registry: &BlockRegistry, side: HandSide) 
         * Mat4::from_translation(Vec3::new(0.0, item_lift(held, registry), 0.0))
 }
 
+/// Where the tip of a Fishing Rod held in the hand `side` is in the first-person
+/// view space (x right, y up, -z forward), at the same `bob`, `swing` and `aspect`
+/// [`build_hand`] draws the rod with: the point the cast's line leaves from
+/// (`fishing_view`). The rod mesh is built for the opposite hand (its one-sided
+/// features point in toward the centre), so its tip is that hand's.
+pub fn rod_tip_view(held: HeldItem, registry: &BlockRegistry, side: HandSide, bob: f32, swing: f32, aspect: f32) -> Vec3 {
+    let placement = held_item_placement(held.item, registry, side);
+    let tip = crate::held_tool_model::rod_tip_local(side.opposite());
+    arm_transform(aspect, side, bob, swing).transform_point3(placement.transform_point3(tip))
+}
+
 /// Build one hand's viewmodel mesh in VIEW space, split by render path.
 ///
 /// Returns `(arm_skin_verts, held_verts)`:
@@ -624,6 +635,38 @@ mod layout_tests {
 
     fn view_positions(v: &[Vertex]) -> Vec<Vec3> {
         v.iter().map(|v| Vec3::from(v.position)).collect()
+    }
+
+    #[test]
+    fn the_first_person_rod_tip_is_where_its_line_hangs_from_in_every_pose() {
+        let reg = BlockRegistry::new();
+        let rod = HeldItem::of(&crate::item::Item::Tool(Tool::new(ToolType::FishingRod, ToolMaterial::Wood)));
+        let string = crate::held_tool_model::centre_paint(crate::entity_model::TEX_ITEM_STRING);
+        for side in SIDES {
+            for aspect in ASPECTS {
+                for (bob, swing) in [(0.0, 0.0), (0.02, 0.0), (0.0, 0.5), (-0.02, 0.7)] {
+                    let (_, held) = build_viewmodel_vertices(side, rod, bob, swing, 0, &reg, ArmModel::Classic, aspect);
+                    let line: Vec<Vec3> = held
+                        .iter()
+                        .filter(|v| v.tex_layer == string.layer && v.uv == string.uv())
+                        .map(|v| Vec3::from(v.position))
+                        .collect();
+                    assert!(!line.is_empty());
+                    let tip = rod_tip_view(rod, &reg, side, bob, swing, aspect);
+                    let near = line.iter().map(|p| p.distance(tip)).fold(f32::MAX, f32::min);
+                    assert!(near < 0.02, "{side:?} @{aspect} bob {bob} swing {swing}: the tip is {near} from its baked line");
+                    // And the rod drawn bare has no line of its own to double it.
+                    let (_, bare) = build_viewmodel_vertices(side, rod.with_line_out(true), bob, swing, 0, &reg, ArmModel::Classic, aspect);
+                    assert!(bare.iter().all(|v| !(v.tex_layer == string.layer && v.uv == string.uv())));
+                    assert_eq!(held.len() - bare.len(), 3 * 36);
+                    // At rest the tip is on screen at the layout's aspects (the line has somewhere to start from).
+                    if bob == 0.0 && swing == 0.0 {
+                        let c = viewmodel_projection(aspect) * tip.extend(1.0);
+                        assert!(c.w > 0.0 && (c.x / c.w).abs() < 1.0 && (c.y / c.w).abs() < 1.0, "{side:?} @{aspect}: off screen at ({}, {})", c.x / c.w, c.y / c.w);
+                    }
+                }
+            }
+        }
     }
 
     fn build(side: HandSide, held: HeldItem, aspect: f32, swing: f32, arm: ArmModel) -> (Vec<Vec3>, Vec<Vec3>) {

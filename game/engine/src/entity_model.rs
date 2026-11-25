@@ -41,6 +41,11 @@ pub struct SkinRenderOpts {
     /// the eating hand rises to the mouth holding the food as it was when the
     /// bite was taken, minus the bites so far.
     pub eating: Option<crate::eating::AvatarEating>,
+    /// The hand whose Fishing Rod has its line cast out (the local player's, from
+    /// `fishing_view`): that rod is drawn without its baked line, float and hook,
+    /// and the builder reports where its tip is. A local drawing choice, never on
+    /// the wire.
+    pub rod_cast: Option<crate::viewmodel::HandSide>,
 }
 
 impl Default for SkinRenderOpts {
@@ -52,6 +57,7 @@ impl Default for SkinRenderOpts {
             arm_model: crate::skin_uv::ArmModel::Classic,
             worn: crate::armour_model::NO_ARMOUR,
             eating: None,
+            rod_cast: None,
         }
     }
 }
@@ -1480,6 +1486,29 @@ pub fn self_avatar_vertices(
     swing_progress: f32,
     time_ticks: u32,
     skin_layer: u32,
+    fade: f32,
+    registry: &crate::block::BlockRegistry,
+    arm_model: crate::skin_uv::ArmModel,
+    // The local player's own armour (`PlayerSlot::worn_armour`), drawn on the body.
+    worn: crate::armour_model::WornArmour,
+    // The local player eating (`eating.rs`): the food at the mouth, bitten.
+    eating: Option<crate::eating::AvatarEating>,
+) -> (Vec<Vertex>, Vec<Vertex>) {
+    let (skin, held, _) =
+        self_avatar_with_rod(mode, ps, swing_progress, time_ticks, skin_layer, fade, registry, arm_model, worn, eating, None);
+    (skin, held)
+}
+
+/// [`self_avatar_vertices`] with a Fishing Rod's line cast out of the hand
+/// `rod_cast`: that rod is drawn bare and the third result is its tip in world
+/// space (see [`build_player_avatar_vertices_framed`]).
+#[allow(clippy::too_many_arguments)]
+pub fn self_avatar_with_rod(
+    mode: crate::camera::CameraMode,
+    ps: &crate::protocol::PlayerState,
+    swing_progress: f32,
+    time_ticks: u32,
+    skin_layer: u32,
     // Phase 3 — self-avatar fade alpha [0,1] baked into the skin verts' light
     // channel for the `fs_avatar` screen-door dither. 1.0 = fully opaque.
     fade: f32,
@@ -1489,20 +1518,21 @@ pub fn self_avatar_vertices(
     worn: crate::armour_model::WornArmour,
     // The local player eating (`eating.rs`): the food at the mouth, bitten.
     eating: Option<crate::eating::AvatarEating>,
-) -> (Vec<Vertex>, Vec<Vertex>) {
+    rod_cast: Option<crate::viewmodel::HandSide>,
+) -> (Vec<Vertex>, Vec<Vertex>, Option<Vec3>) {
     if mode.is_third_person() {
-        build_player_avatar_vertices_travelling(
+        build_player_avatar_vertices_framed(
             ps,
             swing_progress,
             time_ticks,
             skin_layer,
             fade,
             registry,
-            SkinRenderOpts { arm_model, worn, eating, ..Default::default() },
+            SkinRenderOpts { arm_model, worn, eating, rod_cast, ..Default::default() },
             observed_travel(ps, time_ticks),
         )
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), None)
     }
 }
 
@@ -1644,7 +1674,28 @@ pub fn build_player_avatar_vertices_travelling(
     opts: SkinRenderOpts,
     travel: [f32; 2],
 ) -> (Vec<Vertex>, Vec<Vertex>) {
+    let (skin, held, _) =
+        build_player_avatar_vertices_framed(ps, swing_progress, time_ticks, skin_layer, fade, registry, opts, travel);
+    (skin, held)
+}
+
+/// [`build_player_avatar_vertices_travelling`] that also says where the tip of the
+/// Fishing Rod in the hand `opts.rod_cast` is, in world space (`None` when no such
+/// rod is held in the ordinary hand pose). One call makes the meshes and the tip,
+/// so the line leaves the very rod that was drawn.
+#[allow(clippy::too_many_arguments)]
+pub fn build_player_avatar_vertices_framed(
+    ps: &crate::protocol::PlayerState,
+    swing_progress: f32,
+    time_ticks: u32,
+    skin_layer: u32,
+    fade: f32,
+    registry: &crate::block::BlockRegistry,
+    opts: SkinRenderOpts,
+    travel: [f32; 2],
+) -> (Vec<Vertex>, Vec<Vertex>, Option<Vec3>) {
     use crate::protocol::player_flags;
+    let mut rod_tip = None;
     let mut skin_verts = Vec::new();
     let mut held_verts = Vec::new();
     let anim_time = time_ticks as f32 / 20.0; // seconds
@@ -1801,6 +1852,8 @@ pub fn build_player_avatar_vertices_travelling(
         if held.is_empty() {
             continue;
         }
+        let rod_out = opts.rod_cast == Some(side) && held.tool == Some(crate::crafting::ToolType::FishingRod);
+        let held = held.with_line_out(rod_out);
         let arm = &parts[side.arm_index()];
         let hand_anchor = avatar_hand_anchor(side, opts.arm_model);
         let arm_pivot = arm.pivot;
@@ -1873,6 +1926,12 @@ pub fn build_player_avatar_vertices_travelling(
             let p = rotate_model_yaw(p, (sin_y, cos_y));
             v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
         }
+        if rod_out {
+            // The same transform as the mesh's, applied to the rod's tip.
+            let p = rot_x_about(crate::held_tool_model::rod_tip_local(side) + hand_anchor, arm_pivot, x_rot);
+            let p = rotate_model_yaw(p, (sin_y, cos_y));
+            rod_tip = Some(p + foot_pos);
+        }
         held_verts.extend(item_verts);
     }
 
@@ -1892,7 +1951,7 @@ pub fn build_player_avatar_vertices_travelling(
         }
     }
 
-    (skin_verts, held_verts)
+    (skin_verts, held_verts, rod_tip)
 }
 
 /// The WORN avatar — parts at rest, Minecraft-exact overlay inflate, clothes on.
@@ -4662,6 +4721,45 @@ mod tests {
         ps.off_id = off.id;
         ps.off_tool = off.tool;
         ps
+    }
+
+    #[test]
+    fn a_cast_rod_is_drawn_bare_and_reports_the_tip_its_line_hangs_from() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        use crate::protocol::HeldWire;
+        use crate::viewmodel::HandSide;
+        let reg = crate::block::BlockRegistry::new();
+        let rod = HeldWire::of(Some(&crate::item::Item::Tool(Tool::new(ToolType::FishingRod, ToolMaterial::Wood))));
+        let string = crate::held_tool_model::centre_paint(TEX_ITEM_STRING);
+        let on_line = |v: &[Vertex]| -> Vec<Vec3> {
+            v.iter().filter(|q| q.tex_layer == string.layer && q.uv == string.uv()).map(|q| Vec3::from(q.position)).collect()
+        };
+        for (side, main, off) in [(HandSide::Right, rod, HeldWire::EMPTY), (HandSide::Left, HeldWire::EMPTY, rod)] {
+            // Idle, mid-walk, and a swing, the pose the arm is in.
+            for (anim, ticks, swing) in [(0u8, 0u32, 0.0f32), (1, 13, 0.0), (1, 5, 0.0), (0, 0, 0.5)] {
+                let ps = posed(anim, false, main, off);
+                let rigged = build_player_avatar_vertices_framed(&ps, swing, ticks, 0, 1.0, &reg, SkinRenderOpts::default(), [0.0, 0.0]);
+                assert!(rigged.2.is_none(), "no cast, no tip");
+                let cast = SkinRenderOpts { rod_cast: Some(side), ..Default::default() };
+                let (_, bare, tip) = build_player_avatar_vertices_framed(&ps, swing, ticks, 0, 1.0, &reg, cast, [0.0, 0.0]);
+                let tip = tip.expect("the cast hand holds a rod");
+                assert_eq!(rigged.1.len() - bare.len(), 3 * 36, "{side:?} {anim} {ticks}: the cast rod is bare");
+                let line = on_line(&rigged.1);
+                let near = line.iter().map(|p| p.distance(tip)).fold(f32::MAX, f32::min);
+                assert!(near < 0.02, "{side:?} anim {anim} ticks {ticks} swing {swing}: the tip is {near} from where the baked line hung");
+                // The other hand's rod, or none, reports nothing.
+                let other = SkinRenderOpts { rod_cast: Some(side.opposite()), ..Default::default() };
+                let (_, same, none) = build_player_avatar_vertices_framed(&ps, swing, ticks, 0, 1.0, &reg, other, [0.0, 0.0]);
+                assert!(none.is_none() && same.len() == rigged.1.len(), "only the cast hand's rod changes");
+            }
+        }
+        // The self avatar hands the tip back in third person only.
+        let ps = posed(0, false, rod, HeldWire::EMPTY);
+        let arm = crate::skin_uv::ArmModel::Classic;
+        let third = self_avatar_with_rod(crate::camera::CameraMode::OrbitBehind, &ps, 0.0, 0, 0, 1.0, &reg, arm, crate::armour_model::NO_ARMOUR, None, Some(HandSide::Right));
+        assert!(third.2.is_some());
+        let first = self_avatar_with_rod(crate::camera::CameraMode::FirstPerson, &ps, 0.0, 0, 0, 1.0, &reg, arm, crate::armour_model::NO_ARMOUR, None, Some(HandSide::Right));
+        assert!(first.0.is_empty() && first.1.is_empty() && first.2.is_none());
     }
 
     /// The torch's centroid in the `side` hand, in model space, for a pose. With

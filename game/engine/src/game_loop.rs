@@ -7616,6 +7616,13 @@ impl super::GameState {
                         hooked: true,
                         ..line
                     });
+                    // The bobber is pulled under: a splash where it floats, for
+                    // every local seat (presentation only).
+                    if let Some(at) = line.target
+                        && self.particles.is_enabled()
+                    {
+                        self.particles.burst_splash(at, 10, self.tick_counter ^ ((i as u64) << 9));
+                    }
                     if i == 0 {
                         self.audio.play_place();
                         self.toast = Some((
@@ -14368,17 +14375,18 @@ impl super::GameState {
                             let eye = self.players[pidx].player.eye_pos();
                             let dir = self.players[pidx].camera.forward();
                             let world = &self.world;
-                            let found_water = crate::fishing::finds_water(eye, dir, |x, y, z| world.is_water(x, y, z));
-                            if found_water {
+                            let target = crate::fishing::cast_target(eye, dir, |x, y, z| world.is_water(x, y, z));
+                            if let Some(target) = target {
                                 let seed = self
                                     .tick_counter
                                     .wrapping_mul(0x9E37)
                                     .wrapping_add(pidx as u64 * 0x85EB);
                                 let wait = crate::fishing::wait_ticks(seed);
-                                self.players[pidx].fishing = Some(crate::fishing::FishingLine {
-                                    catch_at_tick: self.tick_counter + wait,
-                                    hooked: false,
-                                });
+                                self.players[pidx].fishing = Some(crate::fishing::FishingLine::cast(
+                                    self.tick_counter,
+                                    self.tick_counter + wait,
+                                    Some(target),
+                                ));
                                 self.audio.play_place();
                                 self.players[pidx].place_cooldown = 10;
                                 fished = true;
@@ -18004,6 +18012,23 @@ impl super::GameState {
             // first-person hand below all build the same avatar.
             let worn_arm = self.worn_arm_model();
 
+            // Fishing — a line cast out (presentation only, `fishing_view`): the rod
+            // in hand is drawn bare and the line and bobber are added below, from
+            // the rod's tip (third person: the avatar builder's; first person: the
+            // viewmodel's, carried to the world pass).
+            let cast_view = {
+                let slot = &self.players[pidx];
+                let tool_of = |s: &crate::item::ItemStack| match &s.item {
+                    crate::item::Item::Tool(t) => Some(t.tool_type),
+                    _ => None,
+                };
+                let main_tool = slot.inventory.hotbar_slot(slot.hotbar_slot).and_then(tool_of);
+                let off_tool = slot.offhand.as_ref().and_then(tool_of);
+                let frac = self.tick_accumulator.as_secs_f32() / TICK_DURATION.as_secs_f32();
+                crate::fishing_view::cast_view(slot.fishing, main_tool, off_tool, self.tick_counter, frac)
+            };
+            let mut rod_tip: Option<glam::Vec3> = None;
+
             // ── Self-avatar (third-person) — cross-platform ──────────────────
             // When this viewport's camera is pulled back, draw THIS player's own
             // body so they see their own skin/cosmetics. First-person appends
@@ -18036,7 +18061,7 @@ impl super::GameState {
                     } else {
                         1.0
                     };
-                    let (mut skin_v, mut held_v) = crate::entity_model::self_avatar_vertices(
+                    let (mut skin_v, mut held_v, tip) = crate::entity_model::self_avatar_with_rod(
                         mode,
                         &ps_self,
                         swing_progress,
@@ -18048,7 +18073,9 @@ impl super::GameState {
                         // Your own armour on your own body (Spec 03 §7.5a).
                         self.players[pidx].worn_armour(),
                         self.eating.get(&pidx).map(crate::eating::Eating::avatar),
+                        cast_view.map(|c| c.side),
                     );
+                    rod_tip = tip;
                     // Campaign N — your own body dims with the world's light.
                     let ch = light_at(glam::Vec3::new(ps_self.x, ps_self.y, ps_self.z));
                     crate::entity_model::set_avatar_light(&mut skin_v, ch, sky_brightness);
@@ -18098,6 +18125,7 @@ impl super::GameState {
                         arm_model: s.arm_model,
                         worn: crate::armour_model::NO_ARMOUR,
                         eating: None,
+                        rod_cast: None,
                     },
                     None => crate::entity_model::SkinRenderOpts {
                         edit_inflate: true,
@@ -18136,6 +18164,11 @@ impl super::GameState {
                     pidx as u32
                 };
                 let eye = self.players[pidx].player.eye_pos();
+                // BRIDGE: a peer's cast line (bobber and line from its rod) is not
+                // drawn: its water point and a "line out" flag are not on the wire
+                // (`player_flags` 0x20 is free, the target needs a trailing field and a
+                // protocol bump) — build the peer's bobber with `fishing_view::build_vertices`
+                // here and bare its rod with `HeldItem::line_out` when that ships.
                 for rp in &self.remote_players {
                     if rp.player_index == local_idx { continue; } // skip self
                     // Skip any remote player with a non-finite coordinate before
@@ -18242,7 +18275,6 @@ impl super::GameState {
                 }
             }
 
-            self.renderer.upload_entity_vertices(pidx, &entity_verts);
             // Empty avatar_verts (no remote players / WASM) clears the buffer.
             self.renderer.upload_avatar_vertices(pidx, &avatar_verts);
 
@@ -18261,6 +18293,12 @@ impl super::GameState {
                     None => crate::item_model::HeldItem::EMPTY,
                 };
                 let off_held = slot.offhand.as_ref().map(|s| crate::item_model::HeldItem::of(&s.item));
+                // A rod with a line cast out is drawn bare (the line is the cast's own).
+                let (held, off_held) = match cast_view.map(|c| c.side) {
+                    Some(crate::viewmodel::HandSide::Right) => (held.with_line_out(true), off_held),
+                    Some(crate::viewmodel::HandSide::Left) => (held, off_held.map(|h| h.with_line_out(true))),
+                    None => (held, off_held),
+                };
                 // Bob: horizontal speed drives a walk-phase sine. velocity is
                 // per-tick displacement; scale by ~10 so a normal walk gives a
                 // visible-but-gentle sway. Phase advances with the tick counter.
@@ -18344,6 +18382,23 @@ impl super::GameState {
                     &mut held_verts,
                     (ch.0, ch.1 * sky_brightness),
                 );
+                // The cast line leaves the rod's tip: its place in the viewmodel's view
+                // space, carried to the same screen spot in the world pass.
+                if let Some(c) = cast_view {
+                    let (rod, rod_swing) = match c.side {
+                        crate::viewmodel::HandSide::Right => (held, swing),
+                        crate::viewmodel::HandSide::Left => (off_held.unwrap_or(held), swing_off),
+                    };
+                    let view_tip =
+                        crate::viewmodel::rod_tip_view(rod, &self.registry, c.side, bob, rod_swing, aspect);
+                    rod_tip = Some(crate::fishing_view::unproject_tip(
+                        view_tip,
+                        crate::viewmodel::viewmodel_projection(aspect),
+                        glam::Mat4::from_cols_array_2d(&camera_uniform.view_proj).inverse(),
+                        glam::Vec3::new(camera_uniform.camera_pos[0], camera_uniform.camera_pos[1], camera_uniform.camera_pos[2]),
+                        crate::fishing_view::FIRST_PERSON_LINE_START,
+                    ));
+                }
                 self.renderer.update_viewmodel_camera(pidx, aspect);
                 self.renderer.upload_viewmodel_skin_vertices(pidx, &arm_verts);
                 self.renderer.upload_viewmodel_vertices(pidx, &held_verts);
@@ -18353,6 +18408,16 @@ impl super::GameState {
                 self.renderer.upload_viewmodel_skin_vertices(pidx, &[]);
                 self.renderer.upload_viewmodel_vertices(pidx, &[]);
             }
+
+            // The cast line and its bobber, from the rod's tip, lit where the bobber
+            // floats; then everything for this viewport's entity pass goes up.
+            if let (Some(c), Some(tip)) = (cast_view, rod_tip) {
+                let mut line_v = crate::fishing_view::build_vertices(tip, &c);
+                let ch = light_at(crate::fishing_view::bobber_centre(tip, &c));
+                crate::entity_model::apply_light_channels(&mut line_v, ch);
+                entity_verts.extend(line_v);
+            }
+            self.renderer.upload_entity_vertices(pidx, &entity_verts);
         }
 
         // ── Part E: Per-viewport HUD ─────────────────────────────────────────
@@ -23736,10 +23801,16 @@ impl super::GameState {
             (crate::joiner_actions::Asked::Cast, crate::protocol::ItemAction::Cast { hotbar_slot: slot, held_kind, held_id, held_full })
         };
         self.players[pidx].place_cooldown = 10;
+        // Where the bobber floats: the same cast the server runs, over this
+        // client's own world (drawing only; none when it shows no water).
+        let target = {
+            let (eye, dir) = (self.players[pidx].player.eye_pos(), self.players[pidx].camera.forward());
+            crate::fishing::cast_target(eye, dir, |x, y, z| self.world.is_water(x, y, z))
+        };
         if self.send_use_request(pidx, asked, held, hot, hand, action) {
             // A cast's line waits for the server's bite; a reel's comes in.
             self.players[pidx].fishing =
-                (!reel).then_some(crate::fishing::FishingLine { catch_at_tick: u64::MAX, hooked: false });
+                (!reel).then_some(crate::fishing::FishingLine::cast(self.tick_counter, u64::MAX, target));
         }
     }
 

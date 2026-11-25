@@ -64,11 +64,15 @@ pub struct HeldItem {
     pub armour: Option<(ArmourSlot, ArmourMaterial)>,
     /// A Plan is held (`item_kind::PLAN`): drawn as its parchment cube.
     pub plan: bool,
+    /// A Fishing Rod with its line cast out: drawn bare, the cast draws the
+    /// line, float and hook (`fishing_view`). A local drawing choice, never on
+    /// the wire; false for every other item.
+    pub line_out: bool,
 }
 
 impl HeldItem {
     /// An empty hand.
-    pub const EMPTY: HeldItem = HeldItem { item: ItemRef::Empty, tool: None, armour: None, plan: false };
+    pub const EMPTY: HeldItem = HeldItem { item: ItemRef::Empty, tool: None, armour: None, plan: false, line_out: false };
 
     /// A hand that holds `item`: the local player's, which knows the real type.
     pub fn of(item: &Item) -> Self {
@@ -83,13 +87,19 @@ impl HeldItem {
                 _ => None,
             },
             plan: matches!(item, Item::Plan(_)),
+            line_out: false,
         }
+    }
+
+    /// This hand with its rod's line cast out (or not): see [`HeldItem::line_out`].
+    pub fn with_line_out(self, line_out: bool) -> Self {
+        HeldItem { line_out, ..self }
     }
 
     /// A hand as a peer's avatar wire says it. `tool` is `None` for anything
     /// but a tool, and for a tool byte this build doesn't know (a newer peer).
     pub fn from_wire(w: HeldWire) -> Self {
-        HeldItem { item: ItemRef::from_wire(w.kind, w.id), tool: w.tool_type(), armour: w.armour(), plan: w.is_plan() }
+        HeldItem { item: ItemRef::from_wire(w.kind, w.id), tool: w.tool_type(), armour: w.armour(), plan: w.is_plan(), line_out: false }
     }
 
     pub fn is_empty(self) -> bool {
@@ -100,7 +110,7 @@ impl HeldItem {
 /// A bare `ItemRef` is a hand without a known tool type.
 impl From<ItemRef> for HeldItem {
     fn from(item: ItemRef) -> Self {
-        HeldItem { item, tool: None, armour: None, plan: false }
+        HeldItem { item, tool: None, armour: None, plan: false, line_out: false }
     }
 }
 
@@ -282,7 +292,7 @@ pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) 
             // dropped-item icon (e.g. Satori has its own texture, not diamond).
             let mat = tier_material(tier);
             if let Some(tool) = held.tool {
-                return crate::held_tool_model::tool_model(tool, mat, side);
+                return crate::held_tool_model::tool_model_with(tool, mat, side, held.line_out);
             }
             let tex = tool_texture(mat);
             // Thin slab oriented along Y so it reads as a tool shaft when the
@@ -1010,10 +1020,23 @@ mod tests {
     }
 
     #[test]
+    fn a_rod_with_its_line_out_loses_its_rig_and_nothing_else_does() {
+        let reg = BlockRegistry::new();
+        let rod = HeldItem::of(&Item::Tool(crate::crafting::Tool::new(ToolType::FishingRod, ToolMaterial::Wood)));
+        assert!(!rod.line_out, "a held item is rigged until told otherwise");
+        let (rigged, bare) = (held_item_mesh(rod, &reg, HandSide::Right), held_item_mesh(rod.with_line_out(true), &reg, HandSide::Right));
+        assert_eq!(rigged.len() - bare.len(), 3 * 36);
+        let sword = HeldItem::of(&Item::Tool(crate::crafting::Tool::new(ToolType::Sword, ToolMaterial::Iron)));
+        assert_eq!(pos_set(&held_item_mesh(sword, &reg, HandSide::Right)), pos_set(&held_item_mesh(sword.with_line_out(true), &reg, HandSide::Right)));
+        let torch = HeldItem::from(ItemRef::Block(crate::block::TORCH));
+        assert_eq!(pos_set(&held_item_mesh(torch, &reg, HandSide::Left)), pos_set(&held_item_mesh(torch.with_line_out(true), &reg, HandSide::Left)));
+    }
+
+    #[test]
     fn the_local_players_tool_knows_its_type() {
         let sword = Item::Tool(crate::crafting::Tool::new(ToolType::Sword, ToolMaterial::Iron));
         let held = HeldItem::of(&sword);
-        assert_eq!(held, HeldItem { item: ItemRef::Tool(2), tool: Some(ToolType::Sword), armour: None, plan: false });
+        assert_eq!(held, HeldItem { item: ItemRef::Tool(2), tool: Some(ToolType::Sword), armour: None, plan: false, line_out: false });
         let wire = HeldWire::of(Some(&sword));
         assert_eq!(HeldItem::from_wire(wire), held, "the local item and its wire form draw the same");
     }
