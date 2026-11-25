@@ -47,7 +47,8 @@ pub fn item_to_ref(item: &crate::item::Item) -> crate::protocol::ItemRef {
 ///
 /// Returns `None` for anything that can't be reconstructed faithfully:
 /// unknown/hostile ids from the network (the registry's silent AIR fallback
-/// must never mint an item), `TOOL` refs (the wire collapses tools to a bare
+/// must never mint an item), the reserved block ids (`block::is_reserved`),
+/// `TOOL` refs (the wire collapses tools to a bare
 /// material tier — kind and durability are lost), and `EMPTY`/unknown
 /// discriminators. The server's pickup pass applies the same eligibility rule
 /// on the encode side, so a `None` here means a tampered or newer-version peer.
@@ -59,7 +60,9 @@ pub fn item_from_ref(
     use crate::item::Item;
     use crate::protocol::item_kind;
     match kind {
-        item_kind::BLOCK if registry.is_known(id) => Some(Item::Block(id)),
+        // A reserved id (381..=384, held for Tier 3) is a registered stand-in,
+        // never an item: no grant, container claim or Creative give mints one.
+        item_kind::BLOCK if registry.is_known(id) && !crate::block::is_reserved(id) => Some(Item::Block(id)),
         item_kind::MATERIAL => crate::item::MaterialId::try_from(id).ok().map(Item::Material),
         _ => None,
     }
@@ -1065,6 +1068,27 @@ mod tests {
         assert_eq!(item_from_ref(crate::protocol::item_kind::EMPTY, 0, &reg), None);
         // Unknown discriminator byte.
         assert_eq!(item_from_ref(99, 0, &reg), None);
+    }
+
+    /// pt1124 review 5 — the reserved ids are registered stand-ins, so the
+    /// registry knows them, but the shared decode (grants, container claims,
+    /// a Creative give's stack) never mints one; Cobbled Deepslate still decodes.
+    #[test]
+    fn reserved_block_ids_never_decode_as_an_item() {
+        let reg = crate::block::BlockRegistry::new();
+        for id in crate::block::RESERVED_FIRST..=crate::block::RESERVED_LAST {
+            assert!(reg.is_known(id));
+            assert_eq!(item_from_ref(crate::protocol::item_kind::BLOCK, id, &reg), None, "{id}");
+            let wire = stack_to_wire(&ItemStack { item: Item::Block(id), count: 5 });
+            for plan in [PlanDecode::Refuse, PlanDecode::Placeholder, PlanDecode::Marker] {
+                assert_eq!(stack_from_wire(&wire, &reg, plan), None, "{id} as a stack");
+            }
+        }
+        let cobbled = stack_to_wire(&ItemStack { item: Item::Block(crate::block::COBBLED_DEEPSLATE), count: 5 });
+        assert_eq!(
+            stack_from_wire(&cobbled, &reg, PlanDecode::Marker).map(|s| s.item),
+            Some(Item::Block(crate::block::COBBLED_DEEPSLATE))
+        );
     }
 
     #[test]

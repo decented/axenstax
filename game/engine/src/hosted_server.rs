@@ -10719,6 +10719,27 @@ pub(crate) mod tests {
         hs.server.save_joiner(i).unwrap(); assert_eq!(hs.server.load_joiner(i).unwrap().window().unwrap().inv.slot(0).unwrap().count,12);
     }
 
+    /// pt1124 review 5 — a Creative joiner's give of a reserved block id
+    /// (381..=384) is an unreadable stack: refused, nothing granted.
+    #[test]
+    fn creative_give_of_a_reserved_block_id_grants_nothing() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("give-reserved");
+        let mut hs = start_room_test_server("give-reserved", 0);
+        let client = hs.attach_test_remote_with_binding(Some([18;32]));
+        send_signed_join(&client, [67;32], Some([18;32])); hs.tick(); join_installed(&mut hs, &client, HostedServer::tick);
+        let i = hs.server.players.len()-1;
+        hs.server.play_mode = crate::play_mode::PlayMode::Creative;
+        let item = crate::inventory::stack_to_wire(&crate::item::ItemStack::new_block(crate::block::RESERVED_FIRST, 4));
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &protocol::ItemActionPacket { seq: 1, action: protocol::ItemAction::CreativeGive { item }, events_applied: 0, hand: crate::hands::Hand::Main })); hs.tick();
+        let mut outcome = None;
+        while let Some(pkt) = client.try_recv_from_server() {
+            if let Some((protocol::PacketType::ItemActionOutcome, bytes)) = protocol::deserialize_header(&pkt) { outcome = Some(protocol::safe_deserialize::<protocol::ItemActionOutcomePacket>(bytes).unwrap()); }
+        }
+        assert!(!outcome.expect("an outcome").accepted);
+        assert_eq!(crate::window_events::effective_window(&hs.server.players[i]).inv.slots_iter().flatten().count(), 0);
+    }
+
     /// Audit 2026-09-27: join never refused a duplicate verified pubkey, so a
     /// reconnect stacked a second live slot for the same person. On a
     /// channel-bound transport (QUIC) the new connection replaces the old one.
