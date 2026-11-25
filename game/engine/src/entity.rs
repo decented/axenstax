@@ -2205,5 +2205,20 @@ mod tests {
         let vel_x = ecs.query::<&Velocity>().iter().next().map(|(_, v)| v.0.x).unwrap();
         assert!(vel_x < 0.0, "magnet should pull item toward player on -X (got {vel_x})");
     }
-}
 
+    /// The fix for the chase shove (playtest 2026-11-24) is in the chase, not
+    /// here: a player who walks into a standing mob is still pushed out of its
+    /// box, and the mob is not moved.
+    #[test]
+    fn a_player_overlapping_a_standing_mob_is_pushed_out_and_the_mob_stays() {
+        let mut ecs = hecs::World::new();
+        let mob_at = Vec3::new(0.0, 64.0, 0.0);
+        let mob = spawn_mob(&mut ecs, MobType::Brigand, mob_at);
+        let mut ppos = Vec3::new(0.0, 64.0, 0.4); // boxes overlap by 0.2 on z
+        let mut pvel = Vec3::new(0.0, 0.0, -0.1);
+        push_player_from_entities(&ecs, &mut ppos, &mut pvel);
+        assert!((ppos.z - 0.6).abs() < 1e-5, "pushed out to touching, at {ppos:?}");
+        assert_eq!(pvel.z, 0.0, "the velocity into the mob is stopped");
+        assert_eq!(ecs.get::<&Position>(mob).unwrap().0, mob_at, "the mob is not moved");
+    }
+}

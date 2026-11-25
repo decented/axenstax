@@ -38,7 +38,7 @@ pub(crate) const HOSTILE_MELEE_DAMAGE: f32 = 3.0;
 #[allow(dead_code)]
 const HOSTILE_MELEE_COOLDOWN: u32 = 20;
 /// Baseline hostile-mob attack range (blocks).
-const HOSTILE_MELEE_RANGE: f32 = 1.5;
+pub(crate) const HOSTILE_MELEE_RANGE: f32 = 1.5;
 /// Damage flash duration in ticks.
 pub const DAMAGE_FLASH_TICKS: u32 = 6;
 /// W2 — the PLAYER's hurt flash (drives the red screen-edge vignette): 8 ticks
@@ -2506,5 +2506,56 @@ mod shield_block_tests {
         assert_eq!(slot.combat.health, hp);
         assert!(!tick_mob_attacks(&ecs, &mut slot, NORMAL).is_empty(), "the next hit lands");
         assert!(slot.combat.health < hp);
+    }
+
+    /// Playtest 2026-11-24 — a local body holding a raised shield toward a
+    /// chasing brigand holds its ground, in the order a standalone or lending
+    /// tick runs: mob AI, entity physics, the shove out of a mob's box, the
+    /// hostile melee pass. Straight on and on the diagonal (both in the front
+    /// half). Before the fix the chase walked into the body every tick and the
+    /// shove carried it backwards while every hit was blocked. Nothing else
+    /// moves the body here, so the bound is a float epsilon; one tick of the
+    /// brigand's walk is 0.225 blocks.
+    #[test]
+    fn a_chasing_brigand_never_shoves_a_raised_shield_and_every_hit_is_blocked() {
+        use crate::block::{BlockRegistry, STONE};
+        let reg = BlockRegistry::new();
+        for (label, offset) in [("straight", Vec3::new(0.0, 0.0, -6.0)), ("diagonal", Vec3::new(-4.5, 0.0, -4.5))] {
+            let mut world = crate::world::World::new();
+            for x in -20..=20 {
+                for z in -20..=20 {
+                    world.set_block(x, 4, z, STONE);
+                }
+            }
+            let start = Vec3::new(0.5, 5.0, 0.5);
+            let mut slot = guarded(RAISE_TICKS);
+            slot.player.pos = start;
+            let mut ecs = hecs::World::new();
+            let mob = entity::spawn_mob(&mut ecs, MobType::Brigand, start + offset);
+            ecs.get::<&mut crate::mob_ai::MobAi>(mob).unwrap().state = crate::mob_ai::AiState::Chase;
+            let hp = slot.combat.health;
+            let mut clacks = 0u32;
+            // 100 ticks (5 s): it arrives in under 30, then swings for the rest.
+            for _ in 0..100 {
+                crate::mob_ai::tick_mob_ai(&mut ecs, &world, &reg, &[slot.player.pos]);
+                entity::tick_entities(&mut ecs, &world, &reg);
+                entity::push_player_from_entities(&ecs, &mut slot.player.pos, &mut slot.player.velocity);
+                assert!(tick_mob_attacks(&ecs, &mut slot, NORMAL).is_empty(), "{label}: a hit landed");
+                clacks += u32::from(slot.take_shield_clacks());
+                slot.combat.tick_timers();
+            }
+            let now = slot.player.pos;
+            let moved = Vec3::new(now.x - start.x, 0.0, now.z - start.z).length();
+            assert!(moved <= 1e-4, "{label}: the shielded body was pushed {moved} blocks");
+            assert_eq!(slot.combat.health, hp, "{label}: no damage");
+            assert_eq!(slot.player.velocity, Vec3::ZERO, "{label}: no knockback");
+            assert!(clacks >= 3, "{label}: the brigand kept attacking and the shield kept blocking ({clacks} blocks)");
+            let raw = crate::survival::scale_mob_damage(HOSTILE_MELEE_DAMAGE, NORMAL);
+            assert_eq!(
+                shield_durability(&slot),
+                Some(crate::crafting::SHIELD_DURABILITY - clacks as u16 * crate::shield::wear_for(raw)),
+                "{label}: each block wore 1 + floor(damage)",
+            );
+        }
     }
 }
