@@ -126,16 +126,24 @@ fn is_count_word(word: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The item words and the optional count of `/give` arguments. The count is only a trailing
-/// whole number (`5` or `+5`) after at least one item word (`oak planks 64`, `satori helmet 2`); every other
-/// word belongs to the item name, so a name may be several words.
+/// The item words and the optional count of `/give` arguments. The complete words are tried as
+/// a name first, so a name that ends in a number (`Wheat Stage 2`) is that item; only when they
+/// name nothing is a trailing whole number (`5` or `+5`) after at least one item word the count
+/// (`oak planks 64`, `satori helmet 2`). Every other word belongs to the item name, so a name may
+/// be several words.
 fn split_args(args: &[String]) -> (String, Option<&str>) {
+    let whole = args.join("_");
     match args.split_last() {
-        Some((last, words)) if !words.is_empty() && is_count_word(last) => {
+        Some((last, words)) if !words.is_empty() && is_count_word(last) && !names_something(&whole) => {
             (words.join("_"), Some(last.as_str()))
         }
-        _ => (args.join("_"), None),
+        _ => (whole, None),
     }
+}
+
+/// Whether `name` resolves to an item (or an armour set) as typed.
+fn names_something(name: &str) -> bool {
+    armour_by_name(&normalise(name)).is_some() || matches!(resolve_known(name, 1), Ok(Some(_)))
 }
 
 impl Command for GiveCommand {
@@ -219,14 +227,20 @@ impl Command for GiveCommand {
             ctx.error(msg.clone());
             return CommandResult::Error(msg);
         };
-        let total = stacks.len();
         let label = given_label(&stacks, &item_name);
-        let mut placed = 0;
+        // Count the units the bag accepted, a partial stack included: `add_item` hands back
+        // exactly what didn't fit.
+        let total: u32 = stacks.iter().map(|s| u32::from(s.count)).sum();
+        let mut placed: u32 = 0;
+        let mut full = false;
         for stack in stacks {
-            if slot.inventory.add_item(stack).is_some() {
+            let count = u32::from(stack.count);
+            if let Some(rest) = slot.inventory.add_item(stack) {
+                placed += count - u32::from(rest.count).min(count);
+                full = true;
                 break;
             }
-            placed += 1;
+            placed += count;
         }
         if placed > 0 {
             // /give breaks pure-survival, consistent with /clear and /gamemode
@@ -236,7 +250,7 @@ impl Command for GiveCommand {
             *ctx.cheats_used_marker = true;
             *ctx.pure_survival_broken_marker = true;
         }
-        if placed == total {
+        if !full {
             let msg = match capped_from {
                 Some(n) => format!("Gave {} (capped from {n})", label.with_count(count)),
                 None => format!("Gave {}", label.with_count(count)),
@@ -246,8 +260,10 @@ impl Command for GiveCommand {
         } else {
             let msg = if placed == 0 {
                 "inventory full".to_string()
-            } else {
+            } else if label.counted_in_name {
                 format!("inventory full: gave {placed} of {total} pieces of {}", label.name)
+            } else {
+                format!("inventory full: gave {placed} of {total} × {}", label.name)
             };
             ctx.error(msg.clone());
             CommandResult::Error(msg)
@@ -368,6 +384,97 @@ mod tests {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let r = cmd.execute(&mut ctx, &owned);
         (r, ch, ps)
+    }
+
+    /// The whole `/give` line through the dispatcher (the command entry point), on `players`;
+    /// returns the result, the chat lines and the (cheats_used, pure_survival_broken) markers.
+    fn dispatch_line(players: &mut Vec<PlayerSlot>, line: &str) -> (CommandResult, Vec<String>, bool, bool) {
+        let mut world = World::new();
+        let mut t = 0u32;
+        let mut s = 4u32;
+        let mut creative = false;
+        let mut log = Vec::new();
+        let mut ch = false;
+        let mut ev = false;
+        let mut ps = false;
+        let mut reg = CommandRegistry::new();
+        reg.register(Box::new(GiveCommand));
+        let r = {
+            let mut ctx = CommandContext {
+                world: &mut world,
+                world_time: &mut t,
+                world_time_step: &mut s,
+                is_creative: &mut creative, play_mode: &mut { use crate::play_mode::PlayMode; PlayMode::Survival },
+                seed: 42,
+                world_name: "test",
+                players,
+                player_idx: 0,
+                op_level: OpLevel::Op,
+                current_tick: 0,
+                log: &mut log,
+                registry: &reg,
+                cheats_used_marker: &mut ch,
+                ever_creative_marker: &mut ev,
+                pure_survival_broken_marker: &mut ps,
+            };
+            crate::commands::dispatch::dispatch(line, &mut ctx, &reg)
+        };
+        (r, log.iter().map(|l| l.text.clone()).collect(), ch, ps)
+    }
+
+    /// pt1124 review 6 — a bag with room for one more Cobbled Deepslate takes one of two: that
+    /// one unit is a real hand-over, so both ledger flags are set and the message says 1 of 2.
+    #[test]
+    fn a_partial_give_flags_the_ledger_and_reports_what_was_accepted() {
+        let mut players = vec![PlayerSlot::new(0, glam::Vec3::ZERO, 0.5)];
+        for i in 0..36 {
+            players[0].inventory.set_slot(i, Some(ItemStack::new_block(block::DIRT, 64)));
+        }
+        players[0].inventory.set_slot(5, Some(ItemStack::new_block(block::COBBLED_DEEPSLATE, 63)));
+        let (r, lines, cheats_used, pure_broken) = dispatch_line(&mut players, "/give cobbled deepslate 2");
+        assert!(matches!(r, CommandResult::Error(_)), "not everything fitted");
+        assert_eq!(players[0].inventory.slot(5).unwrap().count, 64, "one unit accepted");
+        assert!(cheats_used && pure_broken, "an accepted unit marks the ledger");
+        assert!(lines.iter().any(|l| l.contains("gave 1 of 2")), "{lines:?}");
+        // Nothing fits at all: no flags.
+        let (r, lines, cheats_used, pure_broken) = dispatch_line(&mut players, "/give cobbled deepslate 2");
+        assert!(matches!(r, CommandResult::Error(_)));
+        assert!(!cheats_used && !pure_broken, "nothing given, ledger clean");
+        assert!(lines.iter().any(|l| l == "inventory full"), "{lines:?}");
+    }
+
+    /// pt1124 review 15 — a display name ending in a number is that item: the complete name is
+    /// tried first, and only a name that resolves to nothing reads its last number as a count.
+    #[test]
+    fn a_name_ending_in_a_number_is_tried_whole_before_the_count() {
+        let mut players = vec![PlayerSlot::new(0, glam::Vec3::ZERO, 0.5)];
+        let (r, lines, ..) = dispatch_line(&mut players, "/give Wheat Stage 2");
+        assert_eq!(r, CommandResult::Success, "{lines:?}");
+        let got = players[0].inventory.slot(0).unwrap();
+        assert_eq!((got.item.clone(), got.count), (crate::item::Item::Block(block::WHEAT_STAGE_2), 1));
+        let (r, ..) = dispatch_line(&mut players, "/give stone 5");
+        assert_eq!(r, CommandResult::Success);
+        let stone = players[0].inventory.slots_iter().flatten().find(|s| s.item == crate::item::Item::Block(block::STONE)).unwrap();
+        assert_eq!(stone.count, 5, "a trailing number after a name that resolves alone is still the count");
+        let (r, ..) = dispatch_line(&mut players, "/give oak planks 3");
+        assert_eq!(r, CommandResult::Success);
+    }
+
+    /// pt1124 review 16 — the economy blocks are given as their item form whether the name is
+    /// typed bare or with the registry namespace, so the two stack together.
+    #[test]
+    fn a_qualified_economy_block_name_gives_the_same_item_form() {
+        for local in ["bounty_board", "tip_jar", "repair_bench", "plot_marker", "market_bell", "auction_block", "bazaar_block"] {
+            let bare = resolve_item(local, 1).unwrap().item;
+            let qualified = resolve_item(&format!("genesis:{local}"), 1).unwrap().item;
+            assert!(matches!(bare, crate::item::Item::Material(_)), "{local} gives the item form, got {bare:?}");
+            assert_eq!(qualified, bare, "genesis:{local}");
+        }
+        let mut players = vec![PlayerSlot::new(0, glam::Vec3::ZERO, 0.5)];
+        dispatch_line(&mut players, "/give tip_jar");
+        dispatch_line(&mut players, "/give genesis:tip_jar");
+        assert_eq!(players[0].inventory.slot(0).unwrap().count, 2, "one stack");
+        assert!(players[0].inventory.slot(1).is_none());
     }
 
     #[test]

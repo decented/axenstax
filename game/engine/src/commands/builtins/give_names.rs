@@ -286,8 +286,10 @@ static REGISTRY_NAMES: LazyLock<RegistryNames> = LazyLock::new(|| {
         if NOT_GIVEABLE_BLOCKS.contains(&id) || block::is_reserved(id) {
             continue;
         }
-        let item = Item::Block(id);
-        add(item.name(&registry), registry.get(id).name.to_string(), item);
+        // An economy block is held as its item form (`TipJarItem`, ...), so its names give that,
+        // as the tables do for the bare name: `genesis:tip_jar` and `tip_jar` stack together.
+        let item = economy_item_form(id).map_or(Item::Block(id), Item::Material);
+        add(Item::Block(id).name(&registry), registry.get(id).name.to_string(), item);
     }
     for &material in crate::inventory_explorer::ALL_MATERIAL_IDS {
         let item = Item::Material(material);
@@ -295,6 +297,22 @@ static REGISTRY_NAMES: LazyLock<RegistryNames> = LazyLock::new(|| {
     }
     RegistryNames { by_key, canonical }
 });
+
+/// The item forms the economy blocks are placed from and drop as; nobody holds the bare block.
+const ECONOMY_ITEM_FORMS: &[M] = &[
+    M::BountyBoardItem,
+    M::TipJarItem,
+    M::RepairBenchItem,
+    M::PlotMarkerItem,
+    M::MarketBellItem,
+    M::AuctionBlockItem,
+    M::BazaarBlockItem,
+];
+
+/// The item form that places economy block `id`, if it is one.
+fn economy_item_form(id: BlockId) -> Option<M> {
+    ECONOMY_ITEM_FORMS.iter().copied().find(|&m| crate::item::material_as_placeable_block(m) == Some(id))
+}
 
 /// The last resort of `/give`: any registered block or material by display name or registry name.
 pub(super) fn registry_item_by_name(key: &str) -> Option<Item> {
