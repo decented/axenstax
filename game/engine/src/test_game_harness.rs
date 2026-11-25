@@ -170,6 +170,8 @@ mod tests {
     mod quest_day_authority;
     #[path = "quest_carry.rs"]
     mod quest_carry;
+    #[path = "grave_mesh.rs"]
+    mod grave_mesh;
     #[cfg(not(target_arch = "wasm32"))]
     #[path = "pick_block.rs"]
     mod pick_block;

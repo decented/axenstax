@@ -7981,6 +7981,9 @@ impl super::GameState {
                         if let Some([gx, gy, gz]) = safe {
                             self.world.set_block(gx, gy, gz, crate::block::GRAVE);
                             self.pending_block_changes.push(broadcast_change(&self.world, gx, gy, gz, crate::block::GRAVE));
+                            // `World::set_block` meshes nothing: without this the grave exists,
+                            // collides and is outlined but is never drawn.
+                            self.rebuild_chunk_at(gx, gy, gz);
                             let grave = crate::grave::GraveData::from_snapshot(snapshot, self.world_time);
                             self.world.insert_grave((gx, gy, gz), grave);
                             self.players[i].last_grave = Some([gx, gy, gz]);
@@ -15642,6 +15645,8 @@ impl super::GameState {
                             self.world.remove_block_entity(pos_key);
                             self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
                             self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::AIR));
+                            // The emptied grave must disappear from the mesh too.
+                            self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                             self.toast = Some((
                                 "Recovered your things".to_string(),
                                 Instant::now() + Duration::from_secs(3),
