@@ -230,8 +230,12 @@ pub(crate) fn paint_item_icon(
         // picture, but none is a bare swatch). Only where that layer has not been
         // uploaded (a headless pass) does the flat colour stand in.
         Item::Material(m) => match icons.block_texture(crate::entity_model::material_texture(*m)) {
-            Some(tex_id) => painter.image(tex_id, rect, UNIT_UV, Color32::WHITE),
-            None => painter.rect_filled(rect, 2.0, to_color(item.color(registry))),
+            Some(tex_id) => {
+                painter.image(tex_id, rect, UNIT_UV, Color32::WHITE);
+            }
+            None => {
+                painter.rect_filled(rect, 2.0, to_color(item.color(registry)));
+            }
         },
         Item::Plan(_) => paint_plan_icon(painter, rect, item.color(registry)),
         Item::Armour(a) => paint_armour_icon(painter, rect, a.slot, a.material),
