@@ -375,7 +375,9 @@ comes from real cobblestone alone. Three cobbled deepslate in a row make deepsla
 shapes make deepslate stairs and walls (`building_variants::id_for_base` reads it as the deepslate material), so the
 deepslate variants stay craftable in Survival. The recipe book's "can I craft this" and Fill from bag substitute it
 too (`crafting::affordable_grid`: every `COBBLESTONE` cell as Cobbled Deepslate, all or stone by stone from the bag,
-cobblestone first, under the same "same output" check). Not smeltable: the furnace smelts ores only (cobblestone does
+cobblestone first, under the same "same output" check), and so do the deepslate slab, stairs and wall cards, whose
+grids show pure deepslate: each `PURE_DEEPSLATE` cell may be Cobbled Deepslate, all or stone by stone from the bag (pure
+first), and the substituted grid must make the card's own variant (pt1124 review 14). Not smeltable: the furnace smelts ores only (cobblestone does
 not smelt to stone either). The recipe book cards still name cobblestone. `/give cobbled_deepslate` needs the
 registry-wide `/give` fallback (another pt1124 lane); its display name is "Cobbled Deepslate".
 

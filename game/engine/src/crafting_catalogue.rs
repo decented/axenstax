@@ -1939,6 +1939,33 @@ mod tests {
         assert!(crate::crafting::affordable_grid(&bag(0, 6, 0), &card_named("Cobblestone Wall").example_grid).is_none());
     }
 
+    /// pt1124 review 14 — the deepslate slab, stairs and wall cards show pure deepslate; three
+    /// (or six, or seven) Cobbled Deepslate, what mining deepslate drops, pay for them, alone or
+    /// mixed with pure deepslate, and the substituted grid makes the card's own variant.
+    #[test]
+    fn cobbled_deepslate_pays_for_the_deepslate_variant_cards() {
+        let bag = |pure: u8, cobbled: u8| {
+            let mut inv = Inventory::new();
+            if pure > 0 {
+                inv.set_slot(0, Some(ItemStack::new_block(block::PURE_DEEPSLATE, pure)));
+            }
+            if cobbled > 0 {
+                inv.set_slot(1, Some(ItemStack::new_block(block::COBBLED_DEEPSLATE, cobbled)));
+            }
+            inv
+        };
+        for name in ["Deepslate Slab", "Deepslate Stairs", "Deepslate Wall"] {
+            let card = card_named(name);
+            let want = match_recipe(&card.example_grid).expect("the card's own grid crafts").item;
+            for (inv, why) in [(bag(0, 8), "all cobbled"), (bag(2, 6), "mixed")] {
+                assert!(can_craft(&inv, card), "{name}: {why}");
+                let laid = crate::crafting::affordable_grid(&inv, &card.example_grid).unwrap();
+                assert_eq!(match_recipe(&laid).map(|o| o.item), Some(want.clone()), "{name}: {why}");
+            }
+            assert!(!can_craft(&bag(0, 2), card), "{name}: two stones make nothing");
+        }
+    }
+
     #[test]
     fn tree_specific_recipes_still_give_the_trees_own_item() {
         // Birch planks make a birch fence post, not an oak one.

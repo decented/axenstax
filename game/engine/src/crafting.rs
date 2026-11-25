@@ -623,8 +623,11 @@ pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot;
     let count_of = |b: BlockId| example.iter().flatten().filter(|s| **s == CraftSlot::Block(b)).count();
     let (has_planks, has_logs) = (count_of(block::OAK_PLANKS) > 0, count_of(block::OAK_LOG) > 0);
     let has_cobble = count_of(block::COBBLESTONE) > 0;
-    if !has_planks && !has_logs && !has_cobble {
-        return None; // no oak or cobblestone cell to substitute: no scan at all
+    // pt1124 review 14 — a deepslate variant's card shows pure deepslate, but mining it gives
+    // Cobbled Deepslate, which makes the same slab, stairs or wall (`building_variants::id_for_base`).
+    let has_deepslate = count_of(block::PURE_DEEPSLATE) > 0;
+    if !has_planks && !has_logs && !has_cobble && !has_deepslate {
+        return None; // no oak, cobblestone or deepslate cell to substitute: no scan at all
     }
     // Cheap guard: a bag with no other tree's planks or logs, no log
     // material and no other stone-tier material has nothing to substitute (the
@@ -634,6 +637,7 @@ pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot;
             (has_planks && block::is_any_planks(*b) && *b != block::OAK_PLANKS)
                 || (has_logs && block::is_any_log_block(*b) && *b != block::OAK_LOG)
                 || (has_cobble && block::is_stone_crafting_material(*b) && *b != block::COBBLESTONE)
+                || (has_deepslate && *b == block::COBBLED_DEEPSLATE)
         }
         Item::Material(m) => {
             has_logs && matches!(m, MaterialId::GreenLog | MaterialId::SeasonedLog | MaterialId::KilnDriedLog)
@@ -659,7 +663,8 @@ pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot;
     } else {
         vec![CraftSlot::Block(block::OAK_LOG)]
     };
-    let stone_modes: &[Stone] = if has_cobble { &[Stone::Keep, Stone::All, Stone::FromBag] } else { &[Stone::Keep] };
+    let stone_modes: &[Stone] =
+        if has_cobble || has_deepslate { &[Stone::Keep, Stone::All, Stone::FromBag] } else { &[Stone::Keep] };
     let stock: Vec<(BlockId, u32)> = block::ALL_WOOD_SPECIES
         .iter()
         .map(|s| {
@@ -668,12 +673,15 @@ pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot;
         })
         .collect();
     let stone_stock: [(BlockId, u32); 2] = [block::COBBLESTONE, block::COBBLED_DEEPSLATE].map(|b| (b, bag_count(inv, &Item::Block(b))));
+    let deepslate_stock: [(BlockId, u32); 2] =
+        [block::PURE_DEEPSLATE, block::COBBLED_DEEPSLATE].map(|b| (b, bag_count(inv, &Item::Block(b))));
     for mode in plank_modes {
         for log in &log_choices {
             for &stone in stone_modes {
                 // The planks each OAK_PLANKS cell takes, in row-major order.
                 let mut taken = stock.clone();
                 let mut stones = stone_stock;
+                let mut deepslates = deepslate_stock;
                 let mut grid = *example;
                 for cell in grid.iter_mut().flatten() {
                     match *cell {
@@ -690,11 +698,12 @@ pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot;
                             }
                         }
                         CraftSlot::Block(block::OAK_LOG) => *cell = *log,
-                        CraftSlot::Block(block::COBBLESTONE) => {
+                        CraftSlot::Block(base @ (block::COBBLESTONE | block::PURE_DEEPSLATE)) => {
+                            let stock = if base == block::COBBLESTONE { &mut stones } else { &mut deepslates };
                             *cell = match stone {
                                 Stone::Keep => *cell,
                                 Stone::All => CraftSlot::Block(block::COBBLED_DEEPSLATE),
-                                Stone::FromBag => match stones.iter_mut().find(|(_, n)| *n > 0) {
+                                Stone::FromBag => match stock.iter_mut().find(|(_, n)| *n > 0) {
                                     Some((b, n)) => {
                                         *n -= 1;
                                         CraftSlot::Block(*b)
