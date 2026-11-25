@@ -1994,6 +1994,34 @@ joiner any more (Spec 04 §4.2c).
   shows as a position correction). (A joiner's bow and slingshot shots are
   the server's since C3c-2: they reach the server's mobs.)
 
+### 6.4.2 Eating you can see (as built, pt1124; presentation only)
+
+The rules of eating are unchanged (§4 food, `health_sync::eat_click`, `item_actions::EAT_COOLDOWN_TICKS` = 16
+ticks): a right-click with food eats one item at once, and holding the button eats one more per 0.8 s. What is new is
+what the player sees for each bite (`eating.rs`, `eating_play.rs`; no wire, save or timing change).
+
+- **State.** A per-local-player snapshot (`GameState.eating`): the food as it was when the bite was taken (the slot may
+  already be empty or hold the next item), the hand, the hotbar slot it came from, and its age. Started by every
+  bite: standalone, a host's own seats and a joiner (on the request, so it feels immediate; the food still goes only
+  on the server's answer). It runs 0.8 s of real time (the eat cooldown), advanced each frame, and ends early when
+  the main hand's hotbar slot changes, the player dies, or a screen opens (a modal panel, chat, the map).
+- **The bite.** Three bites land at 26%, 50% and 74% of the 0.8 s. The hand has come up to the mouth by 20% and
+  goes down again from 86%; after the last bite the next item of the stack, if any, shows full size.
+- **First person.** The arm and the food rise and come in toward the middle of the view (the fist from NDC (0.57,
+  -0.63) to about (0.17, -0.25)) with a small chew wobble and a kick at each bite. The food drawn is the snapshot,
+  not the slot. Each bite takes a bite-shaped notch out of the food's icon (Spec 03 §5.10 "Eating"); three bites
+  leave about a fifth of it. A food that is not drawn from an icon (a food block) shrinks by 22% of its size per
+  bite instead.
+- **Crumbs and sound.** Each bite throws 7 crumbs (`ParticleSystem::burst_crumbs`) from the mouth, each in the colour
+  of one of the texels that bite took off, falling under gravity, and plays one soft procedural munch
+  (`Sound::Munch`, no asset). Both follow the graphics particle setting and the master volume.
+- **Third person (F5).** The player's own avatar raises the eating arm to the mouth (about 1.75 rad, with the chew)
+  holding the same bitten food. Stew, soup and other bowl foods are materials with no bowl left over by the rules
+  (no bowl is returned on eating), so they are bitten like any food.
+- **Known gap (BRIDGE).** Other players do not see it: `PlayerState` carries no eating flag, and adding one is a wire
+  change (protocol bump). Their avatars keep showing the slot's current item. Trigger: the next owner-approved
+  protocol bump (an eating bit in the avatar flags).
+
 ### 6.5 Ranged Combat
 
 **Bow**:

@@ -1701,6 +1701,20 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   and bobbing like the cube, its foot as high), framed 0.5. A held sprite's mesh is centred on
   the hand; the pose (`HoldPose::Sprite`, §5.10) grips it by the foot in the fist so a torch's art clears the
   forearm instead of hiding its flame in it; a held cube stays centred on the hand.
+- **Eating (as built, pt1124; Spec 05 §6.4.2).** A food being eaten is drawn from its icon's texels minus the bitten
+  ones, so a bite is a real notch, not a scale: `eating::bitten_mask` takes three bites off the icon's opaque-texel
+  mask (28%, 27% and 25% of the ORIGINAL texels, each the texels nearest the opaque texel nearest an aim point on
+  the icon's top edge, which leaves a half-disc notch), and `item_model::sprite_quads_of` rebuilds the sprite with the
+  front and back as one quad per row-run of masked texels (the whole-icon quads of the stock sprite cannot be
+  masked). An icon with a clear background keeps its held sprite frame (0.45 wide, centred on the hand like the held sprite); an icon that
+  fills its tile, which the held item draws as a 0.3 cube, is drawn as a 0.3 square-by-0.3-deep block of texel
+  columns centred on the hand, so a bite can cut into it (its sides sample 1-texel strips of the icon rather than
+  the whole tile). Crumbs are `ParticleSystem::burst_crumbs`, the colours read from the removed texels of the stock
+  texture (`item_model::texel_colour`). First person the arm and item are moved together in view space
+  (`eating::view_offset`); third person the avatar's eating arm angle is `eating::avatar_arm_angle`
+  (`SkinRenderOpts.eating`), and a sprite food keeps `HoldPose::Sprite`'s grip measured on the whole
+  (unbitten) item, so it does not shift in the fist as bites come off. Worn armour and eating ride the same
+  avatar (`SkinRenderOpts` carries both). With no eat in progress every mesh is exactly what it was.
 - **The cutout bit.** `mesh::CUTOUT_FLAG` is bit 17 of `Vertex.tex_layer` (bit
   16 is the fast-leaf fill, §2.2; bits 20..23 an avatar's block light, §4.2;
   texture layers are < 512). Every sprite vertex sets it and nothing else does.

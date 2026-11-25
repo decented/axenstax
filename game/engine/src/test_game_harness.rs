@@ -237,6 +237,9 @@ mod tests {
     #[path = "avatar_shots.rs"]
     mod avatar_shots;
     #[cfg(not(target_arch = "wasm32"))]
+    #[path = "eating_shots.rs"]
+    mod eating_shots;
+    #[cfg(not(target_arch = "wasm32"))]
     #[path = "lantern_shots.rs"]
     mod lantern_shots;
     #[cfg(not(target_arch = "wasm32"))]
