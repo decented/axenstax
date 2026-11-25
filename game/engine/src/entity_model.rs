@@ -32,6 +32,11 @@ pub struct SkinRenderOpts {
     /// MUST match what `skin_hit::ray_hit_avatar` and `skin_grid` are given, or
     /// the crosshair lands beside the arm on a slim avatar.
     pub arm_model: crate::skin_uv::ArmModel,
+    /// The armour this avatar wears (`armour_model`): boxes over its parts, drawn
+    /// with the held-item mesh (the block-texture entity pipeline). Only a body
+    /// whose armour the caller knows has any: the local player's own, in third
+    /// person and in split-screen.
+    pub worn: crate::armour_model::WornArmour,
 }
 
 impl Default for SkinRenderOpts {
@@ -41,6 +46,7 @@ impl Default for SkinRenderOpts {
             edit_inflate: false,
             draw_overlay: true,
             arm_model: crate::skin_uv::ArmModel::Classic,
+            worn: crate::armour_model::NO_ARMOUR,
         }
     }
 }
@@ -1474,9 +1480,11 @@ pub fn self_avatar_vertices(
     fade: f32,
     registry: &crate::block::BlockRegistry,
     arm_model: crate::skin_uv::ArmModel,
+    // The local player's own armour (`PlayerSlot::worn_armour`), drawn on the body.
+    worn: crate::armour_model::WornArmour,
 ) -> (Vec<Vertex>, Vec<Vertex>) {
     if mode.is_third_person() {
-        build_player_avatar_vertices(
+        build_player_avatar_vertices_worn(
             ps,
             swing_progress,
             time_ticks,
@@ -1484,6 +1492,7 @@ pub fn self_avatar_vertices(
             fade,
             registry,
             arm_model,
+            worn,
         )
     } else {
         (Vec::new(), Vec::new())
@@ -1673,6 +1682,10 @@ pub fn build_player_avatar_vertices_travelling(
     // Each part's effective X rotation, as the part builder will apply it (the
     // override wins over the walk cycle). A held item rides its arm's entry.
     let mut part_angle = [0.0_f32; 6];
+    // The whole angle each part's skin is built with (the same value, plus the
+    // head's look pitch) and where it stands, for the armour over it.
+    let mut part_xrot = [0.0_f32; 6];
+    let mut part_origin = [Vec3::ZERO; 6];
     for (i, part) in parts.iter().enumerate() {
         let walk_swing = if ps.anim_state == 1 && part.animated {
             // Walk: alternating sinusoidal swing per part phase.
@@ -1713,6 +1726,9 @@ pub fn build_player_avatar_vertices_travelling(
         if let Some(slot) = part_angle.get_mut(i) {
             *slot = arm_override.unwrap_or(walk_swing);
         }
+        if let Some(slot) = part_xrot.get_mut(i) {
+            *slot = arm_override.unwrap_or(walk_swing) + if part.pitch_tracks_look { ps.pitch } else { 0.0 };
+        }
         // Limbs-apart displaces the part in MODEL space. The part builder applies
         // R_y(yaw) then translates by entity_pos, so the offset must be rotated
         // by the same yaw to stay a model-space displacement — otherwise the
@@ -1727,6 +1743,9 @@ pub fn build_player_avatar_vertices_travelling(
                 off[1],
                 off[0] * sin_y + off[2] * cos_y,
             );
+        if let Some(slot) = part_origin.get_mut(i) {
+            *slot = part_pos;
+        }
         // Base body layer (solid).
         build_skin_part_vertices(&mut skin_verts, part, &base_uv[i], 0.0, part_pos, yaw, pose, skin_layer, fade);
         // Overlay layer (hat/jacket/sleeve/leg2), inflated just outside the base.
@@ -1809,7 +1828,21 @@ pub fn build_player_avatar_vertices_travelling(
         held_verts.extend(item_verts);
     }
 
-    // ARMOUR HOOK: overlay armour-layer meshes here when armour rendering lands (design §3 non-goal).
+    // Worn armour: boxes over each part, through the same angle and yaw the part's
+    // skin was built with, into the entity (block-texture) mesh with the held items.
+    // They never fade, so a body that is dithering out (the camera pulled in close)
+    // takes its armour off rather than leave plates floating across the view.
+    //
+    // BRIDGE: only a body whose caller knows its armour wears any (`opts.worn`: the
+    // local player's own, third person and split-screen). A remote peer's armour is
+    // not on the avatar wire (`PlayerState` has no field for it and a field means a
+    // protocol bump), so peers draw bare; replace with their worn set when the wire
+    // carries it.
+    if fade >= WORN_ARMOUR_MIN_FADE && opts.worn.iter().any(Option::is_some) {
+        for (i, part) in parts.iter().enumerate().take(part_xrot.len()) {
+            crate::armour_model::push_worn_part(&mut held_verts, i, part, &opts.worn, part_xrot[i], yaw, part_origin[i]);
+        }
+    }
 
     (skin_verts, held_verts)
 }
@@ -1827,6 +1860,30 @@ pub fn build_player_avatar_vertices(
     registry: &crate::block::BlockRegistry,
     arm_model: crate::skin_uv::ArmModel,
 ) -> (Vec<Vertex>, Vec<Vertex>) {
+    build_player_avatar_vertices_worn(
+        ps,
+        swing_progress,
+        time_ticks,
+        skin_layer,
+        fade,
+        registry,
+        arm_model,
+        crate::armour_model::NO_ARMOUR,
+    )
+}
+
+/// [`build_player_avatar_vertices`] wearing `worn` (see [`SkinRenderOpts::worn`]).
+#[allow(clippy::too_many_arguments)]
+pub fn build_player_avatar_vertices_worn(
+    ps: &crate::protocol::PlayerState,
+    swing_progress: f32,
+    time_ticks: u32,
+    skin_layer: u32,
+    fade: f32,
+    registry: &crate::block::BlockRegistry,
+    arm_model: crate::skin_uv::ArmModel,
+    worn: crate::armour_model::WornArmour,
+) -> (Vec<Vertex>, Vec<Vertex>) {
     build_player_avatar_vertices_travelling(
         ps,
         swing_progress,
@@ -1834,10 +1891,15 @@ pub fn build_player_avatar_vertices(
         skin_layer,
         fade,
         registry,
-        SkinRenderOpts { arm_model, ..Default::default() },
+        SkinRenderOpts { arm_model, worn, ..Default::default() },
         observed_travel(ps, time_ticks),
     )
 }
+
+/// Below this fade alpha (the self-avatar dithers out as the camera pulls in) the
+/// worn armour is left off: it is drawn unfaded, so it would float where the body
+/// is nearly gone.
+const WORN_ARMOUR_MIN_FADE: f32 = 0.5;
 
 /// Build vertices for every dropped-item entity. Each item is drawn by the one
 /// item model (`item_model::item_look`): a small floating cube, or a flat
@@ -1885,7 +1947,36 @@ fn push_item_drop(
             push_item_drop_sprite(verts, layer, pos, anim_time, light)
         }
         crate::item_model::ItemLook::Lantern => push_item_drop_lantern(verts, registry, pos, anim_time, light),
+        crate::item_model::ItemLook::Armour { slot, material } => {
+            push_item_drop_armour(verts, slot, material, pos, anim_time, light)
+        }
     }
+}
+
+/// Emit one dropped armour piece: its small model (`armour_model::drop_mesh`, foot
+/// at the origin) bobbing and spinning like the drop cube, its foot as high above
+/// the ground as the cube's.
+fn push_item_drop_armour(
+    verts: &mut Vec<Vertex>,
+    slot: crate::armour::ArmourSlot,
+    material: crate::armour::ArmourMaterial,
+    pos: Vec3,
+    anim_time: f32,
+    light: (f32, f32),
+) {
+    let verts_start = verts.len();
+    let bob = (anim_time * 2.0).sin() * 0.06;
+    let yaw = anim_time * 0.9;
+    // The drop cube's foot is 0.08 up (centre 0.18, half size 0.1).
+    let foot = pos + Vec3::new(0.0, 0.08 + bob, 0.0);
+    let (sin_y, cos_y) = yaw.sin_cos();
+    let spin = |p: Vec3| Vec3::new(p.x * cos_y - p.z * sin_y, p.y, p.x * sin_y + p.z * cos_y);
+    for mut v in crate::armour_model::drop_mesh(slot, material) {
+        v.position = (spin(Vec3::from(v.position)) + foot).to_array();
+        v.normal = spin(Vec3::from(v.normal)).to_array();
+        verts.push(v);
+    }
+    apply_light_channels(&mut verts[verts_start..], light);
 }
 
 /// Emit one dropped hand lantern: its small model (`lantern::drop_mesh`) bobbing and
@@ -3641,7 +3732,8 @@ mod tests {
             glam::Vec3::new(-10.0, 65.0, 0.0),
             |_| (1.0, 0.0),
         );
-        assert_eq!(verts.len(), 2 * 36, "tool + armour each render one drop cube");
+        let boots = crate::armour_model::drop_mesh(crate::armour::ArmourSlot::Boots, crate::armour::ArmourMaterial::Diamond);
+        assert_eq!(verts.len(), 36 + boots.len(), "a tool is one drop cube and armour its own small model");
     }
 
     #[test]
@@ -4306,13 +4398,13 @@ mod tests {
         let ps = avatar_state(item_kind::EMPTY, 0, 0);
 
         // First-person: no self-avatar body (the first-person hand draws instead).
-        let (skin_fp, held_fp) = self_avatar_vertices(CameraMode::FirstPerson, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+        let (skin_fp, held_fp) = self_avatar_vertices(CameraMode::FirstPerson, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
         assert!(skin_fp.is_empty(), "first-person draws no self-avatar body");
         assert!(held_fp.is_empty(), "first-person self-avatar carries no held mesh");
 
         // Third-person: the full body mesh (same 432 verts a remote peer draws).
         for mode in [CameraMode::OverShoulder, CameraMode::OrbitBehind] {
-            let (skin, _held) = self_avatar_vertices(mode, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+            let (skin, _held) = self_avatar_vertices(mode, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
             assert_eq!(skin.len(), 432, "third-person draws the player's own body ({mode:?})");
         }
     }
@@ -4324,7 +4416,7 @@ mod tests {
         let reg = crate::block::BlockRegistry::new();
         // Holding a tool → the held sub-mesh appears in third-person (.1), like a remote.
         let ps = avatar_state(item_kind::TOOL, 2, 0);
-        let (_skin, held) = self_avatar_vertices(CameraMode::OverShoulder, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+        let (_skin, held) = self_avatar_vertices(CameraMode::OverShoulder, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
         assert_eq!(held.len(), 36, "third-person self-avatar shows the held tool");
     }
 
@@ -4398,14 +4490,14 @@ mod tests {
         let reg = crate::block::BlockRegistry::new();
         let ps = avatar_state(item_kind::EMPTY, 0, 0);
         // Opaque (fade 1.0): every skin vert is full-bright.
-        let (opaque, _) = self_avatar_vertices(CameraMode::OrbitBehind, &ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+        let (opaque, _) = self_avatar_vertices(CameraMode::OrbitBehind, &ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
         assert!(!opaque.is_empty(), "third-person builds self-avatar geometry");
         assert!(
             opaque.iter().all(|v| (v.light - 1.0).abs() < 1e-6),
             "fade 1.0 → full-bright (light==1.0) on every skin vert"
         );
         // Faded (0.5): every skin vert carries the fade alpha in its light channel.
-        let (faded, _) = self_avatar_vertices(CameraMode::OrbitBehind, &ps, 0.0, 0, 0, 0.5, &reg, crate::skin_uv::ArmModel::Classic);
+        let (faded, _) = self_avatar_vertices(CameraMode::OrbitBehind, &ps, 0.0, 0, 0, 0.5, &reg, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
         assert!(!faded.is_empty());
         assert!(
             faded.iter().all(|v| (v.light - 0.5).abs() < 1e-6),
@@ -4419,7 +4511,7 @@ mod tests {
         use crate::protocol::item_kind;
         let reg = crate::block::BlockRegistry::new();
         let ps = avatar_state(item_kind::EMPTY, 0, 0);
-        let (v, _) = self_avatar_vertices(CameraMode::FirstPerson, &ps, 0.0, 0, 0, 0.3, &reg, crate::skin_uv::ArmModel::Classic);
+        let (v, _) = self_avatar_vertices(CameraMode::FirstPerson, &ps, 0.0, 0, 0, 0.3, &reg, crate::skin_uv::ArmModel::Classic, crate::armour_model::NO_ARMOUR);
         assert!(v.is_empty(), "first-person draws no self-avatar, faded or not");
     }
 
@@ -5284,5 +5376,107 @@ mod drop_look_tests {
         // Its foot is as high above the ground as the drop cube's foot (0.08 up at rest).
         let foot = lantern.iter().map(|v| v.position[1]).fold(f32::MAX, f32::min) - 10.4;
         assert!((foot - 0.08).abs() < 0.03, "it sits where the cube sits, foot {foot}");
+    }
+}
+
+#[cfg(test)]
+mod worn_armour_tests {
+    use super::*;
+    use crate::armour::ArmourMaterial;
+    use crate::armour_model::{WornArmour, NO_ARMOUR};
+    use crate::skin_uv::ArmModel;
+
+    /// A player at the origin facing so the builder emits MODEL space (the
+    /// workshop mannequin's trick): `yaw` -pi/2.
+    fn ps(anim_state: u8, pitch: f32) -> crate::protocol::PlayerState {
+        crate::protocol::PlayerState {
+            player_index: 0, x: 0.0, y: 0.0, z: 0.0, yaw: -std::f32::consts::FRAC_PI_2, pitch, health: 20.0,
+            held_kind: 0, held_id: 0, anim_state, flags: 0, skin_key: 0,
+            held_tool: crate::protocol::HeldWire::NO_TOOL, off_kind: 0, off_id: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
+        }
+    }
+
+    fn build(ps: &crate::protocol::PlayerState, ticks: u32, fade: f32, arm: ArmModel, worn: WornArmour) -> (Vec<Vertex>, Vec<Vertex>) {
+        let registry = crate::block::BlockRegistry::new();
+        build_player_avatar_vertices_with(ps, 0.0, ticks, 0, fade, &registry, SkinRenderOpts { arm_model: arm, worn, ..Default::default() })
+    }
+
+    fn bounds(v: &[Vertex]) -> (Vec3, Vec3) {
+        v.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(lo, hi), v| {
+            (lo.min(Vec3::from(v.position)), hi.max(Vec3::from(v.position)))
+        })
+    }
+
+    #[test]
+    fn a_full_set_is_drawn_outside_the_clothes_overlay() {
+        let state = ps(0, 0.0);
+        for arm in [ArmModel::Classic, ArmModel::Slim] {
+            let (skin, bare) = build(&state, 0, 1.0, arm, NO_ARMOUR);
+            assert!(bare.is_empty(), "no armour, no held item: nothing in the entity mesh");
+            let (_, plated) = build(&state, 0, 1.0, arm, [Some(ArmourMaterial::Diamond); 4]);
+            assert!(!plated.is_empty(), "{arm:?}: a worn set is drawn");
+            let (skin_lo, skin_hi) = bounds(&skin);
+            let (lo, hi) = bounds(&plated);
+            assert!(hi.y > skin_hi.y + 0.01, "{arm:?}: the helmet is over the hat");
+            assert!(hi.x > skin_hi.x + 0.01 && lo.x < skin_lo.x - 0.01, "{arm:?}: the shoulder caps are outside the sleeves");
+            assert!(hi.z > skin_hi.z + 0.01 && lo.z < skin_lo.z - 0.01, "{arm:?}: the plates stand off front and back");
+        }
+    }
+
+    #[test]
+    fn worn_armour_follows_the_limb_it_covers() {
+        // Walking: the legs turn about their hips by the same angle their skin does,
+        // so boots turn with them; the head does not, so a helmet stays put.
+        let boots: WornArmour = [None, None, None, Some(ArmourMaterial::Iron)];
+        let helmet: WornArmour = [Some(ArmourMaterial::Iron), None, None, None];
+        let (idle, walk, ticks) = (ps(0, 0.0), ps(1, 0.0), 13);
+        let (_, rest) = build(&idle, ticks, 1.0, ArmModel::Classic, boots);
+        let (_, stride) = build(&walk, ticks, 1.0, ArmModel::Classic, boots);
+        assert_eq!(rest.len(), stride.len());
+        let parts = player_model_for(ArmModel::Classic);
+        let t = ticks as f32 / 20.0;
+        let angle = |i: usize| (t * 2.5 + parts[i].phase * std::f32::consts::TAU).sin() * 0.4;
+        let half = rest.len() / 2;
+        for (n, (a, b)) in rest.iter().zip(&stride).enumerate() {
+            let leg = if n < half { 4 } else { 5 };
+            let want = rot_x_about(Vec3::from(a.position), parts[leg].pivot, angle(leg));
+            assert!((want - Vec3::from(b.position)).length() < 1e-4, "vertex {n} of leg {leg}");
+        }
+        assert!(angle(4).abs() > 0.2 && angle(5).abs() > 0.2, "the test walks far enough to see it");
+        let (_, head_rest) = build(&idle, ticks, 1.0, ArmModel::Classic, helmet);
+        let (_, head_walk) = build(&walk, ticks, 1.0, ArmModel::Classic, helmet);
+        assert!(head_rest.iter().zip(&head_walk).all(|(a, b)| a.position == b.position), "a helmet does not swing");
+    }
+
+    #[test]
+    fn a_helmet_nods_with_the_head() {
+        let helmet: WornArmour = [Some(ArmourMaterial::Iron), None, None, None];
+        let (_, level) = build(&ps(0, 0.0), 0, 1.0, ArmModel::Classic, helmet);
+        let (_, nodding) = build(&ps(0, 0.5), 0, 1.0, ArmModel::Classic, helmet);
+        let pivot = player_model_for(ArmModel::Classic)[0].pivot;
+        for (a, b) in level.iter().zip(&nodding) {
+            let want = rot_x_about(Vec3::from(a.position), pivot, 0.5);
+            assert!((want - Vec3::from(b.position)).length() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn a_body_that_is_fading_out_takes_its_armour_off() {
+        let set = [Some(ArmourMaterial::Iron); 4];
+        assert!(build(&ps(0, 0.0), 0, 0.3, ArmModel::Classic, set).1.is_empty());
+        assert!(!build(&ps(0, 0.0), 0, 1.0, ArmModel::Classic, set).1.is_empty());
+    }
+
+    #[test]
+    fn the_third_person_self_avatar_wears_its_own_set_and_first_person_shows_none() {
+        let registry = crate::block::BlockRegistry::new();
+        let set = [Some(ArmourMaterial::Chainmail); 4];
+        let state = ps(0, 0.0);
+        let third = self_avatar_vertices(crate::camera::CameraMode::OrbitBehind, &state, 0.0, 0, 0, 1.0, &registry, ArmModel::Classic, set);
+        assert!(!third.1.is_empty());
+        let first = self_avatar_vertices(crate::camera::CameraMode::FirstPerson, &state, 0.0, 0, 0, 1.0, &registry, ArmModel::Classic, set);
+        assert!(first.0.is_empty() && first.1.is_empty());
+        let bare = self_avatar_vertices(crate::camera::CameraMode::OrbitBehind, &state, 0.0, 0, 0, 1.0, &registry, ArmModel::Classic, NO_ARMOUR);
+        assert!(bare.1.is_empty(), "a bare body wears nothing");
     }
 }
