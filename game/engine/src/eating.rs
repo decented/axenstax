@@ -74,8 +74,19 @@ const COME_IN_HALF_WIDTH: f32 = 0.40;
 const KICK_HALF_HEIGHT: f32 = 0.05;
 /// The third-person arm's raise at the mouth (radians about the shoulder, the
 /// forward-positive angle `shield_pose::GUARD_ARM_ANGLE` uses) and the wobble.
-pub const AVATAR_ARM_ANGLE: f32 = 1.75;
+pub const AVATAR_ARM_ANGLE: f32 = 1.6;
 const AVATAR_CHEW_ANGLE: f32 = 0.10;
+/// How far the raised arm swings in toward the middle of the body, about the
+/// vertical axis through its shoulder (radians, at full lift): with the raise it
+/// takes the fist from beside the shoulder (0.4 out) to in front of the face, where
+/// a straight 0.7-block arm can reach.
+pub const AVATAR_ARM_YAW: f32 = 0.55;
+/// Where a bite is in the third-person body's model space (feet at the origin,
+/// facing -z): in front of the face, at the food's bitten top. The crumbs start
+/// here ([`mouth`]) and the fist is placed so the food stands in front of it
+/// ([`AVATAR_ARM_ANGLE`], [`AVATAR_ARM_YAW`]).
+pub const AVATAR_BITE_HEIGHT: f32 = 1.55;
+pub const AVATAR_BITE_FORWARD: f32 = 0.55;
 
 /// One eat in progress for one local player.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,6 +97,10 @@ pub struct Eating {
     pub hand: Hand,
     /// The hotbar slot it came from (the main hand's: a change of slot ends it).
     pub hotbar_slot: usize,
+    /// A joiner's eat: the sequence number of the request it asked the server
+    /// for, so the server's refusal of THAT request ends the picture
+    /// ([`cancel_refused`]). `None` for an eat that was taken here and then.
+    pub request: Option<u32>,
     age: f32,
     landed: usize,
     /// Test hook: a paused eat does not age (the GPU harness holds a frame).
@@ -120,7 +135,12 @@ impl Eating {
     /// A bite has just been taken from `held` in `hand` (hotbar slot
     /// `hotbar_slot` for the main hand).
     pub fn start(held: HeldItem, hand: Hand, hotbar_slot: usize) -> Self {
-        Eating { held, hand, hotbar_slot, age: 0.0, landed: 0, paused: false }
+        Eating { held, hand, hotbar_slot, request: None, age: 0.0, landed: 0, paused: false }
+    }
+
+    /// This eat is a joiner's, asked for as request `seq`.
+    pub fn asked_as(self, seq: u32) -> Self {
+        Eating { request: Some(seq), ..self }
     }
 
     /// An eat `progress` (0..1) of the way through, with the bites that have
@@ -128,7 +148,7 @@ impl Eating {
     #[cfg(test)]
     pub fn at_progress(held: HeldItem, hand: Hand, hotbar_slot: usize, progress: f32) -> Self {
         let age = progress.clamp(0.0, 1.0) * DURATION_SECS;
-        Eating { held, hand, hotbar_slot, age, landed: bites_landed(progress), paused: true }
+        Eating { held, hand, hotbar_slot, request: None, age, landed: bites_landed(progress), paused: true }
     }
 
     /// How far through the 0.8 s the eat is, 0..=1.
@@ -181,6 +201,34 @@ impl Eating {
 fn bites_landed(progress: f32) -> usize {
     BITE_AT.iter().filter(|at| progress >= **at).count()
 }
+
+/// The server refused (or passed by) request `seq`, a joiner's eat: end player
+/// `pidx`'s picture of it, if that is the eat it asked for. An eat asked for since
+/// (a later request) is left alone.
+pub fn cancel_refused(eats: &mut std::collections::HashMap<usize, Eating>, pidx: usize, seq: u32) {
+    if eats.get(&pidx).is_some_and(|e| e.request == Some(seq)) {
+        eats.remove(&pidx);
+    }
+}
+
+/// Seat `left` has gone and the seats after it shifted down by one: its eat goes
+/// with it and the others follow their seats (the eats are keyed by seat index, so
+/// an eat must never pass to whoever slides into the index).
+pub fn reindex_after_seat_left(eats: &mut std::collections::HashMap<usize, Eating>, left: usize) {
+    let kept: Vec<(usize, Eating)> = eats.drain().filter(|(i, _)| *i != left).map(|(i, e)| (if i > left { i - 1 } else { i }, e)).collect();
+    eats.extend(kept);
+}
+
+/// The two time steps of a rendered frame, from the real time since the last one:
+/// `(particles, eating)`. The particle physics step is clamped (a hitch must not
+/// teleport crumbs); the eat is not, so it takes the time it takes, not twice as
+/// long at 5 frames a second ([`Eating::advance`] caps itself at the end of the eat).
+pub fn frame_steps(elapsed: f32) -> (f32, f32) {
+    (elapsed.clamp(0.0, PARTICLE_STEP_MAX), elapsed.max(0.0))
+}
+
+/// The most one frame ages the particles, in seconds.
+pub const PARTICLE_STEP_MAX: f32 = 0.1;
 
 /// Whether an eat ends now, before its time: the hand was switched (the hotbar
 /// slot of a main-hand eat changed), the player died, or a screen opened.
@@ -257,6 +305,51 @@ fn icon_layer(item: ItemRef) -> Option<u32> {
     }
 }
 
+thread_local! {
+    /// The bitten meshes already built, by icon layer and bites taken. A bite stage
+    /// lasts a quarter of a second or more and every frame of it used to enumerate
+    /// and sort the icon's texels, cut the mask and triangulate it again.
+    static BITTEN_MESHES: std::cell::RefCell<std::collections::HashMap<(u32, usize), Vec<Vertex>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// The whole food's vertical extent in the fist (the grip is measured on the
+    /// whole item), by icon layer and hand.
+    static GRIP_BOUNDS: std::cell::RefCell<std::collections::HashMap<(u32, i8), (f32, f32)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Test hook: how many bitten meshes were actually built on this thread.
+    #[cfg(test)]
+    static MESH_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The bitten mesh of icon `layer` after `bites` (1..=[`BITES`]), built once.
+fn bitten_icon_mesh(layer: u32, bites: usize) -> Vec<Vertex> {
+    BITTEN_MESHES.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry((layer, bites))
+            .or_insert_with(|| {
+                #[cfg(test)]
+                MESH_BUILDS.with(|n| n.set(n.get() + 1));
+                build_bitten_icon_mesh(layer, bites)
+            })
+            .clone()
+    })
+}
+
+/// The vertical extent `(lowest, highest)` of the WHOLE `held` in the hand `side`
+/// (what the sprite grip is measured on, so a bitten food stays where it was in the
+/// fist as its bites come off): cached for a food drawn from an icon.
+pub fn grip_bounds(held: HeldItem, registry: &BlockRegistry, side: HandSide) -> (f32, f32) {
+    let measure = || {
+        item_model::held_item_mesh(held, registry, side)
+            .iter()
+            .fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[1]), a.1.max(v.position[1])))
+    };
+    match icon_layer(held.item) {
+        Some(layer) => GRIP_BOUNDS.with(|cache| *cache.borrow_mut().entry((layer, side.sign() as i8)).or_insert_with(measure)),
+        None => measure(),
+    }
+}
+
 /// The local-space mesh of `held` in the hand `side` after `bites` bites: the
 /// same frame and placement as [`item_model::held_item_mesh`], which it is
 /// exactly when `bites` is 0.
@@ -279,6 +372,11 @@ pub fn eaten_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide,
         }
         return verts;
     };
+    bitten_icon_mesh(layer, bites)
+}
+
+/// [`eaten_item_mesh`] of an icon food, built from the texels.
+fn build_bitten_icon_mesh(layer: u32, bites: usize) -> Vec<Vertex> {
     let mask = bitten_mask(item_model::layer_mask(layer), bites);
     if item_model::icon_has_clear_background(layer) {
         let quads = item_model::sprite_quads_of(mask, item_model::HELD_MATERIAL_WIDTH, item_model::SPRITE_DEPTH, false);
@@ -328,16 +426,23 @@ pub fn avatar_arm_angle(look: EatLook, rest: f32) -> f32 {
     rest + (AVATAR_ARM_ANGLE - rest) * look.lift + AVATAR_CHEW_ANGLE * look.chew
 }
 
+/// The third-person arm's swing in toward the middle about the vertical axis
+/// through its shoulder, for the hand `side` (positive turns the right arm in,
+/// negative the left): zero at rest, [`AVATAR_ARM_YAW`] at the mouth.
+pub fn avatar_arm_yaw(look: EatLook, side: HandSide) -> f32 {
+    side.sign() * AVATAR_ARM_YAW * look.lift
+}
+
 /// Where a bite's crumbs start, for a body standing at `feet` looking along
 /// `forward` with its eye at `eye`: in first person just in front of and below
-/// the eye (the mouth is below the view), in third person at the avatar's own
-/// mouth.
+/// the eye (the mouth is below the view), in third person where the avatar holds
+/// the food up ([`AVATAR_BITE_HEIGHT`], [`AVATAR_BITE_FORWARD`]).
 pub fn mouth(first_person: bool, feet: Vec3, eye: Vec3, forward: Vec3) -> Vec3 {
     if first_person {
         eye + forward * 0.45 + Vec3::new(0.0, -0.32, 0.0)
     } else {
         let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-        feet + Vec3::new(0.0, 1.45, 0.0) + flat * 0.28
+        feet + Vec3::new(0.0, AVATAR_BITE_HEIGHT, 0.0) + flat * AVATAR_BITE_FORWARD
     }
 }
 
@@ -601,7 +706,94 @@ mod tests {
         let fp = mouth(true, feet, eye, fwd);
         assert!(fp.z < eye.z && fp.y < eye.y);
         let tp = mouth(false, feet, eye, fwd);
-        assert!((tp.y - 65.45).abs() < 0.01 && tp.z < feet.z);
+        assert!((tp.y - (64.0 + AVATAR_BITE_HEIGHT)).abs() < 0.01 && (feet.z - tp.z - AVATAR_BITE_FORWARD).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_refused_eat_ends_only_the_eat_that_asked() {
+        let mut eats = std::collections::HashMap::new();
+        eats.insert(0, Eating::start(beef(), Hand::Main, 0).asked_as(7));
+        eats.insert(1, Eating::start(beef(), Hand::Main, 0));
+        cancel_refused(&mut eats, 0, 6);
+        assert!(eats.contains_key(&0), "another request's refusal leaves it");
+        cancel_refused(&mut eats, 1, 7);
+        assert!(eats.contains_key(&1), "an eat taken here has no request to refuse");
+        cancel_refused(&mut eats, 0, 7);
+        assert!(!eats.contains_key(&0), "its own request's refusal ends it");
+        assert!(eats.contains_key(&1));
+    }
+
+    #[test]
+    fn a_seat_leaving_takes_its_eat_and_the_others_follow_their_seats() {
+        let eat = |slot| Eating::start(beef(), Hand::Main, slot);
+        let mut eats = std::collections::HashMap::new();
+        eats.insert(0, eat(3));
+        eats.insert(1, eat(3));
+        eats.insert(3, eat(5));
+        reindex_after_seat_left(&mut eats, 0);
+        // Player 1's slot is player 0 now and keeps ITS food; player 0's is gone.
+        assert_eq!(eats.len(), 2);
+        assert_eq!(eats[&0].hotbar_slot, 3);
+        assert_eq!(eats[&2].hotbar_slot, 5);
+        assert!(!eats.contains_key(&1) && !eats.contains_key(&3));
+        // The last seat leaving disturbs no one.
+        let mut eats = std::collections::HashMap::from([(0, eat(1)), (1, eat(2))]);
+        reindex_after_seat_left(&mut eats, 1);
+        assert_eq!(eats.len(), 1);
+        assert_eq!(eats[&0].hotbar_slot, 1);
+    }
+
+    #[test]
+    fn a_slow_frame_does_not_stretch_the_eat() {
+        // At 5 frames a second the particle step is clamped to 0.1 s and the eat's is not.
+        let (particles, eating) = frame_steps(0.2);
+        assert_eq!((particles, eating), (PARTICLE_STEP_MAX, 0.2));
+        assert_eq!(frame_steps(0.016), (0.016, 0.016));
+        assert_eq!(frame_steps(-1.0), (0.0, 0.0));
+        let mut e = Eating::start(beef(), Hand::Main, 0);
+        let mut secs = 0.0;
+        while !e.finished() {
+            e.advance(frame_steps(0.2).1);
+            secs += 0.2;
+        }
+        assert!(secs <= DURATION_SECS + 0.2 + 1e-4, "an 0.8 s eat took {secs} s at 5 fps");
+    }
+
+    #[test]
+    fn the_arm_swings_in_to_the_mouth_and_the_hands_mirror() {
+        let up = Eating::at_progress(beef(), Hand::Main, 0, 0.5).look();
+        let down = Eating::start(beef(), Hand::Main, 0).look();
+        let (r, l) = (avatar_arm_yaw(up, HandSide::Right), avatar_arm_yaw(up, HandSide::Left));
+        assert!((r - AVATAR_ARM_YAW).abs() < 0.01 && (r + l).abs() < 1e-6, "{r} {l}");
+        assert_eq!(avatar_arm_yaw(down, HandSide::Right), 0.0);
+    }
+
+    fn same_mesh(a: &[Vertex], b: &[Vertex]) -> bool {
+        bytemuck::cast_slice::<Vertex, u8>(a) == bytemuck::cast_slice::<Vertex, u8>(b)
+    }
+
+    #[test]
+    fn a_bitten_mesh_is_built_once_per_food_and_bite_stage() {
+        let reg = BlockRegistry::new();
+        let builds = || MESH_BUILDS.with(std::cell::Cell::get);
+        let layer = crate::entity_model::material_texture(MaterialId::CookedBeef);
+        let first = eaten_item_mesh(beef(), &reg, HandSide::Right, 2);
+        assert_eq!(builds(), 1);
+        for _ in 0..50 {
+            assert!(same_mesh(&eaten_item_mesh(beef(), &reg, HandSide::Right, 2), &first), "the same mesh, every frame");
+        }
+        assert_eq!(builds(), 1, "fifty more frames at the same bite built nothing");
+        assert!(same_mesh(&first, &build_bitten_icon_mesh(layer, 2)), "and it is the mesh the texels give");
+        eaten_item_mesh(beef(), &reg, HandSide::Right, 3);
+        assert_eq!(builds(), 2, "the next bite is a new mesh");
+        // The left hand's food is the same mesh, not another build.
+        eaten_item_mesh(beef(), &reg, HandSide::Left, 3);
+        assert_eq!(builds(), 2);
+        // The grip is measured once per food and hand and is the whole item's.
+        let whole = item_model::held_item_mesh(beef(), &reg, HandSide::Right);
+        let want = whole.iter().fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[1]), a.1.max(v.position[1])));
+        assert_eq!(grip_bounds(beef(), &reg, HandSide::Right), want);
+        assert_eq!(grip_bounds(beef(), &reg, HandSide::Right), want);
     }
 
     #[test]

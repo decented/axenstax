@@ -134,6 +134,7 @@ pub fn eval_anim_set(clip: AnimClip, t: f32, part: &SkeletonPart, is_swing_part:
             head_pitch: 0.0,
             arm_override: None,
             scale: [1.0 + k, 1.0 - k, 1.0 + k],
+            arm_yaw: 0.0,
         };
     }
 

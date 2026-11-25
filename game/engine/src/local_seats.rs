@@ -5,6 +5,15 @@
 //! (`HostedServer::sync_local_slots` marks a departed seat's slot out of the
 //! world), so nothing here touches the server: the next tick re-syncs it.
 
+/// The arm shape the body of seat `seat` is drawn with: only seat 0 has a wardrobe
+/// (`GameState::worn_arm_model`), every other local body is Classic. One answer for
+/// the seat's own third-person body, its first-person hand and the copy of it drawn
+/// in another seat's viewport, so two viewports never fit its armour to different
+/// arm widths.
+pub(crate) fn seat_arm_model(seat: usize, wardrobe: crate::skin_uv::ArmModel) -> crate::skin_uv::ArmModel {
+    if seat == 0 { wardrobe } else { crate::skin_uv::ArmModel::Classic }
+}
+
 impl crate::GameState {
     /// The pause menu's "Player N leaves": the seat gets off whatever it
     /// rides (its mount is free again, and nothing keeps steering it), its
@@ -18,6 +27,8 @@ impl crate::GameState {
             self.dismount(leave_idx, mount);
         }
         self.players.remove(leave_idx);
+        // The seats after it shift down: an eat belongs to its seat, not its index.
+        crate::eating::reindex_after_seat_left(&mut self.eating, leave_idx);
         if leave_idx < self.renderer.player_gpu.len() {
             self.renderer.player_gpu.remove(leave_idx);
         }
@@ -70,5 +81,22 @@ impl crate::GameState {
         self.renderer.player_gpu.push(gpu);
         self.relayout_seats();
         idx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seat_arm_model;
+    use crate::skin_uv::ArmModel;
+
+    #[test]
+    fn a_seats_body_has_the_same_arms_in_every_viewport() {
+        // Seat 0 wears its wardrobe's arms wherever it is drawn: its own F5 body,
+        // its hand, and the copy another seat's viewport shows.
+        assert_eq!(seat_arm_model(0, ArmModel::Slim), ArmModel::Slim);
+        assert_eq!(seat_arm_model(0, ArmModel::Classic), ArmModel::Classic);
+        // The others have no wardrobe of their own: never seat 0's arms.
+        assert_eq!(seat_arm_model(1, ArmModel::Slim), ArmModel::Classic);
+        assert_eq!(seat_arm_model(3, ArmModel::Slim), ArmModel::Classic);
     }
 }
