@@ -45,20 +45,60 @@ pub const MAX_WAIT_TICKS: u64 = 300;
 
 /// An in-progress cast. `hooked` flips true once `catch_at_tick` is reached;
 /// the player then right-clicks again to land the catch.
+///
+/// `target` and `cast_tick` are drawing state only (`fishing_view`): where the
+/// bobber floats (the water the cast found, [`cast_target`]) and the client tick
+/// the line went out. No rule reads them. A joiner's client computes its own
+/// target from its own world; with no water in sight there it has none and
+/// draws no bobber, while the server's rules are unchanged.
 #[derive(Clone, Copy, Debug)]
 pub struct FishingLine {
     pub catch_at_tick: u64,
     pub hooked: bool,
+    pub cast_tick: u64,
+    pub target: Option<Vec3>,
+}
+
+impl FishingLine {
+    /// A line cast at client tick `now` that bites at `catch_at_tick`.
+    pub fn cast(now: u64, catch_at_tick: u64, target: Option<Vec3>) -> Self {
+        FishingLine { catch_at_tick, hooked: false, cast_tick: now, target }
+    }
+}
+
+/// How far above the water cell's floor the bobber's surface is: the top of a
+/// full (source) cell, as the mesher draws it (`water::water_surface_height`).
+fn water_top(level: u8) -> f32 {
+    crate::water::water_surface_height(level)
+}
+
+/// The most cells of water above the first one the cast finds that it climbs to
+/// reach the surface.
+const SURFACE_CLIMB: i32 = 8;
+
+/// Where the cast from `eye` along `dir` (unit) lands: the first water along the
+/// ray within [`CAST_STEPS`] steps, snapped to the top of that column of water
+/// (the surface the bobber floats on), or `None` when there is none. `is_water`
+/// reads the caster's world: single-player's own, or the server's for a joiner's
+/// `Cast`.
+pub fn cast_target(eye: Vec3, dir: Vec3, is_water: impl Fn(i32, i32, i32) -> bool) -> Option<Vec3> {
+    let (p, cell) = (1..=CAST_STEPS).find_map(|step| {
+        let p = eye + dir * (step as f32 * CAST_STEP);
+        let cell = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        is_water(cell.0, cell.1, cell.2).then_some((p, cell))
+    })?;
+    let mut top = cell.1;
+    while top - cell.1 < SURFACE_CLIMB && is_water(cell.0, top + 1, cell.2) {
+        top += 1;
+    }
+    Some(Vec3::new(p.x, top as f32 + water_top(0), p.z))
 }
 
 /// Is there water along the cast from `eye` along `dir` (unit), within
-/// [`CAST_STEPS`] steps? `is_water` reads the caster's world: single-player's
-/// own, or the server's for a joiner's `Cast`.
+/// [`CAST_STEPS`] steps? The rule every seat shares ([`cast_target`] is its
+/// answer with the place).
 pub fn finds_water(eye: Vec3, dir: Vec3, is_water: impl Fn(i32, i32, i32) -> bool) -> bool {
-    (1..=CAST_STEPS).any(|step| {
-        let p = eye + dir * (step as f32 * CAST_STEP);
-        is_water(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
-    })
+    cast_target(eye, dir, is_water).is_some()
 }
 
 /// C3c-2 — has a line cast to bite at server tick `bite_tick` hooked by
@@ -160,6 +200,47 @@ mod tests {
         assert!(finds_water(eye, dir, pond(12)), "the last step reaches x = 12.5");
         assert!(!finds_water(eye, dir, pond(13)));
         assert!(!finds_water(eye, -dir, pond(5)), "behind the caster");
+    }
+
+    /// A pond of full water cells `depth` deep, its top layer at y = 70, between
+    /// x = 5 and x = 9 (z = 0 only).
+    fn pond_column(depth: i32) -> impl Fn(i32, i32, i32) -> bool {
+        move |x, y, z| (5..=9).contains(&x) && z == 0 && (71 - depth..=70).contains(&y)
+    }
+
+    #[test]
+    fn the_cast_lands_on_the_surface_of_the_first_water_it_meets() {
+        let eye = Vec3::new(0.5, 72.5, 0.5);
+        let dir = Vec3::new(1.0, -0.25, 0.0).normalize();
+        let t = cast_target(eye, dir, pond_column(3)).expect("water ahead");
+        assert!((t.y - (70.0 + crate::water::water_surface_height(0))).abs() < 1e-5, "the top of the top layer: {t:?}");
+        assert!((5.0..9.0).contains(&t.x), "over the pond: {t:?}");
+        assert_eq!(t.z.floor(), 0.0);
+        // A ray that first meets a deep cell (low pitch from a high bank) still floats on the top.
+        let low = cast_target(Vec3::new(0.5, 70.5, 0.5), Vec3::X, |x, y, z| (5..=9).contains(&x) && z == 0 && (60..=70).contains(&y)).unwrap();
+        assert!((low.y - (70.0 + crate::water::water_surface_height(0))).abs() < 1e-5, "{low:?}");
+        let climbed = cast_target(Vec3::new(0.5, 66.5, 0.5), Vec3::X, |x, y, z| (5..=9).contains(&x) && z == 0 && (60..=70).contains(&y)).unwrap();
+        assert!((climbed.y - (70.0 + crate::water::water_surface_height(0))).abs() < 1e-5, "{climbed:?}");
+    }
+
+    #[test]
+    fn the_cast_target_is_there_exactly_when_the_cast_finds_water() {
+        let eye = Vec3::new(0.5, 70.5, 0.5);
+        for at in [3, 5, 12, 13, 20] {
+            for dir in [Vec3::X, -Vec3::X, Vec3::new(1.0, -0.1, 0.0).normalize(), Vec3::Y] {
+                let pond = move |x: i32, y: i32, z: i32| x == at && (68..=70).contains(&y) && z == 0;
+                assert_eq!(cast_target(eye, dir, pond).is_some(), finds_water(eye, dir, pond), "pond at {at}, look {dir:?}");
+            }
+        }
+        assert!(cast_target(eye, Vec3::X, |_, _, _| false).is_none());
+        assert!(cast_target(eye, Vec3::X, pond_column(1)).is_some(), "the pond is 5 blocks ahead");
+    }
+
+    #[test]
+    fn a_new_line_remembers_where_and_when_it_was_cast() {
+        let line = FishingLine::cast(40, 190, Some(Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!((line.cast_tick, line.catch_at_tick, line.hooked), (40, 190, false));
+        assert_eq!(line.target, Some(Vec3::new(1.0, 2.0, 3.0)));
     }
 
     #[test]

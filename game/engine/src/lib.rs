@@ -408,6 +408,7 @@ mod breeding;
 mod genetics;
 mod companion;
 mod fishing;
+mod fishing_view;
 mod hopper;
 mod piston;
 mod builder;

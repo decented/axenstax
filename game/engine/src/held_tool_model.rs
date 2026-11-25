@@ -56,7 +56,7 @@ pub struct Paint {
 
 impl Paint {
     /// The uv at the middle of the texel.
-    fn uv(self) -> [f32; 2] {
+    pub(crate) fn uv(self) -> [f32; 2] {
         [(self.texel.0 as f32 + 0.5) / TILE as f32, (self.texel.1 as f32 + 0.5) / TILE as f32]
     }
 }
@@ -103,6 +103,25 @@ fn grip() -> Paint {
 /// flint-and-steel are iron by recipe, the sword's guard is metal).
 fn metal() -> Paint {
     tier_paint(ToolMaterial::Iron)
+}
+
+/// The Fishing Rod's tilt about Z (degrees) and its length.
+const ROD_TILT_DEG: f32 = 9.0;
+const ROD_LEN: f32 = 0.66;
+
+/// The rod's tip (where its line hangs from) in the right-hand frame: the top end
+/// of the tilted shaft, a hair inside it.
+fn rod_tip_xy() -> (f32, f32) {
+    let (sin, cos) = ROD_TILT_DEG.to_radians().sin_cos();
+    (0.0 - 0.32 * sin, 0.02 + 0.32 * cos)
+}
+
+/// Where a Fishing Rod's tip is in the item's own frame (the grip at the origin)
+/// for the hand `side` the mesh is built for: the point the cast's line leaves
+/// the rod from (`fishing_view`). The same numbers as the model.
+pub fn rod_tip_local(side: HandSide) -> Vec3 {
+    let tip = rod_tip_xy();
+    Vec3::new(tip.0 * side.sign(), tip.1, 0.0)
 }
 
 /// One axis-aligned box, tilted about Z, before the hand's mirror.
@@ -169,7 +188,7 @@ fn shaft(len: f32, cy: f32) -> Part {
 
 /// The parts of `tool` in `material`, for the right hand (the caller mirrors the
 /// left). Exhaustive: see the module doc for the shield.
-fn parts(tool: ToolType, material: ToolMaterial) -> Vec<Part> {
+fn parts(tool: ToolType, material: ToolMaterial, line_out: bool) -> Vec<Part> {
     let head = tier_paint(material);
     let steel = metal();
     match tool {
@@ -219,22 +238,26 @@ fn parts(tool: ToolType, material: ToolMaterial) -> Vec<Part> {
             part(-0.03, 0.0, 0.015, 0.60, 0.015, 0.0, centre_paint(TEX_ITEM_STRING)),
         ],
         // A long, slightly leaning rod, a reel, and a line hanging from the
-        // tip with a small red float and a hook below it.
+        // tip with a small red float and a hook below it. With a line cast out
+        // (`line_out`) the rod is drawn bare: the line, float and hook are the
+        // cast's own (`fishing_view`), so they are not drawn twice.
         ToolType::FishingRod => {
-            let tilt: f32 = 9.0;
-            let (sin, cos) = tilt.to_radians().sin_cos();
-            // The rod's tip (half its length from its centre, along the tilt).
-            let tip = (0.0 - 0.32 * sin, 0.02 + 0.32 * cos);
+            let tip = rod_tip_xy();
             let line_len = 0.22;
             let line_cy = tip.1 - line_len / 2.0;
-            vec![
-                part(0.0, 0.02, 0.04, 0.66, 0.04, tilt, grip()),
-                part(0.0, -0.19, 0.075, 0.15, 0.075, tilt, Paint { layer: TEX_ITEM_LEATHER, texel: (8, 8) }),
+            let mut rod = vec![
+                part(0.0, 0.02, 0.04, ROD_LEN, 0.04, ROD_TILT_DEG, grip()),
+                part(0.0, -0.19, 0.075, 0.15, 0.075, ROD_TILT_DEG, Paint { layer: TEX_ITEM_LEATHER, texel: (8, 8) }),
                 part(0.065, -0.10, 0.075, 0.075, 0.075, 0.0, steel),
-                part(tip.0, line_cy, 0.022, line_len, 0.022, 0.0, centre_paint(TEX_ITEM_STRING)),
-                part(tip.0, tip.1 - 0.15, 0.05, 0.05, 0.05, 0.0, centre_paint(crate::entity_model::TEX_ITEM_RED_DYE)),
-                part(tip.0, tip.1 - line_len - 0.015, 0.03, 0.03, 0.03, 0.0, steel),
-            ]
+            ];
+            if !line_out {
+                rod.extend([
+                    part(tip.0, line_cy, 0.022, line_len, 0.022, 0.0, centre_paint(TEX_ITEM_STRING)),
+                    part(tip.0, tip.1 - 0.15, 0.05, 0.05, 0.05, 0.0, centre_paint(crate::entity_model::TEX_ITEM_RED_DYE)),
+                    part(tip.0, tip.1 - line_len - 0.015, 0.03, 0.03, 0.03, 0.0, steel),
+                ]);
+            }
+            rod
         }
         // A fork, a grip and the band between the prongs.
         ToolType::Slingshot => vec![
@@ -304,7 +327,14 @@ fn parts(tool: ToolType, material: ToolMaterial) -> Vec<Part> {
 /// The mesh of `tool` in `material` for the hand `side`: a triangle list, the grip
 /// at the origin (see the module doc).
 pub fn tool_model(tool: ToolType, material: ToolMaterial, side: HandSide) -> Vec<Vertex> {
-    let parts = parts(tool, material);
+    tool_model_with(tool, material, side, false)
+}
+
+/// [`tool_model`], with `line_out`: a Fishing Rod whose line is cast out is
+/// drawn without its line, float and hook (the cast draws them, `fishing_view`);
+/// every other tool ignores it.
+pub fn tool_model_with(tool: ToolType, material: ToolMaterial, side: HandSide, line_out: bool) -> Vec<Vertex> {
+    let parts = parts(tool, material, line_out);
     let mut verts = Vec::with_capacity(parts.len() * 36);
     for p in &parts {
         push_part(&mut verts, p, side);
@@ -435,6 +465,44 @@ pub(crate) mod tests {
         let float_top = ys(float).iter().cloned().fold(f32::MIN, f32::max);
         let line_top = line_ys.iter().cloned().fold(f32::MIN, f32::max);
         assert!(float_top < line_top, "the float hangs on the line, below the tip");
+    }
+
+    #[test]
+    fn a_rod_with_its_line_out_is_drawn_bare() {
+        let paint = |layer: u32| centre_paint(layer);
+        let count = |v: &[Vertex], p: Paint| v.iter().filter(|q| q.tex_layer == p.layer && q.uv == p.uv()).count();
+        let (string, red) = (paint(TEX_ITEM_STRING), paint(crate::entity_model::TEX_ITEM_RED_DYE));
+        for side in [HandSide::Right, HandSide::Left] {
+            let rigged = tool_model(ToolType::FishingRod, ToolMaterial::Wood, side);
+            let bare = tool_model_with(ToolType::FishingRod, ToolMaterial::Wood, side, true);
+            assert_eq!(positions(&rigged), positions(&tool_model_with(ToolType::FishingRod, ToolMaterial::Wood, side, false)));
+            assert_eq!(rigged.len() - bare.len(), 3 * 36, "the line, the float and the hook are the three parts dropped");
+            assert!(count(&rigged, string) > 0 && count(&rigged, red) > 0);
+            assert_eq!((count(&bare, string), count(&bare, red)), (0, 0), "no line and no float of its own");
+            assert_eq!(positions(&rigged[..bare.len()]), positions(&bare), "the rod itself is unchanged");
+        }
+        // Only the rod has a rig to drop.
+        for t in all_tool_types().into_iter().filter(|t| *t != ToolType::FishingRod) {
+            assert_eq!(positions(&tool_model(t, ToolMaterial::Iron, HandSide::Right)), positions(&tool_model_with(t, ToolMaterial::Iron, HandSide::Right, true)), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn the_rod_tip_is_the_top_of_the_rod_and_where_its_line_hangs_from() {
+        for side in [HandSide::Right, HandSide::Left] {
+            let tip = rod_tip_local(side);
+            let rigged = tool_model(ToolType::FishingRod, ToolMaterial::Wood, side);
+            let string = centre_paint(TEX_ITEM_STRING);
+            let line: Vec<Vec3> = rigged.iter().filter(|q| q.tex_layer == string.layer && q.uv == string.uv()).map(|q| Vec3::from(q.position)).collect();
+            let top = line.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+            assert!((top - tip.y).abs() < 1e-4, "the baked line hangs from the tip: {top} vs {}", tip.y);
+            // And it is the highest point of the rod's shaft, to within the model's own rounding.
+            let shaft = grip();
+            let shaft_top = rigged.iter().filter(|q| q.tex_layer == shaft.layer && q.uv == shaft.uv()).map(|q| q.position[1]).fold(f32::MIN, f32::max);
+            assert!(shaft_top - tip.y < 0.03 && shaft_top >= tip.y - 1e-4, "shaft top {shaft_top}, tip {}", tip.y);
+            assert!(tip.x * side.sign() < 0.0, "the rod leans back toward the hand's inside: the tilt mirrors with the side");
+        }
+        assert_eq!(rod_tip_local(HandSide::Left).x, -rod_tip_local(HandSide::Right).x);
     }
 
     #[test]
