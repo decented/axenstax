@@ -118,16 +118,6 @@ pub const HELD_SPRITE_WIDTH: f32 = 0.6;
 /// Width of a material held in the hand as a sprite (a bread icon fills its whole
 /// tile, so at the torch's 0.6 it would be a plate in front of the screen).
 pub const HELD_MATERIAL_WIDTH: f32 = 0.45;
-/// Where a held sprite's centre sits from the hand (the hand end of the arm;
-/// +X is outward from the body, +Y up the arm): beside the fist on the
-/// outside and a little up, so a torch's art clears the arm (0.25 wide plus
-/// its sleeve) instead of hiding its flame inside it. A held cube stays
-/// centred on the hand.
-pub const HELD_SPRITE_OFFSET: Vec3 = Vec3::new(0.25, 0.1, 0.0);
-/// [`HELD_SPRITE_OFFSET`] for the hand `side`: on the outside of that hand.
-pub fn sprite_offset(side: HandSide) -> Vec3 {
-    Vec3::new(HELD_SPRITE_OFFSET.x * side.sign(), HELD_SPRITE_OFFSET.y, HELD_SPRITE_OFFSET.z)
-}
 /// Width of a dropped sprite (a dropped block is a 0.2 cube).
 pub const DROP_SPRITE_WIDTH: f32 = 0.4;
 /// Width of a framed sprite: the half-cell square a framed block fills.
@@ -230,8 +220,8 @@ fn tier_material(tier: u16) -> ToolMaterial {
 /// in the hand `side`, a triangle list. The caller moves it to the hand anchor
 /// or the first-person viewmodel slot. A cuboid is centred on the hand, 6 faces
 /// x 2 triangles x 3 vertices = **36 vertices**; a block sprite is
-/// [`sprite_triangles`] moved to [`HELD_SPRITE_OFFSET`], on the outside of the
-/// hand (+X for the right, -X for the left); a tool of a known type is its own
+/// [`sprite_triangles`] centred on the origin (the pose puts it in the fist:
+/// `hold_pose::HoldPose::Sprite`); a tool of a known type is its own
 /// shape ([`crate::held_tool_model::tool_model`]), a tool of an unknown type
 /// the plain slab of its tier.
 pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) -> Vec<Vertex> {
@@ -240,14 +230,9 @@ pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) 
         ItemRef::Block(id) => match block_look(id, registry) {
             // The hand lantern is drawn as its own small model, not a sprite.
             ItemLook::Lantern => crate::lantern::held_mesh(registry),
-            ItemLook::Sprite { layer } => {
-                let mut verts = sprite_triangles(layer, HELD_SPRITE_WIDTH);
-                let offset = sprite_offset(side);
-                for v in &mut verts {
-                    v.position = (Vec3::from(v.position) + offset).to_array();
-                }
-                verts
-            }
+            // Centred on the origin: how it sits in the hand is `hold_pose`'s
+            // (`HoldPose::Sprite` in third person, `viewmodel` in first).
+            ItemLook::Sprite { layer } => sprite_triangles(layer, HELD_SPRITE_WIDTH),
             ItemLook::Cube { top, side: wall, bottom } => {
                 let mut verts = Vec::with_capacity(36);
                 push_cuboid(&mut verts, Vec3::ZERO, Vec3::splat(0.4), top, wall, bottom);
@@ -281,12 +266,7 @@ pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) 
             // the transparent texels as black). An icon with no background to
             // cut away keeps the small cube.
             if icon_has_clear_background(tex) {
-                let mut verts = sprite_triangles(tex, HELD_MATERIAL_WIDTH);
-                let offset = sprite_offset(side);
-                for v in &mut verts {
-                    v.position = (Vec3::from(v.position) + offset).to_array();
-                }
-                return verts;
+                return sprite_triangles(tex, HELD_MATERIAL_WIDTH);
             }
             let mut verts = Vec::with_capacity(36);
             push_cuboid(&mut verts, Vec3::ZERO, Vec3::splat(0.3), tex, tex, tex);
@@ -374,7 +354,24 @@ fn mask_of(rgba: &[u8]) -> Mask {
 /// GPU array starts from), worked out once.
 fn stock_masks() -> &'static [Mask] {
     static MASKS: OnceLock<Vec<Mask>> = OnceLock::new();
-    MASKS.get_or_init(|| crate::texture_gen::generate_textures().iter().map(|t| mask_of(t.as_slice())).collect())
+    MASKS.get_or_init(|| stock_textures().iter().map(|t| mask_of(t.as_slice())).collect())
+}
+
+/// The stock texture layers' pixels (16x16 RGBA each), generated once.
+fn stock_textures() -> &'static [Vec<u8>] {
+    static TEXTURES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    TEXTURES.get_or_init(crate::texture_gen::generate_textures)
+}
+
+/// The RGBA of texel (`x`, `y`) of stock layer `layer` (magenta for a layer or texel
+/// that is not there): the flat colour a tool icon paints a box in.
+pub(crate) fn layer_texel(layer: u32, x: u32, y: u32) -> [u8; 4] {
+    let i = (y as usize * ICON + x as usize) * 4;
+    stock_textures()
+        .get(layer as usize)
+        .and_then(|t| t.get(i..i + 4))
+        .map(|p| [p[0], p[1], p[2], p[3]])
+        .unwrap_or([255, 0, 255, 255])
 }
 
 /// The opaque texels of layer `layer`. A layer past the stock set (one a
@@ -597,13 +594,13 @@ mod tests {
     }
 
     #[test]
-    fn bread_in_the_hand_is_a_flat_sprite_beside_the_fist() {
+    fn bread_in_the_hand_is_a_flat_sprite_centred_on_the_hand() {
         let reg = test_registry();
         let bread = MaterialId::Bread as u16;
         assert!(held_is_sprite(ItemRef::Material(bread), &reg));
         let mesh = held_item_mesh(ItemRef::Material(bread).into(), &reg, HandSide::Right);
         let (min_x, max_x) = mesh.iter().fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[0]), a.1.max(v.position[0])));
-        assert!(min_x > 0.25 - HELD_MATERIAL_WIDTH / 2.0 - 0.01 && max_x <= 0.25 + HELD_MATERIAL_WIDTH / 2.0 + 0.01, "sprite sits beside the fist: {min_x}..{max_x}");
+        assert!(min_x >= -HELD_MATERIAL_WIDTH / 2.0 - 0.01 && max_x <= HELD_MATERIAL_WIDTH / 2.0 + 0.01, "the mesh is centred on the hand: {min_x}..{max_x}");
         let thick = mesh.iter().map(|v| v.position[2].abs()).fold(0.0f32, f32::max);
         assert!(thick < 0.03, "a sprite is thin ({thick})");
     }
@@ -695,22 +692,6 @@ mod tests {
                     assert_eq!(texel(tex, x, y)[3], 255, "edge {:?} samples transparent texel ({x}, {y})", q.normal);
                 }
             }
-        }
-    }
-
-    #[test]
-    fn a_held_torch_clears_the_arm() {
-        // The avatar's right arm is 0.25 wide round the hand anchor, with its
-        // sleeve overlay a hair outside that. The torch's art (its edge quads
-        // trace the outline) lies wholly outside the arm, on the outer side, so
-        // its flame isn't hidden inside the forearm.
-        let arm = &crate::entity_model::player_model_for(crate::skin_uv::ArmModel::Classic)[3];
-        let clear = arm.size.x * 0.5 + 0.04;
-        let verts = held_item_mesh(ItemRef::Block(block::TORCH).into(), &test_registry(), HandSide::Right);
-        // Six vertices a quad; the first two quads are the front and back squares.
-        assert!(verts.len() > 12);
-        for v in &verts[12..] {
-            assert!(v.position[0] > clear, "torch art at {:?} is inside the arm (half width {clear})", v.position);
         }
     }
 
@@ -955,13 +936,16 @@ mod tests {
     }
 
     #[test]
-    fn the_held_sprite_sits_on_the_outside_of_each_hand() {
+    fn the_held_sprite_mesh_is_centred_on_the_hand_for_both_hands() {
+        // No sideways offset: the pose (`hold_pose`) puts it in the fist.
         let reg = test_registry();
-        let centre_x = |side| {
+        for side in [HandSide::Right, HandSide::Left] {
             let v = held_item_mesh(ItemRef::Block(block::TORCH).into(), &reg, side);
-            v.iter().map(|v| v.position[0]).sum::<f32>() / v.len() as f32
-        };
-        assert!(centre_x(HandSide::Right) > 0.2, "right-hand sprite is outside, +X");
-        assert!(centre_x(HandSide::Left) < -0.2, "left-hand sprite is outside, -X");
+            let n = v.len() as f32;
+            let (cx, cy) = (v.iter().map(|v| v.position[0]).sum::<f32>() / n, v.iter().map(|v| v.position[1]).sum::<f32>() / n);
+            assert!(cx.abs() < 0.1 && cy.abs() < 0.2, "{side:?}: centre ({cx}, {cy})");
+            let (lo, hi) = (v.iter().map(|v| v.position[0]).fold(f32::MAX, f32::min), v.iter().map(|v| v.position[0]).fold(f32::MIN, f32::max));
+            assert!(lo < -0.01 && hi > 0.01 && hi <= HELD_SPRITE_WIDTH / 2.0 + 0.01, "{side:?}: x {lo}..{hi}");
+        }
     }
 }

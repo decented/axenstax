@@ -229,7 +229,7 @@ fn held_item_placement(held: ItemRef, registry: &BlockRegistry, side: HandSide) 
     let upright = arm_rotation(side).inverse();
     // A hanging item (the hand lantern) hangs from the fist by its handle: upright,
     // no lean, the grip at the hand end (`hold_pose`).
-    if let HoldPose::Hanging { handle } = hold_pose(held.into()) {
+    if let HoldPose::Hanging { handle } = hold_pose(held.into(), registry) {
         return Mat4::from_translation(hand_anchor) * upright * Mat4::from_translation(Vec3::new(0.0, -handle, 0.0));
     }
     let lean = Mat4::from_rotation_z(side.sign() * ITEM_LEAN_DEG.to_radians());
@@ -325,21 +325,14 @@ fn build_hand(
     let mut held_verts = Vec::new();
     if !held.is_empty() {
         let placement = held_item_placement(held.item, registry, side);
-        // `item_model` puts a held sprite beside the fist (HELD_SPRITE_OFFSET) so
-        // its flame clears the hanging third-person arm, and a one-sided tool
-        // reaches out to its hand's own side. Held upright in front of the player
-        // the sprite offset would push it off to the side, so take it out; and a
-        // tool is built for the OTHER hand so its feature points in toward the
-        // centre of the screen.
+        // A one-sided tool reaches out to its hand's own side, so it is built for
+        // the OTHER hand so its feature points in toward the centre of the screen.
+        // A sprite is centred on the hand (third person grips it by its foot,
+        // `hold_pose::HoldPose::Sprite`; here it stands upright above the fist).
         let mesh_side = side.opposite();
-        let is_sprite = item_model::held_is_sprite(held.item, registry);
-        let offset = item_model::sprite_offset(mesh_side);
         let mut item_verts = item_model::held_item_mesh(held, registry, mesh_side);
         for v in &mut item_verts {
-            let mut p = Vec3::from(v.position);
-            if is_sprite {
-                p -= offset;
-            }
+            let p = Vec3::from(v.position);
             v.position = placement.transform_point3(p).to_array();
             v.normal = placement.transform_vector3(Vec3::from(v.normal)).normalize_or_zero().to_array();
         }
@@ -364,7 +357,7 @@ fn build_hand(
 
     // Off-hand release (slice 5) — a raised shield and the arm that holds it come
     // in toward the middle of the view, clear of the crosshair.
-    let pose = hold_pose(held);
+    let pose = hold_pose(held, registry);
     if guard > 0.0 && pose == HoldPose::Shield {
         crate::shield_pose::raise_first_person(&mut arm_verts, &mut held_verts, side, aspect, guard);
     }

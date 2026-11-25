@@ -4,9 +4,9 @@
 //!
 //! Why boxes and not Minecraft's extruded icon: a tool has no per-type icon
 //! layer. Its tier layer (`entity_model::tool_texture`) is one generic tile for
-//! every type (a diagonal handle and a wedge on a flat ground), and the
-//! inventory and hotbar draw a tool as that tile plus a letter. There is nothing
-//! per-type to extrude, and the web build's texture array is exactly full (512
+//! every type (a diagonal handle and a wedge on a flat ground). There is nothing
+//! per-type to extrude (the inventory icon flattens these same boxes,
+//! [`icon_quads`]), and the web build's texture array is exactly full (512
 //! layers), so there is no room for new art. The shapes are built from existing
 //! layers only: the tier's own tile for the head, the stick for the handle, and
 //! a few ingredient tiles (string, flint, leather, wool).
@@ -299,6 +299,44 @@ fn parts(tool: ToolType, material: ToolMaterial) -> Vec<Part> {
             part(0.0, -0.155, 0.30, 0.04, 0.30, 0.0, steel),
         ],
     }
+}
+
+/// One box of a tool seen from the front, for the inventory icon: its +Z face's four
+/// corners (model units, y up, the right hand's version), the flat colour of its paint,
+/// and how far forward the face is (nearer boxes paint over farther ones).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IconQuad {
+    pub corners: [[f32; 2]; 4],
+    pub rgb: [u8; 3],
+    pub front: f32,
+}
+
+/// The colour of a paint: its texel in the stock layer.
+fn paint_rgb(p: Paint) -> [u8; 3] {
+    let [r, g, b, _] = crate::item_model::layer_texel(p.layer, p.texel.0, p.texel.1);
+    [r, g, b]
+}
+
+/// The front of `tool` in `material`, one [`IconQuad`] per box in the model's own order
+/// (the shape the hand shows, flattened: no second set of shapes to keep in step).
+pub fn icon_quads(tool: ToolType, material: ToolMaterial) -> Vec<IconQuad> {
+    parts(tool, material)
+        .iter()
+        .map(|p| {
+            let rot = Mat3::from_rotation_z(p.tilt_deg.to_radians());
+            let centre = Vec3::new(p.centre.0, p.centre.1, 0.0);
+            let h = p.size * 0.5;
+            let corner = |sx: f32, sy: f32| {
+                let v = centre + rot * Vec3::new(sx * h.x, sy * h.y, 0.0);
+                [v.x, v.y]
+            };
+            IconQuad {
+                corners: [corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)],
+                rgb: paint_rgb(p.paint),
+                front: h.z,
+            }
+        })
+        .collect()
 }
 
 /// The mesh of `tool` in `material` for the hand `side`: a triangle list, the grip
