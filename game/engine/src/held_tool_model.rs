@@ -325,7 +325,8 @@ fn parts(tool: ToolType, material: ToolMaterial, line_out: bool) -> Vec<Part> {
 }
 
 /// The mesh of `tool` in `material` for the hand `side`: a triangle list, the grip
-/// at the origin (see the module doc).
+/// at the origin (see the module doc). The game draws through [`tool_model_with`].
+#[cfg(test)]
 pub fn tool_model(tool: ToolType, material: ToolMaterial, side: HandSide) -> Vec<Vertex> {
     tool_model_with(tool, material, side, false)
 }

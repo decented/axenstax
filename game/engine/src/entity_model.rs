@@ -1469,7 +1469,6 @@ pub fn avatar_hand_anchor(side: crate::viewmodel::HandSide, arm_model: crate::sk
 /// is unit-testable without a renderer. Cross-platform (drawn on the PWA target
 /// too). Spec: `docs/foundations/2026-06-09-third-person-camera.md` (Phase 1).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn self_avatar_vertices(
     mode: crate::camera::CameraMode,
     ps: &crate::protocol::PlayerState,
