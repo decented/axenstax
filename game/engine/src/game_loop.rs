@@ -19988,14 +19988,14 @@ impl super::GameState {
                         &self.renderer.egui,
                         self.input.bindings(),
                         pidx == 0 && self.input.inventory_toggle,
-                        self.players[pidx].inventory.hotbar_slot(self.players[pidx].hotbar_slot),
+                        &self.players[pidx].inventory,
                     );
                     match outcome {
                         crate::furnace_ui::FurnaceUiOutcome::Closed => {
                             self.players[pidx].open_furnace = None;
                             if pidx == 0 { self.capture_cursor(); }
                         }
-                        crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode } => {
+                        crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode, from } => {
                             // Trials coverage — taking a finished smelt from the
                             // output slot is "you smelted something".
                             if matches!(kind, crate::furnace::SlotKind::Output)
@@ -20010,8 +20010,7 @@ impl super::GameState {
                             // be mutated together without cloning the whole
                             // furnace through a local. C3b-1 — through the
                             // one container rule (`apply_container`).
-                            let hotbar = self.players[pidx].hotbar_slot;
-                            let click = crate::container_window::ContainerClick::Furnace { kind, mode, hotbar };
+                            let click = crate::container_window::ContainerClick::Furnace { kind, mode, from };
                             let ctx = self.container_ctx(pidx, false);
                             let world = &mut self.world;
                             let p = &mut self.players[pidx];

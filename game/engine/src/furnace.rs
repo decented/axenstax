@@ -358,19 +358,27 @@ pub enum SlotClickResult {
     NoOp,
 }
 
+/// `apply_slot_click`'s `from` when a click on Input or Fuel TAKES that slot's contents back into
+/// the inventory (rather than loading it from an inventory slot). Wire-stable: it rides in
+/// `ContainerClick::Furnace.from`, and any value of 36 or more names no inventory slot. Kept
+/// below `u8::MAX + 1` so it survives a 32-bit `usize` (the web build).
+pub const TAKE_BACK: usize = 255;
+
 /// Why a click on a furnace slot would move nothing, in the words the furnace screen shows. The
 /// rule is `click_refusal`; `apply_slot_click` is the one that moves things, and a test pins that
 /// the two agree on every case a bag with room can be in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickRefusal {
-    /// The Output slot (or a slot being emptied) has nothing in it.
+    /// The slot being taken from has nothing in it.
     NothingToTake,
-    /// An empty slot was clicked with nothing selected on the hotbar to put in it.
-    NothingSelected,
-    /// The selected item is not one the furnace smelts.
+    /// The inventory slot clicked has nothing in it.
+    EmptySlot,
+    /// The item is not one the furnace smelts.
     CannotSmelt,
-    /// The selected item is not fuel.
+    /// The item is not fuel.
     WontBurn,
+    /// The item is neither something the furnace smelts nor fuel (shift-click routing).
+    NotForFurnace,
     /// The slot already holds something else.
     SlotHoldsOther(SlotKind),
     /// The slot already holds a full stack.
@@ -382,9 +390,10 @@ impl ClickRefusal {
     pub fn message(self) -> &'static str {
         match self {
             ClickRefusal::NothingToTake => "There is nothing there to take",
-            ClickRefusal::NothingSelected => "Select what to load on your hotbar first",
+            ClickRefusal::EmptySlot => "That slot is empty",
             ClickRefusal::CannotSmelt => "That can't be smelted",
             ClickRefusal::WontBurn => "That won't burn",
+            ClickRefusal::NotForFurnace => "That can't be smelted or burned",
             ClickRefusal::SlotHoldsOther(SlotKind::Input) => "The Input slot holds something else: take it out first",
             ClickRefusal::SlotHoldsOther(SlotKind::Fuel) => "The Fuel slot holds something else: take it out first",
             ClickRefusal::SlotHoldsOther(SlotKind::Output) => "The Output slot is for taking only",
@@ -395,89 +404,139 @@ impl ClickRefusal {
     }
 }
 
-/// Why a click on `slot_kind`, with `held` selected on the hotbar, would do nothing; `None` when it
-/// moves something (or, with a full bag, when the only trouble is the bag, which this does not see).
-/// Pure, and the same checks in the same order as `apply_slot_click`.
-pub fn click_refusal(furnace: &FurnaceData, held: Option<&ItemStack>, slot_kind: SlotKind) -> Option<ClickRefusal> {
-    use crate::item::Item;
-    match (slot_kind, held) {
-        (SlotKind::Output, _) => furnace.output.is_none().then_some(ClickRefusal::NothingToTake),
-        (SlotKind::Input, None) => furnace.input.is_none().then_some(ClickRefusal::NothingSelected),
-        (SlotKind::Fuel, None) => furnace.fuel.is_none().then_some(ClickRefusal::NothingSelected),
-        (SlotKind::Input, Some(held)) => {
-            let Item::Material(mat) = &held.item else { return Some(ClickRefusal::CannotSmelt) };
-            if smelt_recipe_for_input(*mat).is_none() {
-                return Some(ClickRefusal::CannotSmelt);
+/// The material a stack would smelt, if it is one the furnace smelts.
+fn smeltable(stack: &ItemStack) -> Option<MaterialId> {
+    match &stack.item {
+        crate::item::Item::Material(m) if smelt_recipe_for_input(*m).is_some() => Some(*m),
+        _ => None,
+    }
+}
+
+/// Is this stack fuel?
+fn burns(stack: &ItemStack) -> bool {
+    let (mat, blk) = match &stack.item {
+        crate::item::Item::Material(m) => (Some(*m), None),
+        crate::item::Item::Block(b) => (None, Some(*b)),
+        _ => return false,
+    };
+    fuel_value(mat, blk).is_some()
+}
+
+/// Where a shift-click on an inventory stack sends it. Pure; the one routing rule.
+/// - only smeltable: Input. Only fuel: Fuel.
+/// - both: Input, unless Input cannot take it (holds another material, or is full), then Fuel.
+/// - neither: refused (`NotForFurnace`).
+///
+/// A stack that routes to a slot that then refuses it (full, holds something else) is still
+/// answered with `Ok(kind)`: [`click_refusal`] says why that slot won't take it.
+pub fn route_stack(furnace: &FurnaceData, stack: &ItemStack) -> Result<SlotKind, ClickRefusal> {
+    route_by(furnace, stack, smeltable(stack).is_some(), burns(stack))
+}
+
+/// [`route_stack`]'s rule over the two facts it needs (split out so the "both" case, which no
+/// item is today, stays pinned by a test).
+fn route_by(furnace: &FurnaceData, stack: &ItemStack, smelts: bool, burns: bool) -> Result<SlotKind, ClickRefusal> {
+    match (smelts, burns) {
+        (true, false) => Ok(SlotKind::Input),
+        (false, true) => Ok(SlotKind::Fuel),
+        (true, true) => {
+            if load_refusal(furnace, stack, SlotKind::Input).is_none() {
+                Ok(SlotKind::Input)
+            } else {
+                Ok(SlotKind::Fuel)
             }
+        }
+        (false, false) => Err(ClickRefusal::NotForFurnace),
+    }
+}
+
+/// Why loading `stack` into Input or Fuel would do nothing; `None` when it would move something.
+/// Output takes nothing in.
+fn load_refusal(furnace: &FurnaceData, stack: &ItemStack, slot_kind: SlotKind) -> Option<ClickRefusal> {
+    use crate::item::Item;
+    match slot_kind {
+        SlotKind::Output => Some(ClickRefusal::SlotHoldsOther(SlotKind::Output)),
+        SlotKind::Input => {
+            let mat = smeltable(stack)?;
             let existing = match &furnace.input {
-                Some(existing) if !matches!(&existing.item, Item::Material(em) if em == mat) => {
+                Some(existing) if !matches!(&existing.item, Item::Material(em) if *em == mat) => {
                     return Some(ClickRefusal::SlotHoldsOther(SlotKind::Input));
                 }
                 Some(existing) => existing.count,
                 None => 0,
             };
-            (Item::Material(*mat).max_stack().saturating_sub(existing) == 0).then_some(ClickRefusal::SlotFull(SlotKind::Input))
+            (Item::Material(mat).max_stack().saturating_sub(existing) == 0).then_some(ClickRefusal::SlotFull(SlotKind::Input))
         }
-        (SlotKind::Fuel, Some(held)) => {
-            let (mat, blk) = match &held.item {
-                Item::Material(m) => (Some(*m), None),
-                Item::Block(b) => (None, Some(*b)),
-                _ => return Some(ClickRefusal::WontBurn),
-            };
-            if fuel_value(mat, blk).is_none() {
+        SlotKind::Fuel => {
+            if !burns(stack) {
                 return Some(ClickRefusal::WontBurn);
             }
             let existing = match &furnace.fuel {
                 Some(existing) => {
-                    let same = match (&existing.item, &held.item) {
-                        (Item::Material(em), Item::Material(m)) => em == m,
-                        (Item::Block(eb), Item::Block(b)) => eb == b,
-                        _ => false,
-                    };
-                    if !same {
+                    if existing.item != stack.item {
                         return Some(ClickRefusal::SlotHoldsOther(SlotKind::Fuel));
                     }
                     existing.count
                 }
                 None => 0,
             };
-            (held.item.max_stack().saturating_sub(existing) == 0).then_some(ClickRefusal::SlotFull(SlotKind::Fuel))
+            (stack.item.max_stack().saturating_sub(existing) == 0).then_some(ClickRefusal::SlotFull(SlotKind::Fuel))
         }
+    }
+}
+
+/// Why a click on `slot_kind` with source `from` (an inventory slot, or [`TAKE_BACK`]) would do
+/// nothing; `None` when it moves something (or, with a full bag, when the only trouble is the
+/// bag, which this does not see). Pure, and the same checks in the same order as
+/// `apply_slot_click`.
+pub fn click_refusal(furnace: &FurnaceData, inventory: &crate::inventory::Inventory, from: usize, slot_kind: SlotKind) -> Option<ClickRefusal> {
+    let taking = |slot: &Option<ItemStack>| slot.is_none().then_some(ClickRefusal::NothingToTake);
+    if slot_kind == SlotKind::Output {
+        return taking(&furnace.output);
+    }
+    if from == TAKE_BACK {
+        return taking(if slot_kind == SlotKind::Input { &furnace.input } else { &furnace.fuel });
+    }
+    let Some(stack) = inventory.slot(from) else { return Some(ClickRefusal::EmptySlot) };
+    match slot_kind {
+        SlotKind::Input if smeltable(stack).is_none() => Some(ClickRefusal::CannotSmelt),
+        _ => load_refusal(furnace, stack, slot_kind),
     }
 }
 
 /// Apply a click on a furnace UI slot. Mutates `furnace` and
 /// `inventory` in place; pure with respect to the world / ECS so
-/// it's testable without UI infrastructure.
+/// it's testable without UI infrastructure. `from` is the inventory slot
+/// (0..36: hotbar and bag alike) a load comes from, or [`TAKE_BACK`].
 ///
 /// Semantics:
-/// - **Input slot, held item**: place 1 (Single) or whole hotbar
-///   stack (Stack) if the held item is a smeltable material AND
-///   either the slot is empty OR holds the same material.
-/// - **Fuel slot, held item**: place 1 / whole stack if the held
+/// - **Input slot, from an inventory slot**: place 1 (Single) or the
+///   whole stack (Stack) if it is a smeltable material AND either the
+///   slot is empty OR holds the same material.
+/// - **Fuel slot, from an inventory slot**: place 1 / whole stack if the
 ///   item has a non-`None` `fuel_value` AND stacks compatibly.
-/// - **Output slot, held item**: held item ignored; take from
-///   output (insert is forbidden — matches Minecraft).
-/// - **Any slot, empty hand**: take 1 / whole stack from the slot
-///   into the player's inventory (if there's room).
+/// - **Output slot**: `from` is ignored; take 1 / the whole stack into
+///   the player's inventory (if there's room). Insert is forbidden.
+/// - **Input or Fuel with [`TAKE_BACK`]**: take 1 / the whole stack back
+///   into the inventory.
 pub fn apply_slot_click(
     furnace: &mut FurnaceData,
     inventory: &mut crate::inventory::Inventory,
-    hotbar_slot: usize,
+    from: usize,
     slot_kind: SlotKind,
     click_mode: ClickMode,
 ) -> SlotClickResult {
-    let held = inventory.hotbar_slot(hotbar_slot).cloned();
+    if slot_kind == SlotKind::Output {
+        return take_from_furnace_slot(&mut furnace.output, inventory, click_mode);
+    }
+    if from == TAKE_BACK {
+        let slot = if slot_kind == SlotKind::Input { &mut furnace.input } else { &mut furnace.fuel };
+        return take_from_furnace_slot(slot, inventory, click_mode);
+    }
+    let Some(held) = inventory.slot(from).cloned() else { return SlotClickResult::NoOp };
     match slot_kind {
-        SlotKind::Output => take_from_furnace_slot(&mut furnace.output, inventory, click_mode),
-        SlotKind::Input => match held {
-            None => take_from_furnace_slot(&mut furnace.input, inventory, click_mode),
-            Some(held_stack) => place_into_input(furnace, inventory, hotbar_slot, &held_stack, click_mode),
-        },
-        SlotKind::Fuel => match held {
-            None => take_from_furnace_slot(&mut furnace.fuel, inventory, click_mode),
-            Some(held_stack) => place_into_fuel(furnace, inventory, hotbar_slot, &held_stack, click_mode),
-        },
+        SlotKind::Input => place_into_input(furnace, inventory, from, &held, click_mode),
+        _ => place_into_fuel(furnace, inventory, from, &held, click_mode),
     }
 }
 
@@ -517,52 +576,44 @@ fn take_from_furnace_slot(
     SlotClickResult::Moved { count: moved }
 }
 
+/// Remove `moved` units from inventory slot `from` (which held `held`), clearing it at zero.
+fn draw_from_inventory_slot(inventory: &mut crate::inventory::Inventory, from: usize, moved: u8) {
+    if let Some(mut stack) = inventory.take_slot(from) {
+        stack.count = stack.count.saturating_sub(moved);
+        if stack.count > 0 {
+            inventory.set_slot(from, Some(stack));
+        }
+    }
+}
+
 fn place_into_input(
     furnace: &mut FurnaceData,
     inventory: &mut crate::inventory::Inventory,
-    hotbar_slot: usize,
+    from: usize,
     held: &ItemStack,
     mode: ClickMode,
 ) -> SlotClickResult {
-    // Only materials can smelt — blocks held in hand are rejected.
-    let mat = match &held.item {
-        crate::item::Item::Material(m) => *m,
-        _ => return SlotClickResult::NoOp,
-    };
-    if smelt_recipe_for_input(mat).is_none() {
-        return SlotClickResult::NoOp;
-    }
+    // Only smeltable materials go in; blocks are rejected.
+    let Some(mat) = smeltable(held) else { return SlotClickResult::NoOp };
     // If the input slot is occupied with a different material, refuse.
-    if let Some(existing) = &furnace.input {
-        match &existing.item {
-            crate::item::Item::Material(em) if *em == mat => {}
-            _ => return SlotClickResult::NoOp,
-        }
+    if let Some(existing) = &furnace.input
+        && existing.item != held.item
+    {
+        return SlotClickResult::NoOp;
     }
     let want = match mode {
         ClickMode::Single => 1u8,
         ClickMode::Stack => held.count,
     };
-    // Cap by the room left in the input slot. saturating_add at 255 silently
-    // ate any overflow we'd already consumed from the inventory (item loss /
-    // cap violation — engine audit 2026-06-04, F). Only consume what fits.
+    // Cap by the room left in the input slot. Only consume what fits (engine audit
+    // 2026-06-04, F: an overflow once vanished).
     let existing = furnace.input.as_ref().map(|s| s.count).unwrap_or(0);
     let room = crate::item::Item::Material(mat).max_stack().saturating_sub(existing);
-    let want = want.min(room);
-    if want == 0 {
+    let moved = want.min(room).min(held.count);
+    if moved == 0 {
         return SlotClickResult::NoOp; // input slot already at max_stack
     }
-    let mut moved = 0u8;
-    for _ in 0..want {
-        if inventory.consume_one_material(hotbar_slot, mat) {
-            moved += 1;
-        } else {
-            break;
-        }
-    }
-    if moved == 0 {
-        return SlotClickResult::NoOp;
-    }
+    draw_from_inventory_slot(inventory, from, moved);
     match &mut furnace.input {
         Some(s) => s.count = s.count.saturating_add(moved),
         None => furnace.input = Some(ItemStack::new_material(mat, moved)),
@@ -573,30 +624,20 @@ fn place_into_input(
 fn place_into_fuel(
     furnace: &mut FurnaceData,
     inventory: &mut crate::inventory::Inventory,
-    hotbar_slot: usize,
+    from: usize,
     held: &ItemStack,
     mode: ClickMode,
 ) -> SlotClickResult {
     // Fuel can be either a material (Coal, Stick) or a block
     // (OAK_PLANKS, OAK_LOG, OAK_LEAVES). Other item kinds reject.
-    let (mat_opt, blk_opt): (Option<MaterialId>, Option<BlockId>) = match &held.item {
-        crate::item::Item::Material(m) => (Some(*m), None),
-        crate::item::Item::Block(b) => (None, Some(*b)),
-        _ => return SlotClickResult::NoOp,
-    };
-    if fuel_value(mat_opt, blk_opt).is_none() {
+    if !burns(held) {
         return SlotClickResult::NoOp;
     }
     // Stack-compatibility check against existing fuel.
-    if let Some(existing) = &furnace.fuel {
-        let same = match (&existing.item, &held.item) {
-            (crate::item::Item::Material(em), crate::item::Item::Material(m)) => em == m,
-            (crate::item::Item::Block(eb), crate::item::Item::Block(b)) => eb == b,
-            _ => false,
-        };
-        if !same {
-            return SlotClickResult::NoOp;
-        }
+    if let Some(existing) = &furnace.fuel
+        && existing.item != held.item
+    {
+        return SlotClickResult::NoOp;
     }
     let want = match mode {
         ClickMode::Single => 1u8,
@@ -605,38 +646,14 @@ fn place_into_fuel(
     // Cap by room left in the fuel slot (same loss/cap bug as the input slot).
     let existing = furnace.fuel.as_ref().map(|s| s.count).unwrap_or(0);
     let room = held.item.max_stack().saturating_sub(existing);
-    let want = want.min(room);
-    if want == 0 {
+    let moved = want.min(room).min(held.count);
+    if moved == 0 {
         return SlotClickResult::NoOp; // fuel slot already at max_stack
     }
-    let mut moved = 0u8;
-    for _ in 0..want {
-        let took = if let Some(m) = mat_opt {
-            inventory.consume_one_material(hotbar_slot, m)
-        } else if blk_opt.is_some() {
-            inventory.take_block_from_hotbar(hotbar_slot).is_some()
-        } else {
-            false
-        };
-        if took {
-            moved += 1;
-        } else {
-            break;
-        }
-    }
-    if moved == 0 {
-        return SlotClickResult::NoOp;
-    }
+    draw_from_inventory_slot(inventory, from, moved);
     match &mut furnace.fuel {
         Some(s) => s.count = s.count.saturating_add(moved),
-        None => {
-            let item = match (mat_opt, blk_opt) {
-                (Some(m), _) => crate::item::Item::Material(m),
-                (_, Some(b)) => crate::item::Item::Block(b),
-                _ => unreachable!("fuel_value would have rejected"),
-            };
-            furnace.fuel = Some(ItemStack { item, count: moved });
-        }
+        None => furnace.fuel = Some(ItemStack { item: held.item.clone(), count: moved }),
     }
     SlotClickResult::Moved { count: moved }
 }
@@ -1174,57 +1191,135 @@ mod tests {
             Some(ItemStack::new_block(crate::block::OAK_PLANKS, 2)),
         ];
         let mut cases = 0;
-        for kind in [SlotKind::Input, SlotKind::Fuel, SlotKind::Output] {
-            for held in &held_kinds {
-                for slot in &slot_kinds {
-                    let mut f = FurnaceData::default();
-                    match kind {
-                        SlotKind::Input => f.input = slot.clone(),
-                        SlotKind::Fuel => f.fuel = slot.clone(),
-                        SlotKind::Output => f.output = slot.clone(),
+        // Loads from a bag slot (20), loads from a hotbar slot (0), and takes back.
+        for from in [20, 0, TAKE_BACK] {
+            for kind in [SlotKind::Input, SlotKind::Fuel, SlotKind::Output] {
+                for held in &held_kinds {
+                    for slot in &slot_kinds {
+                        let mut f = FurnaceData::default();
+                        match kind {
+                            SlotKind::Input => f.input = slot.clone(),
+                            SlotKind::Fuel => f.fuel = slot.clone(),
+                            SlotKind::Output => f.output = slot.clone(),
+                        }
+                        let mut inv = crate::inventory::Inventory::new();
+                        if from != TAKE_BACK {
+                            inv.set_slot(from, held.clone());
+                        }
+                        let refusal = click_refusal(&f, &inv, from, kind);
+                        let moved = apply_slot_click(&mut f, &mut inv, from, kind, ClickMode::Single);
+                        let label = format!("{kind:?} slot {slot:?} from {from}, held {held:?}");
+                        assert_eq!(refusal.is_some(), moved == SlotClickResult::NoOp, "{label}: refusal {refusal:?}, result {moved:?}");
+                        if let Some(r) = refusal {
+                            assert!(!r.message().is_empty());
+                        }
+                        cases += 1;
                     }
-                    let refusal = click_refusal(&f, held.as_ref(), kind);
-                    let mut inv = crate::inventory::Inventory::new();
-                    inv.set_slot(0, held.clone());
-                    let moved = apply_slot_click(&mut f, &mut inv, 0, kind, ClickMode::Single);
-                    let label = format!("{kind:?} slot {slot:?}, held {held:?}");
-                    assert_eq!(refusal.is_some(), moved == SlotClickResult::NoOp, "{label}: refusal {refusal:?}, result {moved:?}");
-                    if let Some(r) = refusal {
-                        assert!(!r.message().is_empty());
-                    }
-                    cases += 1;
                 }
             }
         }
-        assert_eq!(cases, 3 * 8 * 6);
+        assert_eq!(cases, 3 * 3 * 8 * 6);
     }
 
     #[test]
     fn the_refusal_says_why_in_plain_words() {
         let none = FurnaceData::default();
-        let stick = ItemStack::new_material(MaterialId::Stick, 1);
-        let iron = ItemStack::new_material(MaterialId::RawIron, 1);
-        let stone = ItemStack::new_block(crate::block::STONE, 1);
-        assert_eq!(click_refusal(&none, Some(&stone), SlotKind::Input), Some(ClickRefusal::CannotSmelt));
-        assert_eq!(click_refusal(&none, Some(&stone), SlotKind::Fuel), Some(ClickRefusal::WontBurn));
-        assert_eq!(click_refusal(&none, Some(&iron), SlotKind::Fuel), Some(ClickRefusal::WontBurn));
-        assert_eq!(click_refusal(&none, Some(&stick), SlotKind::Input), Some(ClickRefusal::CannotSmelt));
-        assert_eq!(click_refusal(&none, Some(&stick), SlotKind::Fuel), None, "a stick burns");
-        assert_eq!(click_refusal(&none, None, SlotKind::Input), Some(ClickRefusal::NothingSelected));
-        assert_eq!(click_refusal(&none, None, SlotKind::Output), Some(ClickRefusal::NothingToTake));
+        let mut inv = crate::inventory::Inventory::new();
+        inv.set_slot(12, Some(ItemStack::new_material(MaterialId::Stick, 1)));
+        inv.set_slot(13, Some(ItemStack::new_material(MaterialId::RawIron, 1)));
+        inv.set_slot(14, Some(ItemStack::new_block(crate::block::STONE, 1)));
+        assert_eq!(click_refusal(&none, &inv, 14, SlotKind::Input), Some(ClickRefusal::CannotSmelt));
+        assert_eq!(click_refusal(&none, &inv, 14, SlotKind::Fuel), Some(ClickRefusal::WontBurn));
+        assert_eq!(click_refusal(&none, &inv, 13, SlotKind::Fuel), Some(ClickRefusal::WontBurn));
+        assert_eq!(click_refusal(&none, &inv, 12, SlotKind::Input), Some(ClickRefusal::CannotSmelt));
+        assert_eq!(click_refusal(&none, &inv, 12, SlotKind::Fuel), None, "a stick burns, from the bag");
+        assert_eq!(click_refusal(&none, &inv, 30, SlotKind::Input), Some(ClickRefusal::EmptySlot));
+        assert_eq!(click_refusal(&none, &inv, TAKE_BACK, SlotKind::Input), Some(ClickRefusal::NothingToTake));
+        assert_eq!(click_refusal(&none, &inv, 0, SlotKind::Output), Some(ClickRefusal::NothingToTake));
         assert_eq!(ClickRefusal::WontBurn.message(), "That won't burn");
         assert_eq!(ClickRefusal::CannotSmelt.message(), "That can't be smelted");
         let mut full = FurnaceData::default();
         full.input = Some(ItemStack::new_material(MaterialId::RawIron, 64));
-        assert_eq!(click_refusal(&full, Some(&iron), SlotKind::Input), Some(ClickRefusal::SlotFull(SlotKind::Input)));
+        assert_eq!(click_refusal(&full, &inv, 13, SlotKind::Input), Some(ClickRefusal::SlotFull(SlotKind::Input)));
+    }
+
+    // ── The furnace screen shows the whole inventory ───────────────────
+
+    #[test]
+    fn a_bag_slot_loads_input_and_fuel_not_only_the_hotbar() {
+        let mut f = FurnaceData::default();
+        let mut inv = crate::inventory::Inventory::new();
+        inv.set_slot(27, Some(ItemStack::new_material(MaterialId::RawIron, 6)));
+        inv.set_slot(35, Some(ItemStack::new_block(crate::block::OAK_PLANKS, 8)));
+        assert_eq!(apply_slot_click(&mut f, &mut inv, 27, SlotKind::Input, ClickMode::Stack), SlotClickResult::Moved { count: 6 });
+        assert_eq!(apply_slot_click(&mut f, &mut inv, 35, SlotKind::Fuel, ClickMode::Single), SlotClickResult::Moved { count: 1 });
+        assert_eq!(f.input, Some(ItemStack::new_material(MaterialId::RawIron, 6)));
+        assert_eq!(f.fuel, Some(ItemStack::new_block(crate::block::OAK_PLANKS, 1)));
+        assert_eq!(inv.slot(27), None, "the whole stack left the bag");
+        assert_eq!(inv.slot(35).map(|s| s.count), Some(7));
+        // A load never refills the slot from elsewhere (no hotbar auto-refill surprise).
+        inv.set_slot(0, Some(ItemStack::new_block(crate::block::OAK_PLANKS, 1)));
+        inv.set_slot(30, Some(ItemStack::new_block(crate::block::OAK_PLANKS, 5)));
+        assert_eq!(apply_slot_click(&mut f, &mut inv, 0, SlotKind::Fuel, ClickMode::Stack), SlotClickResult::Moved { count: 1 });
+        assert_eq!(inv.slot(0), None);
+        assert_eq!(inv.slot(30).map(|s| s.count), Some(5));
     }
 
     #[test]
-    fn slot_click_input_empty_hand_takes_to_inventory() {
+    fn a_slot_past_the_inventory_names_nothing() {
+        let mut f = FurnaceData::default();
+        let mut inv = crate::inventory::Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_material(MaterialId::RawIron, 1)));
+        assert_eq!(apply_slot_click(&mut f, &mut inv, 36, SlotKind::Input, ClickMode::Single), SlotClickResult::NoOp);
+        assert_eq!(apply_slot_click(&mut f, &mut inv, 200, SlotKind::Input, ClickMode::Single), SlotClickResult::NoOp);
+        assert!(f.input.is_none());
+    }
+
+    #[test]
+    fn shift_click_routing_sends_each_stack_where_it_belongs() {
+        let f = FurnaceData::default();
+        let iron = ItemStack::new_material(MaterialId::RawIron, 4);
+        let coal = ItemStack::new_material(MaterialId::Coal, 4);
+        let log = ItemStack::new_block(crate::block::OAK_LOG, 4);
+        let stone = ItemStack::new_block(crate::block::STONE, 4);
+        assert_eq!(route_stack(&f, &iron), Ok(SlotKind::Input));
+        assert_eq!(route_stack(&f, &coal), Ok(SlotKind::Fuel));
+        assert_eq!(route_stack(&f, &log), Ok(SlotKind::Fuel));
+        assert_eq!(route_stack(&f, &stone), Err(ClickRefusal::NotForFurnace));
+        assert_eq!(ClickRefusal::NotForFurnace.message(), "That can't be smelted or burned");
+        // A full or mismatched slot is still where it routes: the refusal says why.
+        let mut full = FurnaceData::default();
+        full.fuel = Some(ItemStack::new_material(MaterialId::Coal, 64));
+        assert_eq!(route_stack(&full, &coal), Ok(SlotKind::Fuel));
+        let inv = {
+            let mut i = crate::inventory::Inventory::new();
+            i.set_slot(5, Some(coal.clone()));
+            i
+        };
+        assert_eq!(click_refusal(&full, &inv, 5, SlotKind::Fuel), Some(ClickRefusal::SlotFull(SlotKind::Fuel)));
+    }
+
+    #[test]
+    fn an_item_that_is_both_goes_to_input_unless_input_cannot_take_it_then_fuel() {
+        // No item is both today, so the rule is pinned through its two facts.
+        let route_both = |f: &FurnaceData, s: &ItemStack, smelts, burns| route_by(f, s, smelts, burns);
+        let iron = ItemStack::new_material(MaterialId::RawIron, 4);
+        let empty = FurnaceData::default();
+        assert_eq!(route_both(&empty, &iron, true, true), Ok(SlotKind::Input));
+        let mut other = FurnaceData::default();
+        other.input = Some(ItemStack::new_material(MaterialId::Copper, 1));
+        assert_eq!(route_both(&other, &iron, true, true), Ok(SlotKind::Fuel), "Input holds another material");
+        let mut full = FurnaceData::default();
+        full.input = Some(ItemStack::new_material(MaterialId::RawIron, 64));
+        assert_eq!(route_both(&full, &iron, true, true), Ok(SlotKind::Fuel), "Input is full");
+    }
+
+    #[test]
+    fn slot_click_input_take_back_takes_to_inventory() {
         let mut f = FurnaceData::default();
         f.input = Some(ItemStack::new_material(MaterialId::RawIron, 3));
         let mut inv = crate::inventory::Inventory::new();
-        let result = apply_slot_click(&mut f, &mut inv, 0, SlotKind::Input, ClickMode::Single);
+        let result = apply_slot_click(&mut f, &mut inv, TAKE_BACK, SlotKind::Input, ClickMode::Single);
         assert!(matches!(result, SlotClickResult::Moved { count: 1 }));
         assert_eq!(f.input.as_ref().unwrap().count, 2);
         // Inventory gained 1 RawIron.
@@ -1234,11 +1329,11 @@ mod tests {
     }
 
     #[test]
-    fn slot_click_input_empty_hand_stack_mode_takes_all() {
+    fn slot_click_input_take_back_stack_mode_takes_all() {
         let mut f = FurnaceData::default();
         f.input = Some(ItemStack::new_material(MaterialId::RawIron, 4));
         let mut inv = crate::inventory::Inventory::new();
-        let result = apply_slot_click(&mut f, &mut inv, 0, SlotKind::Input, ClickMode::Stack);
+        let result = apply_slot_click(&mut f, &mut inv, TAKE_BACK, SlotKind::Input, ClickMode::Stack);
         assert!(matches!(result, SlotClickResult::Moved { count: 4 }));
         assert!(f.input.is_none());
     }

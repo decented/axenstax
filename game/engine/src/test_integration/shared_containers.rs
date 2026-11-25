@@ -578,7 +578,7 @@ fn a_scripted_container_session_keeps_the_server_in_lockstep() {
     let furnace = rig.place(-1, 2, block::FURNACE);
     rig.open(0, furnace);
     assert_eq!(rig.cs[0].mirror.as_ref().map(|m| m.kind), Some(ContainerKind::Furnace));
-    let feed = |kind, hotbar| ContainerClick::Furnace { kind, mode: ClickMode::Stack, hotbar };
+    let feed = |kind, from| ContainerClick::Furnace { kind, mode: ClickMode::Stack, from };
     rig.step(0, "input", feed(SlotKind::Input, 2));
     rig.step(0, "fuel", feed(SlotKind::Fuel, 3));
     let pushes_before = rig.cs[0].slot_sets.len();
@@ -604,6 +604,75 @@ fn a_scripted_container_session_keeps_the_server_in_lockstep() {
 
     let t = rig.tally(0);
     assert_eq!((t.window_mismatch, t.container_corrected, t.container_refused), (0, 0, 0));
+}
+
+/// pt1124 — the furnace screen shows the whole inventory: a joiner loads Input
+/// and Fuel from BAG slots (not only the hotbar), takes Fuel back, and the
+/// server's window and furnace stay in lockstep after every click.
+#[test]
+fn a_joiner_loads_and_unloads_a_furnace_from_its_bag_slots() {
+    let mut rig = Rig::dedicated("furnace-bag", 1);
+    let planks = Item::Block(block::OAK_PLANKS);
+    rig.give(0, 20, Item::Material(MaterialId::RawIron), 5);
+    rig.give(0, 31, planks.clone(), 8);
+    let furnace = rig.place(-1, 2, block::FURNACE);
+    rig.open(0, furnace);
+    let click = |kind, from, mode| ContainerClick::Furnace { kind, mode, from };
+    assert_eq!(rig.step(0, "input from a bag slot", click(SlotKind::Input, 20, ClickMode::Stack)), ClickResult::Done);
+    assert_eq!(rig.step(0, "fuel from a bag slot", click(SlotKind::Fuel, 31, ClickMode::Stack)), ClickResult::Done);
+    let server_slot = |rig: &Rig, i| rig.server_container(0).and_then(|c| c.get(i).cloned());
+    assert_eq!(server_slot(&rig, container_window::FURNACE_INPUT).map(|s| s.count), Some(5), "the server's furnace holds the iron");
+    assert!(server_slot(&rig, container_window::FURNACE_FUEL).is_some(), "and the planks");
+    assert_eq!(rig.sp(0).inventory.slot(20), None, "the bag slot is empty on the server");
+    assert_eq!(rig.sp(0).inventory.slot(31), None);
+
+    // Take the fuel back: the planks return to the inventory (one may already be burning).
+    assert_eq!(rig.step(0, "fuel back", click(SlotKind::Fuel, crate::furnace::TAKE_BACK, ClickMode::Stack)), ClickResult::Done);
+    assert!(server_slot(&rig, container_window::FURNACE_FUEL).is_none(), "the fuel slot is empty");
+    assert!(rig.cs[0].count(&planks) >= 7, "the planks came back to the joiner");
+    let t = rig.tally(0);
+    assert_eq!((t.window_mismatch, t.container_corrected, t.container_refused), (0, 0, 0));
+}
+
+/// pt1124 — the host's own click on a lent world's furnace, loading from a bag
+/// slot, goes through the same window rule and reaches a joiner who has it
+/// open as a push of exactly the slots it changed.
+#[test]
+fn a_hosts_bag_slot_load_of_a_furnace_reaches_the_joiner() {
+    let mut rig = Rig::lent("furnace-host");
+    let furnace = rig.place(0, 2, block::FURNACE);
+    rig.open(0, furnace);
+    assert_eq!(rig.cs[0].mirror.as_ref().map(|m| m.kind), Some(ContainerKind::Furnace));
+    let before = rig.cs[0].slot_sets.len();
+    let mut host_inv = Inventory::new();
+    host_inv.set_slot(22, Some(ItemStack::new_material(MaterialId::Copper, 3)));
+    host_inv.set_slot(33, Some(ItemStack::new_material(MaterialId::Coal, 2)));
+    let (mut armour, mut cursor, mut grid) = ([None; 4], None, Default::default());
+    {
+        let f = rig.world().furnace_at_mut((furnace[0], furnace[1], furnace[2])).expect("the furnace exists");
+        let mut view = window::WindowMut {
+            inv: &mut host_inv,
+            armour: &mut armour,
+            cursor: &mut cursor,
+            grid: &mut grid,
+            container: Some(container_window::ContainerMut::Furnace(f)), offhand: &mut None,
+        };
+        let ctx = ClickCtx::new(false, Station::Player, Vec3::ZERO, |_| block::AIR);
+        for (kind, from) in [(SlotKind::Input, 22), (SlotKind::Fuel, 33)] {
+            let done = container_window::apply_container(&mut view, &ContainerClick::Furnace { kind, mode: ClickMode::Stack, from }, &ctx);
+            assert_eq!(done.result, ClickResult::Done, "{kind:?} from bag slot {from}");
+        }
+    }
+    assert_eq!((host_inv.slot(22), host_inv.slot(33)), (None, None), "both bag stacks left the host's inventory");
+    rig.tick();
+    let pushed: Vec<_> = rig.cs[0].slot_sets[before..].iter().flat_map(|p| p.sets.iter().map(|(at, _)| *at)).collect();
+    assert!(pushed.contains(&WireWindowSlot::Container(container_window::FURNACE_INPUT as u8)), "the input was pushed");
+    assert!(pushed.contains(&WireWindowSlot::Container(container_window::FURNACE_FUEL as u8)), "the fuel was pushed");
+    let crate::container_window::ContainerData::Furnace(f) = &rig.cs[0].mirror.as_ref().unwrap().contents else {
+        panic!("a furnace mirror")
+    };
+    assert_eq!(f.input.as_ref().map(|s| s.count), Some(3), "the joiner sees the copper");
+    rig.assert_lockstep(0, "after the host's loads");
 }
 
 /// Race — two joiners take the last stack of one chest slot in the same
@@ -1335,7 +1404,7 @@ fn a_furnace_output_click_during_a_cook_push_takes_what_the_furnace_really_held(
         rig.tick_holding(Some(0));
     }
     assert_eq!(output(&rig), 2, "a second cooked: its push is on its way");
-    let take = ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Stack, hotbar: 0 };
+    let take = ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Stack, from: 0 };
     let eye = rig.eye(0);
     assert_eq!(rig.cs[0].click(take, eye), ClickResult::Done);
     assert_eq!(rig.cs[0].count(&ingot), 1, "predicted: the one its view shows");
