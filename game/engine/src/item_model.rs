@@ -370,11 +370,30 @@ fn mask_of(rgba: &[u8]) -> Mask {
     m
 }
 
-/// The opaque texels of every stock texture layer (`texture_gen`, the set the
-/// GPU array starts from), worked out once.
+/// Every stock texture layer's pixels (`texture_gen`, the set the GPU array
+/// starts from), generated once and shared by the masks and the crumb colours.
+fn stock_textures() -> &'static [Vec<u8>] {
+    static TEXTURES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    TEXTURES.get_or_init(crate::texture_gen::generate_textures)
+}
+
+/// The opaque texels of every stock texture layer, worked out once.
 fn stock_masks() -> &'static [Mask] {
     static MASKS: OnceLock<Vec<Mask>> = OnceLock::new();
-    MASKS.get_or_init(|| crate::texture_gen::generate_textures().iter().map(|t| mask_of(t.as_slice())).collect())
+    MASKS.get_or_init(|| stock_textures().iter().map(|t| mask_of(t.as_slice())).collect())
+}
+
+/// The colour of texel (`x`, `y`) of stock layer `layer` as linear-free sRGB
+/// floats, or `None` for a texel that is transparent, off the tile, or a layer
+/// that is not a stock 16 x 16 icon (a pack's redraw keeps the stock colours
+/// here: crumbs are presentation only).
+pub(crate) fn texel_colour(layer: u32, x: usize, y: usize) -> Option<[f32; 3]> {
+    let rgba = stock_textures().get(layer as usize)?;
+    if rgba.len() != ICON * ICON * 4 || x >= ICON || y >= ICON {
+        return None;
+    }
+    let i = (y * ICON + x) * 4;
+    (rgba[i + 3] >= 128).then(|| [rgba[i] as f32 / 255.0, rgba[i + 1] as f32 / 255.0, rgba[i + 2] as f32 / 255.0])
 }
 
 /// The opaque texels of layer `layer`. A layer past the stock set (one a
@@ -444,11 +463,19 @@ fn quad(corners: [Vec3; 4], uvs: [[f32; 2]; 4], normal: Vec3) -> SpriteQuad {
 /// the thickness. The back shows each texel behind its front twin, so seen
 /// from behind the picture is mirrored, like a cut-out.
 pub fn sprite_quads(layer: u32, width: f32) -> Vec<SpriteQuad> {
-    let mask = layer_mask(layer);
+    sprite_quads_of(layer_mask(layer), width, SPRITE_DEPTH, true)
+}
+
+/// [`sprite_quads`] for an arbitrary `mask` of the icon's texels (a bitten
+/// food) and a thickness of `depth` times the width. With `whole_faces` the
+/// front and back are the whole icon (the cutout drops its clear texels, the
+/// stock sprite); without it they are one quad per run of masked texels, so
+/// texels the mask removed are not drawn at all.
+pub(crate) fn sprite_quads_of(mask: Mask, width: f32, depth: f32, whole_faces: bool) -> Vec<SpriteQuad> {
     let n = ICON as f32;
     let t = width / n; // one texel
     let h = width * 0.5;
-    let d = width * SPRITE_DEPTH * 0.5;
+    let d = width * depth * 0.5;
     // The left edge of column x and the top edge of row y, in sprite space.
     let xe = |x: usize| -h + x as f32 * t;
     let ye = |y: usize| h - y as f32 * t;
@@ -456,18 +483,38 @@ pub fn sprite_quads(layer: u32, width: f32) -> Vec<SpriteQuad> {
     let span = |lo: usize, hi: usize| ((lo as f32 + EDGE_INSET) / n, (hi as f32 - EDGE_INSET) / n);
     let v3 = Vec3::new;
 
-    let mut quads = vec![
-        quad(
+    let mut quads = Vec::new();
+    if whole_faces {
+        quads.push(quad(
             [v3(-h, -h, d), v3(h, -h, d), v3(h, h, d), v3(-h, h, d)],
             [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
             Vec3::Z,
-        ),
-        quad(
+        ));
+        quads.push(quad(
             [v3(h, -h, -d), v3(-h, -h, -d), v3(-h, h, -d), v3(h, h, -d)],
             [[1.0, 1.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
             Vec3::NEG_Z,
-        ),
-    ];
+        ));
+    } else {
+        // One front and one back quad per row-run of masked texels.
+        for y in 0..ICON {
+            for (x0, x1) in runs(|x| opaque(&mask, x as i32, y as i32)) {
+                let (xl, xr, yt, yb) = (xe(x0), xe(x1), ye(y), ye(y + 1));
+                let (ul, ur) = (x0 as f32 / n, x1 as f32 / n);
+                let (vt, vb) = (y as f32 / n, (y + 1) as f32 / n);
+                quads.push(quad(
+                    [v3(xl, yb, d), v3(xr, yb, d), v3(xr, yt, d), v3(xl, yt, d)],
+                    [[ul, vb], [ur, vb], [ur, vt], [ul, vt]],
+                    Vec3::Z,
+                ));
+                quads.push(quad(
+                    [v3(xr, yb, -d), v3(xl, yb, -d), v3(xl, yt, -d), v3(xr, yt, -d)],
+                    [[ur, vb], [ul, vb], [ul, vt], [ur, vt]],
+                    Vec3::NEG_Z,
+                ));
+            }
+        }
+    }
     for x in 0..ICON {
         let xi = x as i32;
         let (u0, u1) = span(x, x + 1);
@@ -508,9 +555,14 @@ pub fn sprite_quads(layer: u32, width: f32) -> Vec<SpriteQuad> {
 /// dropped items): every vertex on layer `layer` with [`CUTOUT_FLAG`] set and
 /// the placeholder light the caller stamps.
 pub fn sprite_triangles(layer: u32, width: f32) -> Vec<Vertex> {
-    let quads = sprite_quads(layer, width);
+    triangles_of(layer, &sprite_quads(layer, width))
+}
+
+/// A quad list as the entity passes' triangle list, on layer `layer` with
+/// [`CUTOUT_FLAG`] set.
+pub(crate) fn triangles_of(layer: u32, quads: &[SpriteQuad]) -> Vec<Vertex> {
     let mut verts = Vec::with_capacity(quads.len() * 6);
-    for q in &quads {
+    for q in quads {
         for i in [0, 1, 2, 0, 2, 3] {
             verts.push(Vertex {
                 position: q.corners[i].to_array(),

@@ -159,6 +159,33 @@ impl ParticleSystem {
         }
     }
 
+    /// Crumbs from a bite of food (Spec 05 §6.4.2): `n` tiny flecks, each in
+    /// one of `colours` (the colours of the texels the bite took off), loosed
+    /// from `pos` with a small outward and upward push and then falling under
+    /// full gravity. Smaller and gentler than block chips.
+    pub fn burst_crumbs(&mut self, pos: Vec3, colours: &[[f32; 3]], n: usize, seed: u64) {
+        if colours.is_empty() {
+            return;
+        }
+        for i in 0..n as u64 {
+            let c = colours[(i as usize + seed as usize) % colours.len()];
+            self.spawn(Particle {
+                pos: pos + Vec3::new(jitter(seed, i * 3) * 0.06, jitter(seed, i * 3 + 1) * 0.03, jitter(seed, i * 3 + 2) * 0.06),
+                vel: Vec3::new(jitter(seed, i * 5) * 0.9, 0.3 + unit(seed, i * 5 + 1) * 0.8, jitter(seed, i * 5 + 2) * 0.9),
+                life: 0.45 + unit(seed, i * 7) * 0.35,
+                max_life: 0.8,
+                size: 0.018 + unit(seed, i * 11) * 0.017,
+                color: [c[0], c[1], c[2], 1.0],
+                tex_layer: block::TEX_PARTICLE_CHIP,
+                gravity: 1.0,
+                drag: 0.3,
+                kill_y: f32::MIN,
+                grow: 0.0,
+                blink: 0.0,
+            });
+        }
+    }
+
     /// Block-break chips sampling the block's OWN texture (mini block faces,
     /// reads better than a flat tint at 16 px). Explosion debris keeps the
     /// flat-colour variant.

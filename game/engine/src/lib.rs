@@ -276,6 +276,8 @@ mod retired_files;
 mod signet_contacts;
 mod held_tool_model;
 mod item_model;
+mod eating_play; // GameState half of eating you can see: start, age, crumbs, munch.
+mod eating; // The bite you can see: the food comes up, loses bites, throws crumbs (Spec 05 §6.4.2).
 mod brand;
 mod splash_ui;
 mod loading_screen;
@@ -1471,6 +1473,9 @@ pub(crate) struct GameState {
     /// same countdown as `local_swing`, armed only by a right-click that routes
     /// to the off-hand (`hands::use_hand` is `Hand::Off`, `hands::swing_hands`).
     pub(crate) local_off_swing: std::collections::HashMap<usize, u32>,
+    /// Eating presentation, per LOCAL player index (`eating.rs`): the bite in
+    /// progress, drawn in the hand and at the mouth. Presentation only.
+    pub(crate) eating: std::collections::HashMap<usize, crate::eating::Eating>,
     /// Local player indices whose held right-click currently routes to the
     /// off-hand, written by the frame path's hand decision each frame it runs
     /// and read by the tick's swing arming. First-person feedback only.
@@ -2345,6 +2350,7 @@ impl GameState {
             gardener_told: crate::gardener_lines::Told::default(),
             local_swing: std::collections::HashMap::new(),
             local_off_swing: std::collections::HashMap::new(),
+            eating: std::collections::HashMap::new(),
             local_off_use: std::collections::HashSet::new(),
             local_guard: std::collections::HashSet::new(),
             shield_press: std::collections::HashMap::new(),
@@ -4439,7 +4445,7 @@ fn run_shot_3p(args: &[String]) {
         let fwd = camera.forward();
         ps.yaw = crate::entity_model::yaw_facing(fwd.x, fwd.z);
 
-        let (skin_v, _held) = crate::entity_model::self_avatar_vertices(mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic);
+        let (skin_v, _held) = crate::entity_model::self_avatar_vertices(mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic, None);
         renderer.upload_avatar_vertices(0, &skin_v); // empty (first-person) clears the buffer
 
         renderer.update_camera(0, &CameraUniform::from_camera(&camera));
@@ -4475,7 +4481,7 @@ fn run_shot_3p(args: &[String]) {
 
         let night_brightness = 0.05_f32;
         let (mut skin_v, _held) =
-            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic);
+            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic, None);
         let ch = world.light_channels_at(foot.x, foot.y, foot.z);
         crate::entity_model::set_avatar_light(&mut skin_v, ch, night_brightness);
         renderer.upload_avatar_vertices(0, &skin_v);
@@ -4542,7 +4548,7 @@ fn run_shot_3p(args: &[String]) {
         ps.yaw = crate::entity_model::yaw_facing(fwd.x, fwd.z);
         // Opaque body (fade 1.0) — proves the camera clamped in front of the wall.
         let (skin_v, _held) =
-            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic);
+            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, 1.0, &registry, crate::skin_uv::ArmModel::Classic, None);
         renderer.upload_avatar_vertices(0, &skin_v);
         renderer.update_camera(0, &CameraUniform::from_camera(&camera));
         renderer.render_to_png(&walled_path);
@@ -4567,7 +4573,7 @@ fn run_shot_3p(args: &[String]) {
         let fade_path = sib("play-3p-fade.png");
         let fade = crate::camera::avatar_fade_alpha(frac);
         let (skin_fv, _h) =
-            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, fade, &registry, crate::skin_uv::ArmModel::Classic);
+            crate::entity_model::self_avatar_vertices(camera.mode, &ps, 0.0, 0, 0, fade, &registry, crate::skin_uv::ArmModel::Classic, None);
         renderer.upload_avatar_vertices(0, &skin_fv);
         renderer.update_camera(0, &CameraUniform::from_camera(&camera));
         renderer.render_to_png(&fade_path);

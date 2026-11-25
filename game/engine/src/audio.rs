@@ -41,12 +41,14 @@ pub(crate) enum Sound {
     BirdsongWhistle,
     /// ...and a soft cricket trill. Quiet by design.
     Insects,
+    /// One bite of food (Spec 05 §6.4.2): a soft crunch and a low chew.
+    Munch,
 }
 
 impl Sound {
     /// Every sound, in discriminant order.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) const ALL: [Sound; 11] = [
+    pub(crate) const ALL: [Sound; 12] = [
         Sound::Break,
         Sound::Place,
         Sound::Footstep,
@@ -58,6 +60,7 @@ impl Sound {
         Sound::BirdsongTrill,
         Sound::BirdsongWhistle,
         Sound::Insects,
+        Sound::Munch,
     ];
 
     /// One of the three chirps, chosen by `seed` (so two birds sound different).
@@ -171,6 +174,13 @@ pub(crate) fn layers(sound: Sound) -> &'static [Layer] {
             Layer::Tone { secs: 0.10, freq: 2200.0, volume: 0.03, delay: 0.00 },
             Layer::Tone { secs: 0.10, freq: 1900.0, volume: 0.03, delay: 0.09 },
             Layer::Tone { secs: 0.14, freq: 1700.0, volume: 0.025, delay: 0.18 },
+        ],
+        // One bite: a short soft crunch (noise) over a low, quick chew thump,
+        // then a second, quieter crunch as the jaw closes. Procedural, no asset.
+        Sound::Munch => &[
+            Layer::Noise { secs: 0.05, volume: 0.12 },
+            Layer::Tone { secs: 0.07, freq: 170.0, volume: 0.10, delay: 0.0 },
+            Layer::Noise { secs: 0.04, volume: 0.07 },
         ],
         // Cricket trill: three short runs of four ticks.
         Sound::Insects => &[
@@ -348,6 +358,8 @@ mod native {
         pub fn play_birdsong(&self, seed: u64) { self.play(Sound::birdsong_variant(seed)); }
         /// Living-world ambience: a soft cricket trill.
         pub fn play_insects(&self) { self.play(Sound::Insects); }
+        /// One bite of food (the eating presentation, `eating.rs`).
+        pub fn play_munch(&self) { self.play(Sound::Munch); }
 
         pub fn play_footstep(&mut self, sprinting: bool) {
             let interval = if sprinting { Duration::from_millis(350) } else { Duration::from_millis(450) };
@@ -474,6 +486,8 @@ mod wasm {
         pub fn play_birdsong(&self, seed: u64) { self.play(Sound::birdsong_variant(seed)); }
         /// Living-world ambience: a soft cricket trill.
         pub fn play_insects(&self) { self.play(Sound::Insects); }
+        /// One bite of food (the eating presentation, `eating.rs`).
+        pub fn play_munch(&self) { self.play(Sound::Munch); }
 
         pub fn play_footstep(&mut self, sprinting: bool) {
             let interval = if sprinting { Duration::from_millis(350) } else { Duration::from_millis(450) };
@@ -600,6 +614,14 @@ mod tests {
         assert_eq!(effective_gain(7.0, false), 1.0);
         assert_eq!(effective_gain(-3.0, false), 0.0);
         assert_eq!(effective_gain(f32::NAN, false), 0.0);
+    }
+
+    #[test]
+    fn a_munch_is_short_and_soft() {
+        let pcm = render_mix(Sound::Munch, 1.0);
+        assert!(pcm.len() < SAMPLE_RATE as usize / 8, "a bite is under an eighth of a second");
+        let peak = pcm.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.03 && peak <= 0.3, "munch peak {peak}");
     }
 
     #[test]

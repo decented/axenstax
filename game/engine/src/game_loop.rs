@@ -3281,6 +3281,7 @@ impl super::GameState {
         self.remote_players.clear();
         self.local_swing.clear();
         self.local_off_swing.clear();
+        self.eating.clear();
         self.local_off_use.clear();
         self.local_guard.clear();
         self.shield_press.clear();
@@ -4699,7 +4700,7 @@ impl super::GameState {
     /// challenge board, the controls card, the Rig Studio, the Trials completion card
     /// and the Director. The tick's per-seat `menu_open` gate (before player 0's egui
     /// focus fold) and the frame path's use press (`use_press_ends`) ask this one.
-    fn seat_modal_open(&self, i: usize) -> bool {
+    pub(crate) fn seat_modal_open(&self, i: usize) -> bool {
         self.players[i].crafting_ui.open
             || (i == 0 && self.joined_quest_open())
             || self.players[i].dialogue_villager.is_some()
@@ -14809,9 +14810,15 @@ impl super::GameState {
                     // heal and hunger arrive with its state.
                     self.send_eat_request(pidx, hand);
                     self.players[pidx].start_eat_cooldown();
+                    // The bite is shown at once, on the request (presentation
+                    // only: the food goes when the server says so).
+                    let held = self.players[pidx].held_for_use(hand).map(|s| crate::item_model::HeldItem::of(&s.item));
+                    self.begin_eating(pidx, hand, held);
                     ate = true;
                 } else if can_eat
+                    && let Some(food) = self.players[pidx].held_for_use(hand).map(|s| crate::item_model::HeldItem::of(&s.item))
                     && let Some((value, poison)) = self.players[pidx].try_eat_for(hand) {
+                        self.begin_eating(pidx, hand, Some(food));
                         crate::item_actions::eat(&mut self.players[pidx].combat, value, poison);
                         self.fire_challenge(crate::scenario::ChallengeEvent::EatFood);
                         // Eating is a deliberate action — small cooldown so
@@ -17559,6 +17566,8 @@ impl super::GameState {
             let now = Instant::now();
             let dt = (now - self.last_particle_frame).as_secs_f32().min(0.1);
             self.last_particle_frame = now;
+            // Eating you can see: age each local player's bite, throw its crumbs.
+            self.tick_eating_presentation(dt);
             // Lightning flash decays fast (~0.3 s to dark).
             self.lightning_flash = (self.lightning_flash - dt * 3.5).max(0.0);
             // Living world: the shader clock and birdsong / insects by local level.
@@ -18020,6 +18029,7 @@ impl super::GameState {
                         fade,
                         &self.registry,
                         worn_arm,
+                        self.eating.get(&pidx).map(crate::eating::Eating::avatar),
                     );
                     // Campaign N — your own body dims with the world's light.
                     let ch = light_at(glam::Vec3::new(ps_self.x, ps_self.y, ps_self.z));
@@ -18068,6 +18078,7 @@ impl super::GameState {
                         // The session's model, not the worn one: the Arms row
                         // reshapes the mannequin live and only Pin commits it.
                         arm_model: s.arm_model,
+                        eating: None,
                     },
                     None => crate::entity_model::SkinRenderOpts {
                         edit_inflate: true,
@@ -18275,6 +18286,7 @@ impl super::GameState {
                 };
                 let (mut arm_verts, mut held_verts) = crate::viewmodel::build_viewmodel_hands(
                     held, off_held, bob, swing, swing_off, guard,
+                    self.eating.get(&pidx).map(crate::eating::Eating::avatar),
                     crate::pure_helpers::skin_layer_of(pidx),
                     &self.registry,
                     // Your own hand follows YOUR skin's Arms setting.

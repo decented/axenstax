@@ -32,6 +32,10 @@ pub struct SkinRenderOpts {
     /// MUST match what `skin_hit::ray_hit_avatar` and `skin_grid` are given, or
     /// the crosshair lands beside the arm on a slim avatar.
     pub arm_model: crate::skin_uv::ArmModel,
+    /// The avatar is eating (the local player's own body only, `eating.rs`):
+    /// the eating hand rises to the mouth holding the food as it was when the
+    /// bite was taken, minus the bites so far.
+    pub eating: Option<crate::eating::AvatarEating>,
 }
 
 impl Default for SkinRenderOpts {
@@ -41,6 +45,7 @@ impl Default for SkinRenderOpts {
             edit_inflate: false,
             draw_overlay: true,
             arm_model: crate::skin_uv::ArmModel::Classic,
+            eating: None,
         }
     }
 }
@@ -1474,16 +1479,18 @@ pub fn self_avatar_vertices(
     fade: f32,
     registry: &crate::block::BlockRegistry,
     arm_model: crate::skin_uv::ArmModel,
+    eating: Option<crate::eating::AvatarEating>,
 ) -> (Vec<Vertex>, Vec<Vertex>) {
     if mode.is_third_person() {
-        build_player_avatar_vertices(
+        build_player_avatar_vertices_travelling(
             ps,
             swing_progress,
             time_ticks,
             skin_layer,
             fade,
             registry,
-            arm_model,
+            SkinRenderOpts { arm_model, eating, ..Default::default() },
+            observed_travel(ps, time_ticks),
         )
     } else {
         (Vec::new(), Vec::new())
@@ -1709,6 +1716,11 @@ pub fn build_player_avatar_vertices_travelling(
                 arm_override = Some(arm_override.unwrap_or(walk_swing) + lift);
             }
         }
+        // Eating: the eating hand comes up to the mouth and chews, over whatever
+        // the arm was doing.
+        if let Some(e) = opts.eating.filter(|e| e.side.arm_index() == i) {
+            arm_override = Some(crate::eating::avatar_arm_angle(e.look, arm_override.unwrap_or(walk_swing)));
+        }
         let pose = PartPose { walk_swing, head_pitch: ps.pitch, arm_override, ..Default::default() };
         if let Some(slot) = part_angle.get_mut(i) {
             *slot = arm_override.unwrap_or(walk_swing);
@@ -1754,7 +1766,13 @@ pub fn build_player_avatar_vertices_travelling(
     // the part-builder transform order so the item rides the hand in every pose.
     let (sin_y, cos_y) = yaw.sin_cos();
     for (side, held) in [(crate::viewmodel::HandSide::Right, main_wire), (crate::viewmodel::HandSide::Left, off_wire)] {
-        let held = crate::item_model::HeldItem::from_wire(held);
+        let mut held = crate::item_model::HeldItem::from_wire(held);
+        // The eating hand shows the food as it was when the bite was taken (its
+        // slot may be empty or show the next item by now), minus its bites.
+        let eating = opts.eating.filter(|e| e.side == side);
+        if let Some(e) = eating {
+            held = e.held;
+        }
         if held.is_empty() {
             continue;
         }
@@ -1762,7 +1780,10 @@ pub fn build_player_avatar_vertices_travelling(
         let hand_anchor = avatar_hand_anchor(side, opts.arm_model);
         let arm_pivot = arm.pivot;
         let x_rot = part_angle[side.arm_index()];
-        let mut item_verts = crate::item_model::held_item_mesh(held, registry, side);
+        let mut item_verts = match eating {
+            Some(e) if e.look.bites > 0 => crate::eating::eaten_item_mesh(held, registry, side, e.look.bites),
+            _ => crate::item_model::held_item_mesh(held, registry, side),
+        };
         let pose = crate::hold_pose::hold_pose(held);
         // Off-hand release (slice 5) — a shield is placed by its own pose (worn on
         // the outside of the forearm, or lifted in front of the raised arm), not
@@ -4306,13 +4327,13 @@ mod tests {
         let ps = avatar_state(item_kind::EMPTY, 0, 0);
 
         // First-person: no self-avatar body (the first-person hand draws instead).
-        let (skin_fp, held_fp) = self_avatar_vertices(CameraMode::FirstPerson, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+        let (skin_fp, held_fp) = self_avatar_vertices(CameraMode::FirstPerson, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic, None);
         assert!(skin_fp.is_empty(), "first-person draws no self-avatar body");
         assert!(held_fp.is_empty(), "first-person self-avatar carries no held mesh");
 
         // Third-person: the full body mesh (same 432 verts a remote peer draws).
         for mode in [CameraMode::OverShoulder, CameraMode::OrbitBehind] {
-            let (skin, _held) = self_avatar_vertices(mode, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+            let (skin, _held) = self_avatar_vertices(mode, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic, None);
             assert_eq!(skin.len(), 432, "third-person draws the player's own body ({mode:?})");
         }
     }
@@ -4324,7 +4345,7 @@ mod tests {
         let reg = crate::block::BlockRegistry::new();
         // Holding a tool → the held sub-mesh appears in third-person (.1), like a remote.
         let ps = avatar_state(item_kind::TOOL, 2, 0);
-        let (_skin, held) = self_avatar_vertices(CameraMode::OverShoulder, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+        let (_skin, held) = self_avatar_vertices(CameraMode::OverShoulder, &ps, 0.0, 10, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic, None);
         assert_eq!(held.len(), 36, "third-person self-avatar shows the held tool");
     }
 
@@ -4398,14 +4419,14 @@ mod tests {
         let reg = crate::block::BlockRegistry::new();
         let ps = avatar_state(item_kind::EMPTY, 0, 0);
         // Opaque (fade 1.0): every skin vert is full-bright.
-        let (opaque, _) = self_avatar_vertices(CameraMode::OrbitBehind, &ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+        let (opaque, _) = self_avatar_vertices(CameraMode::OrbitBehind, &ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic, None);
         assert!(!opaque.is_empty(), "third-person builds self-avatar geometry");
         assert!(
             opaque.iter().all(|v| (v.light - 1.0).abs() < 1e-6),
             "fade 1.0 → full-bright (light==1.0) on every skin vert"
         );
         // Faded (0.5): every skin vert carries the fade alpha in its light channel.
-        let (faded, _) = self_avatar_vertices(CameraMode::OrbitBehind, &ps, 0.0, 0, 0, 0.5, &reg, crate::skin_uv::ArmModel::Classic);
+        let (faded, _) = self_avatar_vertices(CameraMode::OrbitBehind, &ps, 0.0, 0, 0, 0.5, &reg, crate::skin_uv::ArmModel::Classic, None);
         assert!(!faded.is_empty());
         assert!(
             faded.iter().all(|v| (v.light - 0.5).abs() < 1e-6),
@@ -4419,7 +4440,7 @@ mod tests {
         use crate::protocol::item_kind;
         let reg = crate::block::BlockRegistry::new();
         let ps = avatar_state(item_kind::EMPTY, 0, 0);
-        let (v, _) = self_avatar_vertices(CameraMode::FirstPerson, &ps, 0.0, 0, 0, 0.3, &reg, crate::skin_uv::ArmModel::Classic);
+        let (v, _) = self_avatar_vertices(CameraMode::FirstPerson, &ps, 0.0, 0, 0, 0.3, &reg, crate::skin_uv::ArmModel::Classic, None);
         assert!(v.is_empty(), "first-person draws no self-avatar, faded or not");
     }
 
