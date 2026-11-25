@@ -19988,6 +19988,7 @@ impl super::GameState {
                         &self.renderer.egui,
                         self.input.bindings(),
                         pidx == 0 && self.input.inventory_toggle,
+                        self.players[pidx].inventory.hotbar_slot(self.players[pidx].hotbar_slot),
                     );
                     match outcome {
                         crate::furnace_ui::FurnaceUiOutcome::Closed => {

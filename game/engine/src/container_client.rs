@@ -111,6 +111,7 @@ impl crate::GameState {
                     &self.renderer.egui,
                     self.input.bindings(),
                     pidx == 0 && self.input.inventory_toggle,
+                    self.players[pidx].inventory.hotbar_slot(self.players[pidx].hotbar_slot),
                 ) {
                     crate::furnace_ui::FurnaceUiOutcome::Closed => closed = true,
                     crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode } => {

@@ -1344,6 +1344,7 @@ The furnace is a block entity with three slots: input, fuel, and output. **Spec 
 4. Default smelt time: **10 seconds** (200 ticks at 20 TPS).
 5. The output item appears in the output slot. If the output slot is full or contains a different item, smelting pauses.
 6. Press **'E'** or **Esc** to close the UI (matches the inventory close-key idiom).
+   **What the screen says (2026-11-25, `furnace_ui`, `furnace::click_refusal`).** The slots name the item as the inventory does ("Raw Iron", "Oak Planks"), never a Rust debug name or a registry id; a line under the slots names the item selected on the hotbar (the one a click on Input or Fuel loads, and still the only source: the screen has no bag, an owner call to change); and a click that moves nothing says why for three seconds: "That can't be smelted" (Input, not an ore), "That won't burn" (Fuel, not a fuel), "The Input/Fuel slot holds something else: take it out first", "The Input/Fuel slot is full", "Select what to load on your hotbar first" (an empty hand on an empty slot), "There is nothing there to take". `click_refusal` is pure and a test pins that it names a reason exactly when `apply_slot_click` returns `NoOp` (a full bag, the one other cause, is not seen by it). Fuel bar and hint copy are unchanged otherwise.
 7. **Mining the furnace spills its contents.** Breaking a furnace block spawns every
    item in its input, fuel, and output slots as item-drop entities and removes the
    block-entity outright — the cell is genuinely empty afterward. (Fixed 2026-07-07:

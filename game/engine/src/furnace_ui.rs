@@ -10,6 +10,8 @@
 //!   close the UI.
 //! - The slot-click event handler lives in `furnace::apply_slot_click`
 //!   so the logic is testable without the egui frame loop.
+//! - A click that moves nothing says why on the screen (`furnace::click_refusal`), and the slots
+//!   carry the item's plain name, not its Rust debug name.
 
 use crate::block::BlockRegistry;
 use crate::egui_integration::EguiIntegration;
@@ -32,12 +34,16 @@ pub enum FurnaceUiOutcome {
 
 const OVERLAY_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 180);
 const TITLE_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 195, 100);
+const NOTICE_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 140, 110);
+/// How long a refusal stays on the furnace screen, in seconds.
+const NOTICE_SECONDS: f64 = 3.0;
 
 /// Draw the furnace UI. Returns the outcome — caller (game_loop)
 /// clears the player's `open_furnace` field on `Closed`. `inventory_pressed` is
 /// this frame's Inventory press (`InputState::inventory_toggle`, player 0 only):
 /// the inventory key closes the furnace as it opens the inventory, whatever it
-/// is bound to; `keys` names it in the hint.
+/// is bound to; `keys` names it in the hint. `held` is the item selected on the hotbar, the one a
+/// click on Input or Fuel loads: a click that can do nothing with it says why under the slots.
 pub fn draw_furnace_ui(
     ctx: &egui::Context,
     viewport: &crate::screen::ViewportRect,
@@ -47,6 +53,7 @@ pub fn draw_furnace_ui(
     _egui_integration: &EguiIntegration,
     keys: &crate::keybindings::Bindings,
     inventory_pressed: bool,
+    held: Option<&ItemStack>,
 ) -> FurnaceUiOutcome {
     let mut outcome = FurnaceUiOutcome::InProgress;
 
@@ -83,6 +90,7 @@ pub fn draw_furnace_ui(
 
                 let shift_held = ctx.input(|i| i.modifiers.shift);
                 let mode = if shift_held { ClickMode::Stack } else { ClickMode::Single };
+                let notice_id = egui::Id::new(("furnace_notice", player_index));
 
                 ui.horizontal(|ui| {
                     if slot_button(ui, "Input", data.input.as_ref(), registry).clicked() {
@@ -122,11 +130,32 @@ pub fn draw_furnace_ui(
                     outcome = FurnaceUiOutcome::SlotClick { kind: SlotKind::Output, mode };
                 }
 
-                ui.add_space(16.0);
+                // A click that moves nothing says why, for a few seconds.
+                let now = ctx.input(|i| i.time);
+                if let FurnaceUiOutcome::SlotClick { kind, .. } = outcome
+                    && let Some(why) = crate::furnace::click_refusal(data, held, kind)
+                {
+                    ctx.data_mut(|d| d.insert_temp(notice_id, (why.message(), now + NOTICE_SECONDS)));
+                }
+                let notice = ctx
+                    .data(|d| d.get_temp::<(&'static str, f64)>(notice_id))
+                    .filter(|(_, until)| *until > now);
+                ui.add_space(8.0);
+                ui.label(match notice {
+                    Some((text, _)) => egui::RichText::new(text).size(15.0).color(NOTICE_COLOR).strong(),
+                    None => egui::RichText::new(match held {
+                        Some(stack) => format!("Selected on your hotbar: {}", stack.item.name(registry)),
+                        None => "Nothing selected on your hotbar".to_string(),
+                    })
+                    .size(13.0)
+                    .color(egui::Color32::GRAY),
+                });
+
+                ui.add_space(12.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "Click Input to load ore (raw iron / copper / tin). \
-                         Click Fuel to load coal / planks / logs. \
+                        "Click Input or Fuel to load the item selected on your hotbar: \
+                         raw iron, copper or tin goes in Input; coal, planks, logs and sticks go in Fuel. \
                          Click Output to take ingots. \
                          Shift-click moves a whole stack. Press {} or Esc to close.",
                         keys.hint(crate::keybindings::Action::Inventory),
@@ -148,6 +177,12 @@ pub fn draw_furnace_ui(
     outcome
 }
 
+/// What a furnace slot calls the item in it: the same plain name the inventory shows
+/// (`Raw Iron`, `Oak Planks`), not a Rust debug name or a registry id.
+fn slot_item_label(item: &Item, registry: &BlockRegistry) -> String {
+    item.name(registry)
+}
+
 /// Spec 29 — slot rendered as a clickable button so the player can
 /// drag/drop / single-click without right-clicking the world block.
 /// The returned `Response` lets the caller emit a SlotClick outcome.
@@ -160,13 +195,7 @@ fn slot_button(
     let label = match stack {
         None => format!("{name}\nempty"),
         Some(s) => {
-            let item_label = match &s.item {
-                Item::Material(m) => format!("{:?}", m),
-                Item::Block(b) => registry.get(*b).name.to_string(),
-                Item::Tool(_) => "tool".to_string(),
-                Item::Plan(_) => "plan".to_string(),
-                Item::Armour(_) => "armour".to_string(),
-            };
+            let item_label = slot_item_label(&s.item, registry);
             if s.count > 1 {
                 format!("{name}\n{item_label} ×{}", s.count)
             } else {
@@ -175,4 +204,22 @@ fn slot_button(
         }
     };
     ui.add_sized([110.0, 56.0], egui::Button::new(label))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item::MaterialId;
+
+    #[test]
+    fn slots_carry_plain_names_not_debug_names() {
+        let reg = BlockRegistry::new();
+        assert_eq!(slot_item_label(&Item::Material(MaterialId::RawIron), &reg), "Raw Iron");
+        assert_eq!(slot_item_label(&Item::Material(MaterialId::IronIngot), &reg), "Iron Ingot");
+        assert_eq!(slot_item_label(&Item::Block(crate::block::OAK_PLANKS), &reg), "Oak Planks");
+        let tool = Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron));
+        let label = slot_item_label(&tool, &reg);
+        assert_ne!(label, "tool");
+        assert!(!label.contains("genesis:"));
+    }
 }
