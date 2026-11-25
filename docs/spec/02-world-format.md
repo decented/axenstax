@@ -152,6 +152,29 @@ bitflags! {
 Block properties are **immutable** after registration. They are loaded once at startup
 from block definition files (TOML or plugin API) and indexed by numeric ID for O(1) lookup.
 
+**Support (pt1124, 2026-11-25).** A few blocks are *attached*: they need a neighbour to hold them and
+drop as their item when it goes. The table is `BlockRegistry::attachment(id, meta)`, one row per block:
+
+| Block | Needs |
+|---|---|
+| Torch (23) | any solid neighbour, on any of the six sides (a torch records no facing) |
+| Lantern (380), standing | the cell below solid |
+| Lantern (380), hanging (state bit 0) | the cell above solid, or a lantern (a lantern hangs under a lantern) |
+
+Everything else stands on its own (paper lanterns are solid cubes; signs, ladders, rails, levers, buttons,
+crops and flowers are not in the table yet). *Solid* is `BlockDef.solid`, so glass, leaves, slabs, fences,
+walls and fence posts all hold. The rule runs in one place, `support::tick_support`: every block change
+outside world-gen passes `World::set_block`, which logs the cell (at most `MAX_SUPPORT_LOG` 8192 between
+passes, runtime only); the pass checks each logged cell and its six neighbours, decides every drop against
+the world as it stood at the start of the pass, then sets each to AIR (meta 0, not player-placed), takes its
+light out and returns the block's mining drop. A cleared cell is logged in turn, so a chain falls one link per
+pass. A neighbour in a column the world holds nothing of counts as holding (unknown is never a reason to drop).
+The pass runs beside the falling blocks (every 4th tick) on the side that owns the world: a standalone client,
+a lending host's server, a dedicated server; the server sends each AIR change and spawns the item in its ECS,
+and a joined client discards its own log. A save restore and a pushed chunk never fill the log, so a torch
+already floating in an old world stays until something beside it changes. A lantern placed on a block's side
+face is stamped standing: with nothing below it, it drops on the first pass.
+
 ### 1.4 Block States
 
 Beyond the static type, individual block instances can have **state**. Block state is

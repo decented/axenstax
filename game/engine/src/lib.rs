@@ -291,6 +291,7 @@ mod tick_catchup;
 mod prediction; // Spec 04 §5.3 — a joiner's prediction + reconciliation of its own body.
 mod block_interact;
 mod falling_blocks;
+mod support; // pt1124 — torches and lanterns drop when their support goes.
 mod feast_client; // Living world S3 — the client half: local arms, confetti, bloom feed.
 mod feast; // Living world S3 — the Feast rule (spec §3).
 mod tally; // Living world S5 — the Tally: session counters and the container stock (spec §5).

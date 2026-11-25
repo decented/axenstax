@@ -7497,6 +7497,20 @@ impl super::GameState {
                 for bc in &falling_changes {
                     dirty_chunks.insert(World::block_to_chunk(bc.x, bc.y, bc.z));
                 }
+                // pt1124 — torches and lanterns whose support went drop as
+                // items (`support.rs`). A joined client never runs it: its
+                // server drops them and sends the change and the item.
+                if !self.joined() {
+                    let dropped = crate::support::tick_support(&mut self.world, &self.registry);
+                    crate::support::spawn_drops(&mut self.ecs, &dropped);
+                    for d in &dropped {
+                        self.rebuild_chunks_for_lighting(d.cell.0, d.cell.1, d.cell.2);
+                    }
+                }
+            }
+            // A joined client's log is its server's business (see above).
+            if self.joined() {
+                self.world.discard_support_log();
             }
 
             if self.sim_runs(SimSystem::Fluids) {

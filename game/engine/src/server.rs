@@ -2218,6 +2218,12 @@ impl GameServer {
                     MAX_CHUNK_Y,
                 );
                 self.pending_block_changes.extend(falling_changes);
+                // pt1124 — torches and lanterns whose support went (by any
+                // cause, this tick's falls included) drop as items; the AIR
+                // change reaches every client.
+                let dropped = crate::support::tick_support(&mut self.world, &self.registry);
+                crate::support::spawn_drops(&mut self.ecs, &dropped);
+                self.pending_block_changes.extend(dropped.iter().map(crate::support::Dropped::air_change));
             }
 
             if self.runs(SimSystem::Fluids) {

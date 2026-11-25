@@ -4,7 +4,8 @@
 //! - **One id, three uses.** The same `Item::Block(LANTERN)` sits in a hand, stands
 //!   on the top of a block, or hangs from the underside of one. Light 15 when
 //!   placed (`BlockRegistry::light_emission`); torches stay 14 and paper lanterns
-//!   12. There is no support rule: like a torch it stays if its support is broken.
+//!   12. It needs a support (pt1124, `support.rs`): a standing lantern the block
+//!   below it, a hanging one the block or lantern above it; lose it and it drops.
 //! - **Hanging is a state bit.** Placing it against the underside of a block
 //!   (`face == [0, -1, 0]`) stamps [`HANGING_STATE`] into the meta byte
 //!   ([`placement_meta`], called from `placement_meta::placement_meta`), the

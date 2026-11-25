@@ -1415,8 +1415,11 @@ second by hand.
   **underside** of a block hangs it from the ceiling of its cell on a short chain. The difference is one state bit
   (`meta::state` bit 0) that `placement_meta::placement_meta` stamps, a joiner's placement carries in its `BlockChange.meta`,
   and the mesher reads to pick the standing or the hanging shell (`lantern::model_key`).
-- **No support rule.** It stays if the block it stands on or hangs from is broken, exactly as a torch does. A general
-  support rule (a torch, a sign, a lantern that drops when its block goes) is a later piece of work for all of them.
+- **Support (pt1124).** A standing lantern needs the block below it and a hanging one the block (or lantern) above
+  it; a torch needs any solid neighbour. When that goes, by any cause (a break by any seat, a blast, a piston, a fall,
+  fire), the block drops as its item within a fifth of a second, and a chain of hanging lanterns follows one link at a
+  time. One rule for all of them: Spec 02 §1.3 "Support". A lantern clicked onto a block's side is stamped standing,
+  so with nothing under it it drops at once.
 - **Recipe (workbench).** An iron ingot over a torch over an iron ingot, a vertical column, makes **1 lantern**. A
   three-tall column does not fit the 2x2 player grid, so it is workbench-only; the recipe book card says so
   (`crafting_catalogue`, usage line: hold it for light, put it down, or click the underside of a block to hang it).

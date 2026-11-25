@@ -6,6 +6,7 @@ pub mod handshake;
 pub mod mobs;
 pub mod spawn_protection;
 pub mod blocks;
+mod support; // pt1124 — torches and lanterns drop when their support goes: a break, a blast, a chain.
 pub mod physics;
 pub mod save_load;
 mod save_pristine_columns; // Spec 02 §7.5.1 — a save writes the edited columns only; untouched land regenerates.

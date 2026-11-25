@@ -493,6 +493,11 @@ pub struct BrowseEntry {
 /// past it the oldest is dropped.
 pub const MAX_TABLES_GONE_LOGGED: usize = 256;
 
+/// pt1124 — most cells [`World`]'s support log holds between two support
+/// passes (a pass drains it at 5 Hz). Past it a change is not logged, so an
+/// attached block beside it stays until its next neighbour change.
+pub const MAX_SUPPORT_LOG: usize = 8192;
+
 /// C3c-3b — most face-attachment changes a world's log holds between a
 /// server's takes (it takes them every tick; an honest tick logs a few, a
 /// keg blast or a falling column a few dozen); past it the oldest is dropped.
@@ -581,6 +586,16 @@ pub struct World {
     /// `window_ops::TablesGone`), so single-player and a joiner keep nothing.
     /// Runtime-only.
     tables_gone: Option<Vec<(i32, i32, i32)>>,
+    /// pt1124 — cells whose block changed outside world-gen since the last
+    /// [`World::take_support_cells`] (at most [`MAX_SUPPORT_LOG`], in cell
+    /// order): the queue `support::tick_support` checks for attached blocks
+    /// (torches, lanterns) that lost what held them. Every change passes
+    /// `set_block`, so a break, a blast, a piston, a fall, a fire and a joiner's
+    /// edit all land here alike. A joined client discards it (its server drops
+    /// the blocks); a save restore and `insert_chunk` never fill it, so blocks
+    /// already floating in a loaded world stay until a neighbour changes.
+    /// Runtime-only.
+    support_log: std::collections::BTreeSet<(i32, i32, i32)>,
     /// C3c-3b — the faces whose attachment changed (set, removed, or a laid
     /// Blueprint developed) since the last [`World::take_attachment_changes`],
     /// oldest first, at most [`MAX_ATTACHMENT_CHANGES_LOGGED`]; a face can
@@ -990,6 +1005,7 @@ impl World {
             worldgen_top: WORLD_HEIGHT - 1,
             edited_columns: None,
             tables_gone: None,
+            support_log: std::collections::BTreeSet::new(),
             attachment_log: None,
             disk_chunks: std::sync::Mutex::new(ahash::AHashSet::new()),
             block_entities: AHashMap::new(),
@@ -1346,6 +1362,29 @@ impl World {
     /// the last call, oldest first (none when not tracking), cleared.
     pub fn take_tables_gone(&mut self) -> Vec<(i32, i32, i32)> {
         self.tables_gone.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// pt1124 — up to `max` logged changed cells, in cell order, taken off the
+    /// support log (`support::tick_support`); the rest wait for the next pass.
+    pub fn take_support_cells(&mut self, max: usize) -> Vec<(i32, i32, i32)> {
+        let mut out = Vec::with_capacity(max.min(self.support_log.len()));
+        while out.len() < max {
+            let Some(cell) = self.support_log.pop_first() else { break };
+            out.push(cell);
+        }
+        out
+    }
+
+    /// pt1124 — drop the support log unread: a joined client's world, whose
+    /// server runs the support pass and sends what it drops.
+    pub fn discard_support_log(&mut self) {
+        self.support_log.clear();
+    }
+
+    /// pt1124 — how many changed cells wait for the support pass.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn support_log_len(&self) -> usize {
+        self.support_log.len()
     }
 
     /// C3c-3b — start logging face-attachment changes (see the
@@ -2661,6 +2700,11 @@ impl World {
             // break it was never told of, cannot come back to life).
             if (was == block::SITE_BOARD) != (block == block::SITE_BOARD) {
                 self.site_boards.remove(&(x, y, z));
+            }
+            // pt1124 — a changed cell may have held a torch or a lantern (or
+            // be one put where nothing holds it): the support pass checks it.
+            if self.support_log.len() < MAX_SUPPORT_LOG {
+                self.support_log.insert((x, y, z));
             }
             // C3b-fix-d (A-L5) — a table gone, for a server's table grace.
             if was == block::CRAFTING_TABLE
