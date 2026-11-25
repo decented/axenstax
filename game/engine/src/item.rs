@@ -2003,6 +2003,8 @@ mod tests {
             MaterialId::SeasonedCookedBeef, MaterialId::SeasonedCookedPorkchop,
             MaterialId::SeasonedCookedMutton, MaterialId::SeasonedCookedChicken,
             MaterialId::SeasonedCookedRabbit,
+            // Fishing: now enumerated (they had drifted off ALL_MATERIAL_IDS).
+            MaterialId::RawFish, MaterialId::CookedFish,
         ];
 
         // Every MaterialId must be exhaustively classified.

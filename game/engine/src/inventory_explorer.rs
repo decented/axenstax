@@ -279,6 +279,16 @@ pub const ALL_MATERIAL_IDS: &[MaterialId] = &[
     MaterialId::Saltpetre,
     MaterialId::BlackPowder,
     MaterialId::Compost,
+    // Pets wave and the sea: they had drifted off the table (found by `/give`'s coverage test,
+    // 2026-11-25), so the creative inventory could not hand them out.
+    MaterialId::RawFish,
+    MaterialId::CookedFish,
+    MaterialId::SharkTooth,
+    MaterialId::GlowInk,
+    MaterialId::RecallWhistle,
+    MaterialId::CatTreat,
+    MaterialId::CrabClaw,
+    MaterialId::ReachClaw,
 ];
 
 /// (ToolType, ToolMaterial) pairs that are actually valid in the engine.
@@ -726,7 +736,25 @@ mod tests {
         // HempSeeds (Brown/Cyan/Magenta dyes, Lead/Cloth/Canvas, the three
         // flower seeds, the Bellows, and the three carts) had drifted off.
         // 2026-06-22: +2 — WaterBucket + LavaBucket (Buckets MC-parity).
-        assert_eq!(ALL_MATERIAL_IDS.len(), 161);
+        assert_eq!(ALL_MATERIAL_IDS.len(), 169);
+        // ...and the count above is not a guess: it is the number of variants the enum is
+        // declared with, read from its source, and every one of them is in the table.
+        let source = include_str!("item.rs");
+        let body = &source[source.find("pub enum MaterialId {").expect("MaterialId") + 21..];
+        let body = &body[..body.find("\n}").expect("the end of MaterialId")];
+        let declared: Vec<&str> = body
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or("").trim())
+            .filter(|l| l.starts_with(|c: char| c.is_ascii_uppercase()) && l.ends_with(','))
+            .map(|l| l.trim_end_matches(','))
+            .collect();
+        for name in &declared {
+            assert!(
+                ALL_MATERIAL_IDS.iter().any(|m| format!("{m:?}") == *name),
+                "MaterialId::{name} is declared but missing from ALL_MATERIAL_IDS"
+            );
+        }
+        assert_eq!(declared.len(), ALL_MATERIAL_IDS.len());
     }
 
     #[test]

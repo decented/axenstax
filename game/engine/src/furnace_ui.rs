@@ -1,43 +1,62 @@
-//! Spec 20 Phase 5 — Furnace egui overlay. **Spec 29 (2026-05-21)**
-//! reworked the surface following the tester's playtest:
+//! Spec 20 Phase 5 — Furnace egui overlay. **Spec 29 (2026-05-21)** made the
+//! three furnace slots clickable; **pt1124 (2026-11-25)** showed the player's
+//! whole inventory beside them, the way the chest screen does, after a tester
+//! could not get fuel and ore in (the old screen loaded only the item selected
+//! on the hotbar, and said nothing when it refused):
 //!
-//! - Three slots are now **clickable buttons** with Minecraft-style
-//!   semantics. Left-click moves 1 unit; shift-click moves the whole
-//!   stack. Empty hand on a slot = take from slot. Held item on Input
-//!   = place if smeltable. Held item on Fuel = place if has fuel
-//!   value. Output is take-only (held item is ignored).
-//! - The **Close button is gone**. 'E' (matching inventory) and Esc
-//!   close the UI.
-//! - The slot-click event handler lives in `furnace::apply_slot_click`
-//!   so the logic is testable without the egui frame loop.
+//! - The inventory (bag and hotbar) is drawn under the furnace's slots. Click
+//!   an item to send it where it belongs: a smeltable (raw iron, copper, tin)
+//!   to Input, fuel (coal, sticks, planks, logs, leaves) to Fuel
+//!   (`furnace::route_stack`, the one routing rule). A click moves one;
+//!   Shift-click, or the "Move whole stacks" switch (touch and controller have
+//!   no Shift), moves the whole stack.
+//! - Click Input, Fuel or Output to take their contents back.
+//! - A click that moves nothing says why on the screen (`furnace::click_refusal`),
+//!   and every slot carries the item's plain name.
+//! - 'E' (the inventory key) and Esc close; there is no Close button.
+//! - The click rules live in `furnace::apply_slot_click`, reached through
+//!   `container_window::ContainerClick::Furnace` (host, solo and joined play
+//!   all use the same window path).
 
 use crate::block::BlockRegistry;
 use crate::egui_integration::EguiIntegration;
-use crate::furnace::{FurnaceData, SMELT_TICKS_PER_ITEM, SlotKind, ClickMode};
+use crate::furnace::{ClickMode, FurnaceData, SlotKind, SMELT_TICKS_PER_ITEM, TAKE_BACK};
+use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack};
 
-/// UI outcome. Spec 29 expanded this enum: in addition to Closed and
-/// InProgress, the UI can emit a SlotClick event the caller routes
-/// through `furnace::apply_slot_click` on its own inventory state.
+/// UI outcome: the screen is still open, closed, or a slot was clicked and the
+/// caller routes it through the window (`ContainerClick::Furnace`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FurnaceUiOutcome {
     /// UI is still open this frame, no click events.
     InProgress,
-    /// Player closed the UI (Esc, 'E', or click outside).
+    /// Player closed the UI (Esc or the inventory key).
     Closed,
-    /// Player clicked a slot. Caller invokes
-    /// `furnace::apply_slot_click(..)` with the player's inventory.
-    SlotClick { kind: SlotKind, mode: ClickMode },
+    /// Player clicked: `kind` is the furnace slot the move is for (already
+    /// routed for an inventory click), `from` the inventory slot it loads
+    /// from or `furnace::TAKE_BACK`.
+    SlotClick { kind: SlotKind, mode: ClickMode, from: usize },
 }
 
 const OVERLAY_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 180);
 const TITLE_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 195, 100);
+const NOTICE_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 140, 110);
+/// Tints for the inventory stacks the furnace takes: smeltable and fuel.
+const SMELT_TINT: egui::Color32 = egui::Color32::from_rgb(40, 62, 92);
+const FUEL_TINT: egui::Color32 = egui::Color32::from_rgb(92, 58, 30);
+/// How long a refusal stays on the furnace screen, in seconds.
+const NOTICE_SECONDS: f64 = 3.0;
+/// Panel width: nine inventory columns.
+const PANEL_WIDTH: f32 = 9.0 * (INV_SLOT.0 + 4.0);
+/// An inventory slot button (width, height).
+const INV_SLOT: (f32, f32) = (58.0, 46.0);
 
 /// Draw the furnace UI. Returns the outcome — caller (game_loop)
 /// clears the player's `open_furnace` field on `Closed`. `inventory_pressed` is
 /// this frame's Inventory press (`InputState::inventory_toggle`, player 0 only):
 /// the inventory key closes the furnace as it opens the inventory, whatever it
-/// is bound to; `keys` names it in the hint.
+/// is bound to; `keys` names it in the hint. `inventory` is the player's own
+/// (bag and hotbar), drawn under the furnace's slots.
 pub fn draw_furnace_ui(
     ctx: &egui::Context,
     viewport: &crate::screen::ViewportRect,
@@ -47,6 +66,7 @@ pub fn draw_furnace_ui(
     _egui_integration: &EguiIntegration,
     keys: &crate::keybindings::Bindings,
     inventory_pressed: bool,
+    inventory: &Inventory,
 ) -> FurnaceUiOutcome {
     let mut outcome = FurnaceUiOutcome::InProgress;
 
@@ -62,79 +82,128 @@ pub fn draw_furnace_ui(
     .rect_filled(overlay_rect, 0.0, OVERLAY_BG);
 
     let panel_origin = egui::pos2(
-        viewport.x as f32 + viewport.width as f32 / 2.0 - 180.0,
-        viewport.y as f32 + 80.0,
+        viewport.x as f32 + (viewport.width as f32 - PANEL_WIDTH) / 2.0,
+        viewport.y as f32 + 16.0,
     );
+    let notice_id = egui::Id::new(("furnace_notice", player_index));
+    let whole_id = egui::Id::new(("furnace_whole_stacks", player_index));
     egui::Area::new(egui::Id::new(("furnace_panel", player_index)))
         .fixed_pos(panel_origin)
         .interactable(true)
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            ui.set_min_width(360.0);
-            ui.set_max_width(360.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new("Furnace")
-                        .size(24.0)
-                        .color(TITLE_COLOR)
-                        .strong(),
-                );
-                ui.add_space(12.0);
+            ui.set_min_width(PANEL_WIDTH);
+            ui.set_max_width(PANEL_WIDTH);
+            // A short window scrolls rather than pushing Close and the hint off the bottom.
+            egui::ScrollArea::vertical()
+                .max_height((viewport.height as f32 - 32.0).max(120.0))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new("Furnace").size(24.0).color(TITLE_COLOR).strong());
+                        ui.add_space(8.0);
 
-                let shift_held = ctx.input(|i| i.modifiers.shift);
-                let mode = if shift_held { ClickMode::Stack } else { ClickMode::Single };
+                        // Shift, or the switch for a screen with no Shift (touch, controller).
+                        let mut whole = ctx.data(|d| d.get_temp::<bool>(whole_id)).unwrap_or(false);
+                        if ui.checkbox(&mut whole, "Move whole stacks").changed() {
+                            ctx.data_mut(|d| d.insert_temp(whole_id, whole));
+                        }
+                        let mode = if whole || ctx.input(|i| i.modifiers.shift) { ClickMode::Stack } else { ClickMode::Single };
+                        ui.add_space(6.0);
 
-                ui.horizontal(|ui| {
-                    if slot_button(ui, "Input", data.input.as_ref(), registry).clicked() {
-                        outcome = FurnaceUiOutcome::SlotClick { kind: SlotKind::Input, mode };
-                    }
-                    ui.add_space(8.0);
-                    if slot_button(ui, "Fuel", data.fuel.as_ref(), registry).clicked() {
-                        outcome = FurnaceUiOutcome::SlotClick { kind: SlotKind::Fuel, mode };
-                    }
+                        // The furnace's own three slots: click to take back.
+                        ui.horizontal(|ui| {
+                            ui.add_space((PANEL_WIDTH - 3.0 * 110.0 - 16.0) / 2.0);
+                            if slot_button(ui, "Input", data.input.as_ref(), registry).clicked() {
+                                outcome = FurnaceUiOutcome::SlotClick { kind: SlotKind::Input, mode, from: TAKE_BACK };
+                            }
+                            if slot_button(ui, "Fuel", data.fuel.as_ref(), registry).clicked() {
+                                outcome = FurnaceUiOutcome::SlotClick { kind: SlotKind::Fuel, mode, from: TAKE_BACK };
+                            }
+                            if slot_button(ui, "Output", data.output.as_ref(), registry).clicked() {
+                                outcome = FurnaceUiOutcome::SlotClick { kind: SlotKind::Output, mode, from: TAKE_BACK };
+                            }
+                        });
+                        ui.add_space(6.0);
+
+                        // Progress bar — fills from 0 to 1 across SMELT_TICKS_PER_ITEM.
+                        let progress = if data.smelt_total > 0 {
+                            (data.smelt_progress as f32) / (data.smelt_total as f32)
+                        } else {
+                            0.0
+                        };
+                        ui.add(egui::ProgressBar::new(progress.clamp(0.0, 1.0))
+                            .desired_width(280.0)
+                            .text(if data.lit { "smelting…" } else { "idle" }));
+                        // Fuel-burn indicator — separate bar so the player can tell at a glance
+                        // whether the furnace is starved. Visual scale is one coal's burn (4800
+                        // ticks); the words are seconds (20 ticks a second).
+                        let fuel_frac = if data.fuel_ticks_remaining > 0 {
+                            (data.fuel_ticks_remaining as f32 / 4800.0).min(1.0)
+                        } else {
+                            0.0
+                        };
+                        ui.add(egui::ProgressBar::new(fuel_frac)
+                            .desired_width(280.0)
+                            .text(if data.fuel_ticks_remaining > 0 {
+                                format!("burning: {} s left", data.fuel_ticks_remaining.div_ceil(20))
+                            } else {
+                                "not burning".to_string()
+                            }));
+
+                        // The player's whole inventory: bag on top, hotbar underneath.
+                        ui.add_space(10.0);
+                        ui.label(egui::RichText::new("Your inventory").strong());
+                        for row in [1, 2, 3, 0] {
+                            if row == 0 {
+                                ui.add_space(4.0);
+                            }
+                            ui.horizontal(|ui| {
+                                for col in 0..9 {
+                                    let idx = row * 9 + col;
+                                    let stack = inventory.slot(idx);
+                                    if inventory_button(ui, stack, data, registry).clicked()
+                                        && let Some(stack) = stack
+                                    {
+                                        match crate::furnace::route_stack(data, stack) {
+                                            Ok(kind) => outcome = FurnaceUiOutcome::SlotClick { kind, mode, from: idx },
+                                            Err(why) => notice(ctx, notice_id, why.message()),
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        // A click that moves nothing says why, for a few seconds, and is not sent.
+                        if let FurnaceUiOutcome::SlotClick { kind, from, .. } = outcome
+                            && let Some(why) = crate::furnace::click_refusal(data, inventory, from, kind)
+                        {
+                            notice(ctx, notice_id, why.message());
+                            outcome = FurnaceUiOutcome::InProgress;
+                        }
+                        let now = ctx.input(|i| i.time);
+                        let shown = ctx
+                            .data(|d| d.get_temp::<(&'static str, f64)>(notice_id))
+                            .filter(|(_, until)| *until > now);
+                        ui.add_space(8.0);
+                        ui.label(match shown {
+                            Some((text, _)) => egui::RichText::new(text).size(15.0).color(NOTICE_COLOR).strong(),
+                            None => egui::RichText::new(" ").size(15.0),
+                        });
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Click an item to load it: blue goes in Input (raw iron, copper, tin), \
+                                 orange goes in Fuel (coal, planks, logs, sticks). \
+                                 Click Input, Fuel or Output to take things out. \
+                                 Shift-click moves a whole stack. Press {} or Esc to close.",
+                                keys.hint(crate::keybindings::Action::Inventory),
+                            ))
+                            .size(13.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                        );
+                    });
                 });
-                ui.add_space(8.0);
-
-                // Progress bar — fills from 0 to 1 across SMELT_TICKS_PER_ITEM.
-                let progress = if data.smelt_total > 0 {
-                    (data.smelt_progress as f32) / (data.smelt_total as f32)
-                } else {
-                    0.0
-                };
-                let progress = progress.clamp(0.0, 1.0);
-                ui.add(egui::ProgressBar::new(progress)
-                    .desired_width(220.0)
-                    .text(if data.lit { "smelting…" } else { "idle" }));
-
-                // Fuel-burn indicator — separate bar so the player can
-                // tell at a glance whether the furnace is starved.
-                let fuel_frac = if data.fuel_ticks_remaining > 0 {
-                    // Cap visual scale at one coal-worth of burn (4800 ticks)
-                    // so a leaf-burn doesn't look like a full reserve.
-                    (data.fuel_ticks_remaining as f32 / 4800.0).min(1.0)
-                } else { 0.0 };
-                ui.add(egui::ProgressBar::new(fuel_frac)
-                    .desired_width(220.0)
-                    .text(format!("fuel: {} ticks", data.fuel_ticks_remaining)));
-
-                ui.add_space(8.0);
-                if slot_button(ui, "Output", data.output.as_ref(), registry).clicked() {
-                    outcome = FurnaceUiOutcome::SlotClick { kind: SlotKind::Output, mode };
-                }
-
-                ui.add_space(16.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Click Input to load ore (raw iron / copper / tin). \
-                         Click Fuel to load coal / planks / logs. \
-                         Click Output to take ingots. \
-                         Shift-click moves a whole stack. Press {} or Esc to close.",
-                        keys.hint(crate::keybindings::Action::Inventory),
-                    ))
-                    .size(13.0)
-                    .color(egui::Color32::LIGHT_GRAY),
-                );
-            });
         });
 
     // Esc + the inventory key close — Spec 29: the inventory key (E unless
@@ -148,8 +217,19 @@ pub fn draw_furnace_ui(
     outcome
 }
 
-/// Spec 29 — slot rendered as a clickable button so the player can
-/// drag/drop / single-click without right-clicking the world block.
+/// Show `text` on the furnace screen for a few seconds.
+fn notice(ctx: &egui::Context, id: egui::Id, text: &'static str) {
+    let until = ctx.input(|i| i.time) + NOTICE_SECONDS;
+    ctx.data_mut(|d| d.insert_temp(id, (text, until)));
+}
+
+/// What a furnace slot calls the item in it: the same plain name the inventory shows
+/// (`Raw Iron`, `Oak Planks`), not a Rust debug name or a registry id.
+fn slot_item_label(item: &Item, registry: &BlockRegistry) -> String {
+    item.name(registry)
+}
+
+/// Spec 29 — one of the furnace's own slots, a clickable button (click to take its contents out).
 /// The returned `Response` lets the caller emit a SlotClick outcome.
 fn slot_button(
     ui: &mut egui::Ui,
@@ -160,13 +240,7 @@ fn slot_button(
     let label = match stack {
         None => format!("{name}\nempty"),
         Some(s) => {
-            let item_label = match &s.item {
-                Item::Material(m) => format!("{:?}", m),
-                Item::Block(b) => registry.get(*b).name.to_string(),
-                Item::Tool(_) => "tool".to_string(),
-                Item::Plan(_) => "plan".to_string(),
-                Item::Armour(_) => "armour".to_string(),
-            };
+            let item_label = slot_item_label(&s.item, registry);
             if s.count > 1 {
                 format!("{name}\n{item_label} ×{}", s.count)
             } else {
@@ -174,5 +248,45 @@ fn slot_button(
             }
         }
     };
-    ui.add_sized([110.0, 56.0], egui::Button::new(label))
+    let resp = ui.add_sized([110.0, 56.0], egui::Button::new(label));
+    if stack.is_some() { resp.on_hover_text("Click to take it out") } else { resp }
+}
+
+/// One inventory slot: the item's plain name and count, tinted blue when the furnace would
+/// smelt it and orange when it would burn it (the tint is `route_stack`'s answer).
+fn inventory_button(
+    ui: &mut egui::Ui,
+    stack: Option<&ItemStack>,
+    data: &FurnaceData,
+    registry: &BlockRegistry,
+) -> egui::Response {
+    let size = egui::vec2(INV_SLOT.0, INV_SLOT.1);
+    let Some(stack) = stack else {
+        return ui.add_sized(size, egui::Button::new(" ").sense(egui::Sense::hover()));
+    };
+    let name = slot_item_label(&stack.item, registry);
+    let text = if stack.count > 1 { format!("{name}\n×{}", stack.count) } else { name.clone() };
+    let mut button = egui::Button::new(egui::RichText::new(text).size(10.0));
+    if let Ok(kind) = crate::furnace::route_stack(data, stack) {
+        button = button.fill(if kind == SlotKind::Input { SMELT_TINT } else { FUEL_TINT });
+    }
+    ui.add_sized(size, button).on_hover_text(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item::MaterialId;
+
+    #[test]
+    fn slots_carry_plain_names_not_debug_names() {
+        let reg = BlockRegistry::new();
+        assert_eq!(slot_item_label(&Item::Material(MaterialId::RawIron), &reg), "Raw Iron");
+        assert_eq!(slot_item_label(&Item::Material(MaterialId::IronIngot), &reg), "Iron Ingot");
+        assert_eq!(slot_item_label(&Item::Block(crate::block::OAK_PLANKS), &reg), "Oak Planks");
+        let tool = Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron));
+        let label = slot_item_label(&tool, &reg);
+        assert_ne!(label, "tool");
+        assert!(!label.contains("genesis:"));
+    }
 }

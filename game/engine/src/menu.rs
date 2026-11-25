@@ -4257,7 +4257,14 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                             });
                     }
                 } else {
-                    body(ui, PausePart::All);
+                    // A window barely over the compact threshold is shorter than the whole
+                    // menu: scroll it rather than cut off its last buttons.
+                    egui::ScrollArea::vertical()
+                        .max_height(dialog_scroll_cap(ui.available_height(), 60.0))
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| body(ui, PausePart::All));
+                        });
                 }
             });
         });
@@ -4964,6 +4971,9 @@ const SETTINGS_PHONE_MAX_WIDTH: f32 = 760.0;
 /// ...spends this much height on everything but its scroll area (its frame, the header row
 /// with the title and the pinned Back, and the gaps), so the scroll area takes the rest...
 const SETTINGS_PHONE_CHROME: f32 = 78.0;
+/// ...a desktop panel spends this much (title bar, frame, the gaps and the Back button under
+/// the scroll area, which stays pinned and reachable)...
+const SETTINGS_DESKTOP_CHROME: f32 = 112.0;
 /// ...and the Window's own frame is this much wider than the content it holds.
 const SETTINGS_PHONE_FRAME_WIDTH: f32 = 14.0;
 /// Its text is this much larger than a desktop panel's, and its sliders this wide.
@@ -4971,6 +4981,21 @@ const SETTINGS_PHONE_TEXT_SCALE: f32 = 1.2;
 const SETTINGS_PHONE_SLIDER_WIDTH: f32 = 180.0;
 /// ...on a screen at least this wide (in points).
 const SETTINGS_PHONE_ROOMY_WIDTH: f32 = 560.0;
+
+/// The tallest the Settings dials' scroll area may be on a window `content_height` points high,
+/// so the whole panel (frame, title, scroll area, Back) fits the window at every size: the dials
+/// scroll whenever they are taller than this, on a desktop window as on a phone. Never under 120.
+fn settings_scroll_height(content_height: f32, compact: bool) -> f32 {
+    let chrome = if compact { SETTINGS_PHONE_CHROME } else { SETTINGS_DESKTOP_CHROME };
+    (content_height - 2.0 * SETTINGS_PHONE_EDGE - chrome).max(120.0)
+}
+
+/// The tallest a dialog's scroll area may be in `available` points of height, leaving a small
+/// margin at the bottom of the screen; never under `floor`. The pause menu's tall layout and the
+/// relays window use it so a long body scrolls instead of running off the screen.
+pub(crate) fn dialog_scroll_cap(available: f32, floor: f32) -> f32 {
+    (available - 8.0).max(floor)
+}
 
 /// Draw the Settings panel (graphics, chat, sound, camera). Mutates `gfx` in place and returns
 /// `Changed` when any dial/preset moved (caller applies live + persists), or
@@ -4998,11 +5023,12 @@ pub fn draw_settings_panel(
     // On a compact (phone) screen the panel takes nearly the whole screen: a header row with the
     // title and the pinned Back (so it is always reachable), and under it the dials in a scroll
     // area that takes the rest of the height, in larger text. A thumb drags it from anywhere,
-    // sliders included (see `touch_slider`). A tall window keeps the panel as it was.
+    // sliders included (see `touch_slider`). A tall window keeps the panel's layout (title, then
+    // dials, then Back) but its dials scroll too when they are taller than the window.
     let compact = dialog_is_compact(ctx);
     let content = ctx.content_rect();
     let phone_width = (content.width() - 2.0 * SETTINGS_PHONE_EDGE).min(SETTINGS_PHONE_MAX_WIDTH);
-    let settings_scroll_h = (content.height() - 2.0 * SETTINGS_PHONE_EDGE - SETTINGS_PHONE_CHROME).max(120.0);
+    let settings_scroll_h = settings_scroll_height(content.height(), compact);
     // Larger text and wider sliders need the room of a landscape phone; a portrait phone's
     // rows (the frame-limit buttons, a slider with its label) would not fit beside them.
     let roomy = compact && content.width() >= SETTINGS_PHONE_ROOMY_WIDTH;
@@ -5480,7 +5506,13 @@ pub fn draw_settings_panel(
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                     .show(ui, |ui| settings_body(ui));
             } else {
-                settings_body(ui);
+                // A desktop window scrolls the dials the same way (Back stays under them);
+                // when they fit, the area shrinks to them and nothing scrolls.
+                egui::ScrollArea::vertical()
+                    .max_height(settings_scroll_h)
+                    .min_scrolled_height(settings_scroll_h)
+                    .auto_shrink([true, true])
+                    .show(ui, |ui| settings_body(ui));
             }
 
             if !compact {

@@ -127,11 +127,15 @@ pub enum ContainerClick {
     /// "Take all": the whole container into the inventory, best-effort
     /// (`chest_ui::take_all`).
     TakeAll,
-    /// A furnace slot click (`furnace::apply_slot_click`): `kind` × `mode`,
-    /// with hotbar slot `hotbar` held (input and fuel are fed from the held
-    /// stack). The slot rides with the click: the server's latest input may
-    /// name an older one.
-    Furnace { kind: SlotKind, mode: ClickMode, hotbar: usize },
+    /// A furnace slot click (`furnace::apply_slot_click`): `kind` × `mode`.
+    /// Input and fuel load from inventory slot `from` (0..36, the bag as
+    /// well as the hotbar) or, when `from` is `furnace::TAKE_BACK`, take
+    /// their contents back; Output ignores `from` and takes. The slot rides
+    /// with the click. (The field was the held hotbar slot, 0..9, before
+    /// the furnace screen showed the whole inventory: the wire shape is
+    /// unchanged, and an older server refuses a slot past 8, which
+    /// corrects the client.)
+    Furnace { kind: SlotKind, mode: ClickMode, from: usize },
 }
 
 /// The open container a [`WindowMut`] borrows.
@@ -290,11 +294,8 @@ fn apply_rule(view: &mut WindowMut, click: &ContainerClick, ctx: &ClickCtx) -> C
             let shared = ctx.shared;
             done_if(crate::chest_ui::take_all_where(inv, chest, |s| !(shared && is_plan(Some(s)))))
         }
-        (ContainerMut::Furnace(furnace), ContainerClick::Furnace { kind, mode, hotbar }) => {
-            if *hotbar >= crate::window::BAG_START {
-                return ClickResult::Refused;
-            }
-            match crate::furnace::apply_slot_click(furnace, inv, *hotbar, *kind, *mode) {
+        (ContainerMut::Furnace(furnace), ContainerClick::Furnace { kind, mode, from }) => {
+            match crate::furnace::apply_slot_click(furnace, inv, *from, *kind, *mode) {
                 SlotClickResult::Moved { .. } => ClickResult::Done,
                 SlotClickResult::NoOp => ClickResult::Refused,
             }
@@ -372,7 +373,7 @@ impl Prints {
 
 /// The window slots a container click names: the container slot it
 /// withdraws from, the inventory slot it deposits from, or the furnace slot
-/// (and, feeding it, the held hotbar slot) it clicks. A correction always
+/// (and, feeding it, the inventory slot it loads from) it clicks. A correction always
 /// covers its container slots, and an op always claims its player slots,
 /// whatever either side's apply changed.
 pub fn named_slots(click: &ContainerClick) -> Vec<WireWindowSlot> {
@@ -382,7 +383,7 @@ pub fn named_slots(click: &ContainerClick) -> Vec<WireWindowSlot> {
         ContainerClick::Deposit { slot, .. } => {
             small(*slot).filter(|&i| usize::from(i) < SLOTS).map(WireWindowSlot::Inv).into_iter().collect()
         }
-        ContainerClick::Furnace { kind, hotbar, .. } => {
+        ContainerClick::Furnace { kind, from, .. } => {
             let at = match kind {
                 SlotKind::Input => FURNACE_INPUT,
                 SlotKind::Fuel => FURNACE_FUEL,
@@ -390,7 +391,7 @@ pub fn named_slots(click: &ContainerClick) -> Vec<WireWindowSlot> {
             };
             let mut named = vec![WireWindowSlot::Container(at as u8)];
             if *kind != SlotKind::Output
-                && let Some(h) = small(*hotbar).filter(|&h| usize::from(h) < crate::window::BAG_START)
+                && let Some(h) = small(*from).filter(|&h| usize::from(h) < SLOTS)
             {
                 named.push(WireWindowSlot::Inv(h));
             }
@@ -1445,21 +1446,30 @@ mod tests {
         let mut w = Win::new();
         w.inv.set_slot(2, Some(ItemStack::new_material(MaterialId::RawIron, 4)));
         w.inv.set_slot(3, Some(ItemStack::new_material(MaterialId::Coal, 2)));
-        let input = w.furnace(ContainerClick::Furnace { kind: SlotKind::Input, mode: ClickMode::Stack, hotbar: 2 });
+        let input = w.furnace(ContainerClick::Furnace { kind: SlotKind::Input, mode: ClickMode::Stack, from: 2 });
         assert_eq!(input.result, ClickResult::Done);
         assert_eq!(input.touched, vec![WireWindowSlot::Inv(2), WireWindowSlot::Container(FURNACE_INPUT as u8)]);
-        let fuel = w.furnace(ContainerClick::Furnace { kind: SlotKind::Fuel, mode: ClickMode::Single, hotbar: 3 });
+        let fuel = w.furnace(ContainerClick::Furnace { kind: SlotKind::Fuel, mode: ClickMode::Single, from: 3 });
         assert_eq!(fuel.result, ClickResult::Done);
         assert_eq!(w.furnace.fuel, Some(ItemStack::new_material(MaterialId::Coal, 1)));
         w.furnace.output = Some(ItemStack::new_material(MaterialId::IronIngot, 2));
-        let out = w.furnace(ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Stack, hotbar: 0 });
+        let out = w.furnace(ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Stack, from: 0 });
         assert_eq!(out.result, ClickResult::Done);
         assert!(out.touched.contains(&WireWindowSlot::Container(FURNACE_OUTPUT as u8)));
         assert_eq!(w.furnace.output, None);
-        let nothing = w.furnace(ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Stack, hotbar: 0 });
+        let nothing = w.furnace(ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Stack, from: 0 });
         assert_eq!(nothing.result, ClickResult::Refused);
-        let past = w.furnace(ContainerClick::Furnace { kind: SlotKind::Input, mode: ClickMode::Stack, hotbar: 9 });
-        assert_eq!(past.result, ClickResult::Refused, "a hotbar slot past 8 is refused");
+        let past = w.furnace(ContainerClick::Furnace { kind: SlotKind::Input, mode: ClickMode::Stack, from: 9 });
+        assert_eq!(past.result, ClickResult::Refused, "a slot with nothing in it moves nothing");
+        w.inv.set_slot(20, Some(ItemStack::new_material(MaterialId::RawIron, 3)));
+        let bag = w.furnace(ContainerClick::Furnace { kind: SlotKind::Input, mode: ClickMode::Stack, from: 20 });
+        assert_eq!(bag.result, ClickResult::Done, "a bag slot loads the furnace");
+        assert_eq!(bag.touched, vec![WireWindowSlot::Inv(20), WireWindowSlot::Container(FURNACE_INPUT as u8)]);
+        let off = w.furnace(ContainerClick::Furnace { kind: SlotKind::Input, mode: ClickMode::Stack, from: 36 });
+        assert_eq!(off.result, ClickResult::Refused, "a slot past the inventory is refused");
+        let back = w.furnace(ContainerClick::Furnace { kind: SlotKind::Input, mode: ClickMode::Stack, from: crate::furnace::TAKE_BACK });
+        assert_eq!(back.result, ClickResult::Done, "TAKE_BACK returns it to the inventory");
+        assert_eq!(w.furnace.input, None);
     }
 
     #[test]
@@ -1469,7 +1479,7 @@ mod tests {
         w.inv.set_slot(0, Some(ItemStack::new_material(MaterialId::RawIron, 1)));
         assert_eq!(w.furnace(ContainerClick::Withdraw { slot: 0, all: true }).result, ClickResult::Refused);
         assert_eq!(
-            w.chest(ContainerClick::Furnace { kind: SlotKind::Input, mode: ClickMode::Stack, hotbar: 0 }, true).result,
+            w.chest(ContainerClick::Furnace { kind: SlotKind::Input, mode: ClickMode::Stack, from: 0 }, true).result,
             ClickResult::Refused
         );
         assert_eq!(w.none(ContainerClick::TakeAll).result, ClickResult::Refused);
@@ -1674,7 +1684,7 @@ mod tests {
     fn claims_cover_what_the_rule_reads_and_the_rerun_lands_only_in_them() {
         let refused_deposit = claim_slots(&ContainerClick::Deposit { slot: 7, all: true }, &[]);
         assert_eq!(refused_deposit, vec![WireWindowSlot::Inv(7)], "a deposit's source even when nothing moved");
-        let feed = ContainerClick::Furnace { kind: SlotKind::Fuel, mode: ClickMode::Single, hotbar: 3 };
+        let feed = ContainerClick::Furnace { kind: SlotKind::Fuel, mode: ClickMode::Single, from: 3 };
         assert_eq!(claim_slots(&feed, &[WireWindowSlot::Container(1)]), vec![WireWindowSlot::Inv(3)], "the held slot, never a container slot");
         assert_eq!(claim_slots(&ContainerClick::Restock, &[]).len(), SLOTS, "Restock reads every slot");
 

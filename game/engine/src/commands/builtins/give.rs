@@ -21,24 +21,35 @@ pub struct GiveCommand;
 /// handler) can provision a `ScenarioDef.kit` through the same vocabulary the
 /// `/give` command uses — one resolver, no duplicate item tables.
 pub(crate) fn resolve_item(name: &str, count: u8) -> Result<ItemStack, String> {
+    match resolve_known(name, count)? {
+        Some(stack) => Ok(stack),
+        None => Err(unknown_item(name, &normalise(name))),
+    }
+}
+
+/// [`resolve_item`] without the unknown-name message: `Ok(None)` for a name nothing names. The
+/// message reads the suggestion list, and the suggestion list is built by resolving names, so the
+/// list's own builder must use this (a name that fails there would otherwise wait on the list it
+/// is building).
+pub(super) fn resolve_known(name: &str, count: u8) -> Result<Option<ItemStack>, String> {
     let key = normalise(name);
     if let Some(block_id) = block_by_name(&key) {
-        return Ok(ItemStack::new_block(block_id, count.max(1)));
+        return Ok(Some(ItemStack::new_block(block_id, count.max(1))));
     }
     if let Some((tt, tm)) = tool_by_name(&key) {
         // Tools don't stack; ignore count.
-        return Ok(ItemStack::new_tool(Tool::new(tt, tm)));
+        return Ok(Some(ItemStack::new_tool(Tool::new(tt, tm))));
     }
     if let Some((tt, tm)) = bow_by_name(&key) {
-        return Ok(ItemStack::new_tool(Tool::new(tt, tm)));
+        return Ok(Some(ItemStack::new_tool(Tool::new(tt, tm))));
     }
     if let Some(mat) = material_by_name(&key) {
-        return Ok(ItemStack::new_material(mat, count.max(1)));
+        return Ok(Some(ItemStack::new_material(mat, count.max(1))));
     }
     // Armour: one piece (`satori_helmet`, `iron boots`). Armour never stacks, so the count is
     // ignored here; `resolve_items` is the one that hands out several pieces or a whole set.
     match armour_by_name(&key) {
-        Some(ArmourWant::Piece(slot, material)) => return Ok(ItemStack::new_armour(slot, material)),
+        Some(ArmourWant::Piece(slot, material)) => return Ok(Some(ItemStack::new_armour(slot, material))),
         Some(ArmourWant::Set(_)) => {
             return Err(format!("'{name}' is a whole armour set, not one item; /give hands it out piece by piece"));
         }
@@ -49,21 +60,28 @@ pub(crate) fn resolve_item(name: &str, count: u8) -> Result<ItemStack, String> {
     // build paths once those phases ship. Plans don't stack, so count
     // is ignored.
     if matches!(key.as_str(), "debug_plan" | "plan" | "test_plan") {
-        return Ok(crate::item::ItemStack {
+        return Ok(Some(crate::item::ItemStack {
             item: crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()),
             count: 1,
-        });
+        }));
     }
     // Wind, Copper & Electricity wave (2026-09-07) — the little-hut plan the
     // "Follow the Plan" build-along Trial provisions. Plans don't stack, so
     // count is ignored here too.
     if matches!(key.as_str(), "hut_plan" | "house_plan" | "small_house") {
-        return Ok(crate::item::ItemStack {
+        return Ok(Some(crate::item::ItemStack {
             item: crate::item::Item::Plan(crate::plan::PlanData::small_hut()),
             count: 1,
-        });
+        }));
     }
-    Err(unknown_item(name, &key))
+    // Last resort before the typo rule: any registered block or material by its display name
+    // or registry name (`Spruce Planks`, `genesis:spruce_planks`).
+    match super::give_names::registry_item_by_name(&key) {
+        Some(crate::item::Item::Block(id)) => return Ok(Some(ItemStack::new_block(id, count.max(1)))),
+        Some(crate::item::Item::Material(mat)) => return Ok(Some(ItemStack::new_material(mat, count.max(1)))),
+        _ => {}
+    }
+    Ok(None)
 }
 
 /// A player-typed name as a table key: lower case, words joined by `_` whether they were

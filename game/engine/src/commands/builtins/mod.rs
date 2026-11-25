@@ -13,6 +13,8 @@ mod give_names;
 #[cfg(test)]
 mod give_golden_tests;
 #[cfg(test)]
+mod give_registry_tests;
+#[cfg(test)]
 mod give_armour_tests;
 pub mod spawnpoint;
 pub mod heal;

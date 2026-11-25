@@ -111,14 +111,14 @@ impl crate::GameState {
                     &self.renderer.egui,
                     self.input.bindings(),
                     pidx == 0 && self.input.inventory_toggle,
+                    &self.players[pidx].inventory,
                 ) {
                     crate::furnace_ui::FurnaceUiOutcome::Closed => closed = true,
-                    crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode } => {
+                    crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode, from } => {
                         if matches!(kind, crate::furnace::SlotKind::Output) && data.output.is_some() {
                             self.fire_challenge(crate::scenario::ChallengeEvent::SmeltItem);
                         }
-                        let hotbar = self.players[pidx].hotbar_slot;
-                        clicks.push(ContainerClick::Furnace { kind, mode, hotbar });
+                        clicks.push(ContainerClick::Furnace { kind, mode, from });
                         self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
                     }
                     crate::furnace_ui::FurnaceUiOutcome::InProgress => {}

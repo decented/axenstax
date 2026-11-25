@@ -203,7 +203,70 @@ fn a_tall_window_keeps_the_settings_panel_unscrolled() {
     let content = SettingsRig::new(egui::vec2(1280.0, 1400.0), Some(false)).window();
     assert_eq!(rig.window(), content);
     let forced = SettingsRig::new(PIXEL_PORTRAIT, Some(false));
-    assert!(forced.window().height() > PIXEL_PORTRAIT.y, "the uncompact panel should be taller than a phone: {:?}", forced.window());
+    // Its content is taller than a phone, but the dials scroll now: the panel stays inside the screen.
+    assert!(screen_of(PIXEL_PORTRAIT).contains_rect(forced.window()), "the uncompact panel runs off the phone: {:?}", forced.window());
+    assert!(forced.on_screen("Back"), "{:?}", texts(&forced.output));
+}
+
+/// Desktop window sizes, from just over the compact threshold up to a big monitor.
+const DESKTOP_SIZES: [egui::Vec2; 5] = [
+    egui::vec2(1280.0, 640.0),
+    egui::vec2(1280.0, 720.0),
+    egui::vec2(1366.0, 768.0),
+    egui::vec2(1600.0, 900.0),
+    egui::vec2(1920.0, 1080.0),
+];
+
+#[test]
+fn the_settings_scroll_height_leaves_room_for_the_rest_of_the_panel_at_every_size() {
+    for compact in [true, false] {
+        let mut last = 0.0_f32;
+        for h in [100.0_f32, 300.0, 640.0, 768.0, 1080.0, 1440.0] {
+            let cap = settings_scroll_height(h, compact);
+            assert!(cap >= 120.0, "never under 120: {cap} at {h}");
+            if h >= 400.0 {
+                assert!(cap < h, "the scroll area {cap} must be shorter than the window {h}");
+            }
+            assert!(cap >= last, "a taller window never gets a shorter scroll area");
+            last = cap;
+        }
+    }
+    // The pause menu and relays rule: a margin under the body, and a floor.
+    assert_eq!(dialog_scroll_cap(500.0, 60.0), 492.0);
+    assert_eq!(dialog_scroll_cap(20.0, 60.0), 60.0);
+}
+
+#[test]
+fn settings_scrolls_and_keeps_back_reachable_on_a_desktop_window_of_every_size() {
+    let last = crate::menu::version_line();
+    for size in DESKTOP_SIZES {
+        let mut rig = SettingsRig::new(size, None);
+        assert!(screen_of(size).contains_rect(rig.window()), "the Settings window {:?} runs off the {size:?} screen", rig.window());
+        assert!(rig.on_screen("Back"), "Back is not on the {size:?} screen: {:?}", texts(&rig.output));
+        rig.scroll_to_end();
+        assert!(rig.on_screen(&last), "the last line did not scroll into view at {size:?}: {:?}", texts(&rig.output));
+        assert!(rig.on_screen("Back"), "Back left the screen when scrolled at {size:?}");
+        assert!(screen_of(size).contains_rect(rig.window()), "the window left the {size:?} screen when scrolled");
+    }
+}
+
+#[test]
+fn settings_with_the_controls_page_open_still_fits_a_desktop_window() {
+    let size = egui::vec2(1366.0, 768.0);
+    let mut rig = SettingsRig::new(size, None);
+    // The Controls header is partway down the dials: scroll until it is in view.
+    for _ in 0..60 {
+        if rig.on_screen("Controls") {
+            break;
+        }
+        rig.frame(wheel(rig.size.to_pos2() * 0.5, -60.0));
+    }
+    rig.frame(vec![]);
+    rig.tap("Controls");
+    assert!(screen_of(size).contains_rect(rig.window()), "{:?}", rig.window());
+    rig.scroll_to_end();
+    assert!(rig.on_screen("Back"));
+    assert!(screen_of(size).contains_rect(rig.window()), "{:?}", rig.window());
 }
 
 // ---- Pause menu ----------------------------------------------------------------------------
@@ -443,6 +506,23 @@ fn a_trials_pause_menu_is_on_screen_on_every_phone_size() {
         for label in ["Resume", "\u{21bb} Try Again", "\u{2190} Leave", "Controls"] {
             assert!(rig.on_screen(label), "{label:?} is not on the {size:?} screen: {:?}", texts(&rig.output));
         }
+    }
+}
+
+#[test]
+fn a_desktop_window_just_over_the_compact_height_scrolls_the_pause_menu() {
+    for size in [egui::vec2(1280.0, 640.0), egui::vec2(1280.0, 700.0), egui::vec2(1366.0, 768.0)] {
+        let mut rig = PauseRig::with(size, false, false);
+        for label in ["Paused", "Resume"] {
+            assert!(rig.on_screen(label), "{label} is not on the {size:?} screen: {:?}", texts(&rig.output));
+        }
+        // Whatever the menu does not show at once scrolls into view.
+        let at = rig.size.to_pos2() * 0.5;
+        for _ in 0..40 {
+            rig.frame(wheel(at, -400.0));
+        }
+        rig.frame(vec![]);
+        assert!(rig.on_screen("Switch to Creative"), "the last button never scrolled into view at {size:?}: {:?}", texts(&rig.output));
     }
 }
 

@@ -4886,7 +4886,7 @@ mod tests {
             ContainerClick::DumpMatching,
             ContainerClick::Restock,
             ContainerClick::TakeAll,
-            ContainerClick::Furnace { kind: SlotKind::Fuel, mode: ClickMode::Stack, hotbar: 8 },
+            ContainerClick::Furnace { kind: SlotKind::Fuel, mode: ClickMode::Stack, from: 8 },
         ];
         for (index, click) in clicks.into_iter().enumerate() {
             let pkt = WindowOpPacket {
@@ -4921,7 +4921,7 @@ mod tests {
         // ClickMode Single/Stack = 0/1 (after the click's variant u32).
         let furnace = WindowOpPacket {
             op_seq: 1,
-            op: WireWindowOp::Container(ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Single, hotbar: 0 }),
+            op: WireWindowOp::Container(ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Single, from: 0 }),
             digest: 0,
             events_applied: 0,
             touched: Vec::new(),

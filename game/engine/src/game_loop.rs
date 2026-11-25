@@ -8003,6 +8003,9 @@ impl super::GameState {
                         if let Some([gx, gy, gz]) = safe {
                             self.world.set_block(gx, gy, gz, crate::block::GRAVE);
                             self.pending_block_changes.push(broadcast_change(&self.world, gx, gy, gz, crate::block::GRAVE));
+                            // `World::set_block` meshes nothing: without this the grave exists,
+                            // collides and is outlined but is never drawn.
+                            self.rebuild_chunk_at(gx, gy, gz);
                             let grave = crate::grave::GraveData::from_snapshot(snapshot, self.world_time);
                             self.world.insert_grave((gx, gy, gz), grave);
                             self.players[i].last_grave = Some([gx, gy, gz]);
@@ -15673,6 +15676,8 @@ impl super::GameState {
                             self.world.remove_block_entity(pos_key);
                             self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
                             self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::AIR));
+                            // The emptied grave must disappear from the mesh too.
+                            self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                             self.toast = Some((
                                 "Recovered your things".to_string(),
                                 Instant::now() + Duration::from_secs(3),
@@ -20084,13 +20089,14 @@ impl super::GameState {
                         &self.renderer.egui,
                         self.input.bindings(),
                         pidx == 0 && self.input.inventory_toggle,
+                        &self.players[pidx].inventory,
                     );
                     match outcome {
                         crate::furnace_ui::FurnaceUiOutcome::Closed => {
                             self.players[pidx].open_furnace = None;
                             if pidx == 0 { self.capture_cursor(); }
                         }
-                        crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode } => {
+                        crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode, from } => {
                             // Trials coverage — taking a finished smelt from the
                             // output slot is "you smelted something".
                             if matches!(kind, crate::furnace::SlotKind::Output)
@@ -20105,8 +20111,7 @@ impl super::GameState {
                             // be mutated together without cloning the whole
                             // furnace through a local. C3b-1 — through the
                             // one container rule (`apply_container`).
-                            let hotbar = self.players[pidx].hotbar_slot;
-                            let click = crate::container_window::ContainerClick::Furnace { kind, mode, hotbar };
+                            let click = crate::container_window::ContainerClick::Furnace { kind, mode, from };
                             let ctx = self.container_ctx(pidx, false);
                             let world = &mut self.world;
                             let p = &mut self.players[pidx];
