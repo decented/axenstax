@@ -1424,6 +1424,10 @@ first-person viewmodel (§7.5), and it reuses the authoritative
 `tool_texture` / `material_texture` mappings rather than re-deriving UVs.
 
 **Deferred / known gaps:**
+- **A peer's fishing line and bobber are not drawn.** The water point of a cast and a
+  "line out" flag are not on the wire (pt1124 draws only the local player's cast); a
+  peer's rod keeps its baked line. Needs a protocol bump (Spec 05 "a cast line is
+  drawn").
 - **Name tags above avatars are not yet implemented.** A `SHOW_PLAYER_NAMETAGS`
   kill-switch + guarded TODO exist, but there is no in-world text/billboard
   facility (only the egui HUD), and the remote player's handle is not on the
@@ -1602,7 +1606,13 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   wider than the blade and a short grip; the whole sword still fits the hand
   envelope (y -0.34 .. 0.35), which caps how long the blade can be. The fishing rod
   has a line hanging from its tip with a small red float and a hook below it, from
-  the string, red-dye and iron tiles.
+  the string, red-dye and iron tiles; with a line cast out (pt1124) the rod in hand
+  is drawn bare (`tool_model_with(.., line_out)`, `HeldItem::line_out`, local only)
+  and the line, a red-over-white bobber on the water and the fly-out are the cast's
+  own, built by `fishing_view` into the viewport's entity vertices from the rod's
+  tip (`held_tool_model::rod_tip_local`, carried through the avatar's hand transform
+  in third person and the viewmodel placement in first); Spec 05 "a cast line is
+  drawn".
 - **The hand lantern's look (off-hand plan slice 4).** Block 380 is a micro-model (§7.5a's
   baked shells, `micro_model.rs`), painted from existing layers only: wallpaper-black for the
   frame, wallpaper-grey for the cap, wallpaper-yellow for the core, all flat paint layers. The
