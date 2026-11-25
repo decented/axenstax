@@ -40,7 +40,7 @@ pub enum HoldPose {
 /// Third person: how much further the arm of a held sprite lifts forward about the
 /// shoulder (radians, on top of idle, walk, jump or swing), so the item stands out in
 /// front of the forearm and its flame is not hidden inside it.
-pub const SPRITE_ARM_RAISE: f32 = 0.9;
+pub const SPRITE_ARM_RAISE: f32 = 0.95;
 
 /// How much of a held sprite's height sits below the fist: the foot of a torch's
 /// stick pokes out under the hand, the rest stands above it.

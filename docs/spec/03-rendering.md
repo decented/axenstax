@@ -1657,7 +1657,7 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   instead of off the bottom edge. A later hanging item (a pail, a bell) joins by returning `Hanging` with its own handle.
   **A sprite (a torch, a sapling, bread: `item_model::held_is_sprite`) is `Sprite`** (pt1124; the earlier fix put it
   0.25 to the outside of the fist, where in third person it floated beside the hand, in either hand): third person, the
-  forearm lifts `SPRITE_ARM_RAISE` (0.9 rad: enough that even with the arm swung back in a walk the flame stands clear of the forearm) on top of whatever the arm does, the card stays upright (it does not tilt with
+  forearm lifts `SPRITE_ARM_RAISE` (0.95 rad: enough that even with the arm swung back in a walk the flame stands clear of the forearm) on top of whatever the arm does, the card stays upright (it does not tilt with
   the arm), centred on the fist's own column, with `SPRITE_GRIP_FRACTION` (a fifth) of its height under the fist
   (`hold_pose::sprite_grip_shift`) so the foot of a torch's stick pokes out under the hand and the flame stands
   clear in front of the forearm. The mesh is centred on the hand (`HELD_SPRITE_OFFSET` is gone); first person is
