@@ -115,9 +115,6 @@ impl crate::GameState {
                 ) {
                     crate::furnace_ui::FurnaceUiOutcome::Closed => closed = true,
                     crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode, from } => {
-                        if matches!(kind, crate::furnace::SlotKind::Output) && data.output.is_some() {
-                            self.fire_challenge(crate::scenario::ChallengeEvent::SmeltItem);
-                        }
                         clicks.push(ContainerClick::Furnace { kind, mode, from });
                         self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
                     }
@@ -140,6 +137,13 @@ impl crate::GameState {
         for click in &clicks {
             // C3d — the reserving entry point (a Strict action).
             let applied = self.apply_shared_container_click(pidx, &mut mirror, click, &ctx);
+            // Taking a finished smelt is "you smelted something" only once the
+            // take really moved something (a full bag takes nothing).
+            if applied.result == crate::window::ClickResult::Done
+                && matches!(click, ContainerClick::Furnace { kind: crate::furnace::SlotKind::Output, .. })
+            {
+                self.fire_challenge(crate::scenario::ChallengeEvent::SmeltItem);
+            }
             if applied.result == crate::window::ClickResult::PlanStays {
                 let text = match click {
                     ContainerClick::Deposit { .. } => "Plans can't go in shared containers yet",

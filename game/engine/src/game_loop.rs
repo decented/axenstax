@@ -20097,13 +20097,6 @@ impl super::GameState {
                             if pidx == 0 { self.capture_cursor(); }
                         }
                         crate::furnace_ui::FurnaceUiOutcome::SlotClick { kind, mode, from } => {
-                            // Trials coverage — taking a finished smelt from the
-                            // output slot is "you smelted something".
-                            if matches!(kind, crate::furnace::SlotKind::Output)
-                                && data.output.is_some()
-                            {
-                                self.fire_challenge(crate::scenario::ChallengeEvent::SmeltItem);
-                            }
                             // Apply the click straight against the world's
                             // furnace data and the player's window —
                             // `world` and `players` are disjoint fields on
@@ -20115,14 +20108,21 @@ impl super::GameState {
                             let ctx = self.container_ctx(pidx, false);
                             let world = &mut self.world;
                             let p = &mut self.players[pidx];
-                            if let Some(f) = world.furnace_at_mut(furnace_pos) {
-                                let _ = p.crafting_ui.apply_container_click(
+                            let moved = match world.furnace_at_mut(furnace_pos) {
+                                Some(f) => p.crafting_ui.apply_container_click(
                                     &mut p.inventory,
                                     &mut p.armour_slots, &mut p.offhand,
                                     crate::container_window::ContainerMut::Furnace(f),
                                     &click,
                                     &ctx,
-                                );
+                                ).result == crate::window::ClickResult::Done,
+                                None => false,
+                            };
+                            // Trials coverage — taking a finished smelt from the
+                            // output slot is "you smelted something", once
+                            // something really moved (a full bag takes nothing).
+                            if moved && matches!(kind, crate::furnace::SlotKind::Output) {
+                                self.fire_challenge(crate::scenario::ChallengeEvent::SmeltItem);
                             }
                             self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
                         }

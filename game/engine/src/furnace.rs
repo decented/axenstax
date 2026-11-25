@@ -383,6 +383,8 @@ pub enum ClickRefusal {
     SlotHoldsOther(SlotKind),
     /// The slot already holds a full stack.
     SlotFull(SlotKind),
+    /// A take from the furnace, with no room in the inventory for even one.
+    InventoryFull,
 }
 
 impl ClickRefusal {
@@ -400,6 +402,7 @@ impl ClickRefusal {
             ClickRefusal::SlotFull(SlotKind::Input) => "The Input slot is full",
             ClickRefusal::SlotFull(SlotKind::Fuel) => "The Fuel slot is full",
             ClickRefusal::SlotFull(SlotKind::Output) => "The Output slot is full",
+            ClickRefusal::InventoryFull => "Your inventory is full",
         }
     }
 }
@@ -486,11 +489,14 @@ fn load_refusal(furnace: &FurnaceData, stack: &ItemStack, slot_kind: SlotKind) -
 }
 
 /// Why a click on `slot_kind` with source `from` (an inventory slot, or [`TAKE_BACK`]) would do
-/// nothing; `None` when it moves something (or, with a full bag, when the only trouble is the
-/// bag, which this does not see). Pure, and the same checks in the same order as
+/// nothing; `None` when it moves something. A take with no room in the inventory for even one
+/// unit is [`ClickRefusal::InventoryFull`]. Pure, and the same checks in the same order as
 /// `apply_slot_click`.
 pub fn click_refusal(furnace: &FurnaceData, inventory: &crate::inventory::Inventory, from: usize, slot_kind: SlotKind) -> Option<ClickRefusal> {
-    let taking = |slot: &Option<ItemStack>| slot.is_none().then_some(ClickRefusal::NothingToTake);
+    let taking = |slot: &Option<ItemStack>| match slot {
+        None => Some(ClickRefusal::NothingToTake),
+        Some(stack) => (!inventory.has_room_for_one(&stack.item)).then_some(ClickRefusal::InventoryFull),
+    };
     if slot_kind == SlotKind::Output {
         return taking(&furnace.output);
     }
@@ -1219,6 +1225,32 @@ mod tests {
             }
         }
         assert_eq!(cases, 3 * 3 * 8 * 6);
+    }
+
+    /// pt1124 review 17 — a take from Output, Input or Fuel into a bag with no room for even one
+    /// unit says so and moves nothing; one free slot (or a stack with room) lets it through.
+    #[test]
+    fn a_take_into_a_full_bag_is_refused_with_inventory_full() {
+        let mut f = FurnaceData::default();
+        f.input = Some(ItemStack::new_material(MaterialId::RawIron, 3));
+        f.fuel = Some(ItemStack::new_material(MaterialId::Coal, 3));
+        f.output = Some(ItemStack::new_material(MaterialId::IronIngot, 3));
+        let mut inv = crate::inventory::Inventory::new();
+        for i in 0..36 {
+            inv.set_slot(i, Some(ItemStack::new_block(crate::block::DIRT, 64)));
+        }
+        for (from, kind) in [(0, SlotKind::Output), (TAKE_BACK, SlotKind::Input), (TAKE_BACK, SlotKind::Fuel)] {
+            assert_eq!(click_refusal(&f, &inv, from, kind), Some(ClickRefusal::InventoryFull), "{kind:?}");
+            let mut g = f.clone();
+            assert_eq!(apply_slot_click(&mut g, &mut inv, from, kind, ClickMode::Stack), SlotClickResult::NoOp);
+        }
+        assert_eq!(ClickRefusal::InventoryFull.message(), "Your inventory is full");
+        // A stack of ingots with room joins: the Output take goes through.
+        inv.set_slot(7, Some(ItemStack::new_material(MaterialId::IronIngot, 63)));
+        assert_eq!(click_refusal(&f, &inv, 0, SlotKind::Output), None);
+        assert_eq!(click_refusal(&f, &inv, TAKE_BACK, SlotKind::Fuel), Some(ClickRefusal::InventoryFull));
+        inv.set_slot(8, None);
+        assert_eq!(click_refusal(&f, &inv, TAKE_BACK, SlotKind::Fuel), None);
     }
 
     #[test]

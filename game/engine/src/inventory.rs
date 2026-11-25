@@ -619,6 +619,15 @@ impl Inventory {
     /// `chest_ui::withdraw_chest_slot`. Most callers `let _ =` the result
     /// (best-effort add, drop on full); the chest/craft paths that recover
     /// items MUST re-insert only this remainder, never the original stack.
+    /// Would [`Self::add_item`] place at least one unit of `item`? (A stack it can join with
+    /// room, or an empty slot.)
+    pub fn has_room_for_one(&self, item: &crate::item::Item) -> bool {
+        self.slots.iter().any(|slot| match slot {
+            None => true,
+            Some(existing) => existing.item.can_stack_with(item) && existing.count < existing.item.max_stack(),
+        })
+    }
+
     pub fn add_item(&mut self, stack: ItemStack) -> Option<ItemStack> {
         if self.remember_plans { crate::plan_store::remember_item(&stack.item); }
         let mut remaining = stack.count;
