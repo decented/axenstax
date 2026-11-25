@@ -11,7 +11,9 @@ use crate::item::ItemStack;
 /// broadcast and the client→server `InputPacket` held-item field. Tools
 /// collapse to their material tier (0 wood, 1 stone, 2 iron, 3 diamond,
 /// 4 satori); materials carry their bincode discriminant index as the id.
-/// Plans/Armour have no avatar-held wire form yet, so they resolve to `Empty`.
+/// A Plan or an armour piece resolves to `Empty` HERE (this pair is also the
+/// possession claim, which has never named them); the avatar's own wire carries
+/// them as `item_kind::PLAN` / `item_kind::ARMOUR` through `HeldWire::of`.
 ///
 /// Shared by the client (`game_loop.rs`, populating its own InputPacket) and
 /// the server (`server.rs`, resolving local players' held item) so both ends
@@ -33,7 +35,8 @@ pub fn item_to_ref(item: &crate::item::Item) -> crate::protocol::ItemRef {
             ItemRef::Tool(tier)
         }
         Item::Material(id) => ItemRef::Material(*id as u16),
-        // No held-avatar wire form for these yet — render as empty-handed.
+        // Not in this pair (it is the claim as well): the avatar wire says them
+        // through `HeldWire::of`.
         Item::Plan(_) | Item::Armour(_) => ItemRef::Empty,
     }
 }
@@ -106,6 +109,20 @@ pub fn held_tool_to_wire(item: &crate::item::Item) -> u8 {
     }
 }
 
+/// The avatar wire's pair for a held armour piece (`item_kind::ARMOUR`): its
+/// slot as the id and its material as the tool byte (the same append-only tables
+/// as the full-fidelity item wire).
+pub fn held_armour_to_wire(piece: &crate::armour::ArmourItem) -> (u16, u8) {
+    (u16::from(armour_slot_to_wire(piece.slot)), armour_material_to_wire(piece.material))
+}
+
+/// Inverse of [`held_armour_to_wire`]: `None` for a slot or material this build
+/// doesn't know (a newer peer): the hand then draws nothing, never a guess.
+pub fn held_armour_from_wire(id: u16, material: u8) -> Option<(crate::armour::ArmourSlot, crate::armour::ArmourMaterial)> {
+    let slot = armour_slot_from_wire(u8::try_from(id).ok()?)?;
+    Some((slot, armour_material_from_wire(material)?))
+}
+
 /// v101 — the inverse of [`held_tool_to_wire`]: `None` for `NO_TOOL` or a
 /// byte this build doesn't know.
 pub fn tool_type_from_held_wire(b: u8) -> Option<crate::crafting::ToolType> {
@@ -162,7 +179,7 @@ fn tool_material_from_wire(b: u8) -> Option<crate::crafting::ToolMaterial> {
 }
 
 /// Wire byte for an [`ArmourSlot`](crate::armour::ArmourSlot). Append-only.
-fn armour_slot_to_wire(s: crate::armour::ArmourSlot) -> u8 {
+pub(crate) fn armour_slot_to_wire(s: crate::armour::ArmourSlot) -> u8 {
     use crate::armour::ArmourSlot as S;
     match s {
         S::Helmet => 0,
@@ -173,7 +190,7 @@ fn armour_slot_to_wire(s: crate::armour::ArmourSlot) -> u8 {
 }
 
 /// Inverse of [`armour_slot_to_wire`].
-fn armour_slot_from_wire(b: u8) -> Option<crate::armour::ArmourSlot> {
+pub(crate) fn armour_slot_from_wire(b: u8) -> Option<crate::armour::ArmourSlot> {
     use crate::armour::ArmourSlot as S;
     Some(match b {
         0 => S::Helmet,
@@ -186,7 +203,7 @@ fn armour_slot_from_wire(b: u8) -> Option<crate::armour::ArmourSlot> {
 
 /// Wire byte for an [`ArmourMaterial`](crate::armour::ArmourMaterial).
 /// Append-only.
-fn armour_material_to_wire(m: crate::armour::ArmourMaterial) -> u8 {
+pub(crate) fn armour_material_to_wire(m: crate::armour::ArmourMaterial) -> u8 {
     use crate::armour::ArmourMaterial as M;
     match m {
         M::Leather => 0,
@@ -199,7 +216,7 @@ fn armour_material_to_wire(m: crate::armour::ArmourMaterial) -> u8 {
 }
 
 /// Inverse of [`armour_material_to_wire`].
-fn armour_material_from_wire(b: u8) -> Option<crate::armour::ArmourMaterial> {
+pub(crate) fn armour_material_from_wire(b: u8) -> Option<crate::armour::ArmourMaterial> {
     use crate::armour::ArmourMaterial as M;
     Some(match b {
         0 => M::Leather,

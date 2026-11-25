@@ -20,8 +20,10 @@
 //!   material with no background to cut away ([`FULL_TILE_BLOCKS`]): a sprite
 //!   of them would be a square card, so they keep the small cube.
 //!
-//! Plans and armour keep their cube looks, and so does a dropped or framed
-//! material; a material in the hand is a flat cut-out sprite of its icon when the
+//! A Plan keeps its parchment cube. Armour is its own small model
+//! ([`crate::armour_model`]: held, and dropped on the ground), so a piece looks the
+//! same in the hand, on the floor and worn. A dropped or framed material keeps its
+//! cube; a material in the hand is a flat cut-out sprite of its icon when the
 //! icon has a transparent background. A tool is a thin slab when
 //! its type is unknown, and its own box model otherwise (`held_tool_model`, in
 //! the hand only; a dropped tool is still its tier's cube).
@@ -36,10 +38,11 @@ use std::sync::OnceLock;
 
 use glam::Vec3;
 
+use crate::armour::{ArmourMaterial, ArmourSlot};
 use crate::block::{BlockId, BlockRegistry};
 use crate::crafting::{ToolMaterial, ToolType};
 use crate::entity_model::{
-    material_texture, push_textured_quad, tool_texture, TEX_ITEM_IRON_INGOT, TEX_ITEM_STICK,
+    material_texture, push_textured_quad, tool_texture, TEX_ITEM_STICK,
 };
 use crate::item::{Item, MaterialId};
 use crate::mesh::{RenderClass, Vertex, CUTOUT_FLAG};
@@ -55,11 +58,17 @@ use crate::viewmodel::HandSide;
 pub struct HeldItem {
     pub item: ItemRef,
     pub tool: Option<ToolType>,
+    /// The armour piece held, if any: it has no `ItemRef` (that pair is also the
+    /// possession claim, which has never named armour), so the hand says it here and
+    /// the avatar wire says it as `item_kind::ARMOUR` (`HeldWire::armour`).
+    pub armour: Option<(ArmourSlot, ArmourMaterial)>,
+    /// A Plan is held (`item_kind::PLAN`): drawn as its parchment cube.
+    pub plan: bool,
 }
 
 impl HeldItem {
     /// An empty hand.
-    pub const EMPTY: HeldItem = HeldItem { item: ItemRef::Empty, tool: None };
+    pub const EMPTY: HeldItem = HeldItem { item: ItemRef::Empty, tool: None, armour: None, plan: false };
 
     /// A hand that holds `item`: the local player's, which knows the real type.
     pub fn of(item: &Item) -> Self {
@@ -69,24 +78,29 @@ impl HeldItem {
                 Item::Tool(t) => Some(t.tool_type),
                 _ => None,
             },
+            armour: match item {
+                Item::Armour(a) => Some((a.slot, a.material)),
+                _ => None,
+            },
+            plan: matches!(item, Item::Plan(_)),
         }
     }
 
     /// A hand as a peer's avatar wire says it. `tool` is `None` for anything
     /// but a tool, and for a tool byte this build doesn't know (a newer peer).
     pub fn from_wire(w: HeldWire) -> Self {
-        HeldItem { item: ItemRef::from_wire(w.kind, w.id), tool: w.tool_type() }
+        HeldItem { item: ItemRef::from_wire(w.kind, w.id), tool: w.tool_type(), armour: w.armour(), plan: w.is_plan() }
     }
 
     pub fn is_empty(self) -> bool {
-        matches!(self.item, ItemRef::Empty)
+        matches!(self.item, ItemRef::Empty) && self.armour.is_none() && !self.plan
     }
 }
 
 /// A bare `ItemRef` is a hand without a known tool type.
 impl From<ItemRef> for HeldItem {
     fn from(item: ItemRef) -> Self {
-        HeldItem { item, tool: None }
+        HeldItem { item, tool: None, armour: None, plan: false }
     }
 }
 
@@ -101,7 +115,19 @@ pub enum ItemLook {
     /// The hand lantern's small model (`lantern::held_mesh`, and `drop_mesh` on
     /// the ground): the same shell the placed block is drawn with.
     Lantern,
+    /// An armour piece's small model ([`crate::armour_model::drop_mesh`] on the
+    /// ground, `held_mesh` in the hand): boxes in flat colours of the material.
+    Armour { slot: ArmourSlot, material: ArmourMaterial },
 }
+
+/// A Plan as an item: a small parchment scroll cube, the Blueprint Paper top for
+/// the parchment faces and the plaque side for the wood-rolled edges. On the
+/// ground and in the hand.
+const PLAN_LOOK: ItemLook = ItemLook::Cube {
+    top: crate::block::TEX_BLUEPRINT_PAPER_TOP,
+    side: crate::block::TEX_ARCHITECT_PLAQUE_SIDE,
+    bottom: crate::block::TEX_BLUEPRINT_PAPER_TOP,
+};
 
 impl ItemLook {
     /// One texture on every face of the cube.
@@ -179,15 +205,10 @@ pub fn item_look(item: &Item, registry: &BlockRegistry) -> ItemLook {
         // Spec 24 — a ground-dropped Plan: a small parchment scroll cube, the
         // Blueprint Paper top for the parchment faces and the plaque side for
         // the wood-rolled edges.
-        Item::Plan(_) => ItemLook::Cube {
-            top: crate::block::TEX_BLUEPRINT_PAPER_TOP,
-            side: crate::block::TEX_ARCHITECT_PLAQUE_SIDE,
-            bottom: crate::block::TEX_BLUEPRINT_PAPER_TOP,
-        },
-        // Spec 28e — ground-dropped armour. BRIDGE: reuse the iron-ingot
-        // texture for all tiers; per-slot icons land with the live armour HUD
-        // work.
-        Item::Armour(_) => ItemLook::cube(TEX_ITEM_IRON_INGOT),
+        Item::Plan(_) => PLAN_LOOK,
+        // Spec 28e — ground-dropped armour: its own small model (`armour_model`),
+        // the one the hand holds and the avatar wears.
+        Item::Armour(a) => ItemLook::Armour { slot: a.slot, material: a.material },
     }
 }
 
@@ -235,11 +256,23 @@ fn tier_material(tier: u16) -> ToolMaterial {
 /// shape ([`crate::held_tool_model::tool_model`]), a tool of an unknown type
 /// the plain slab of its tier.
 pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) -> Vec<Vertex> {
+    // Armour and a Plan have no `ItemRef`: the hand names them itself.
+    if let Some((slot, material)) = held.armour {
+        return crate::armour_model::held_mesh(slot, material);
+    }
+    if held.plan {
+        let ItemLook::Cube { top, side: wall, bottom } = PLAN_LOOK else { return Vec::new() };
+        let mut verts = Vec::with_capacity(36);
+        push_cuboid(&mut verts, Vec3::ZERO, Vec3::splat(0.4), top, wall, bottom);
+        return verts;
+    }
     match held.item {
         ItemRef::Empty => Vec::new(),
         ItemRef::Block(id) => match block_look(id, registry) {
             // The hand lantern is drawn as its own small model, not a sprite.
             ItemLook::Lantern => crate::lantern::held_mesh(registry),
+            // `block_look` never says armour (a block is never a piece); drawn anyway.
+            ItemLook::Armour { slot, material } => crate::armour_model::held_mesh(slot, material),
             ItemLook::Sprite { layer } => {
                 let mut verts = sprite_triangles(layer, HELD_SPRITE_WIDTH);
                 let offset = sprite_offset(side);
@@ -949,7 +982,7 @@ mod tests {
     fn the_local_players_tool_knows_its_type() {
         let sword = Item::Tool(crate::crafting::Tool::new(ToolType::Sword, ToolMaterial::Iron));
         let held = HeldItem::of(&sword);
-        assert_eq!(held, HeldItem { item: ItemRef::Tool(2), tool: Some(ToolType::Sword) });
+        assert_eq!(held, HeldItem { item: ItemRef::Tool(2), tool: Some(ToolType::Sword), armour: None, plan: false });
         let wire = HeldWire::of(Some(&sword));
         assert_eq!(HeldItem::from_wire(wire), held, "the local item and its wire form draw the same");
     }
@@ -963,5 +996,104 @@ mod tests {
         };
         assert!(centre_x(HandSide::Right) > 0.2, "right-hand sprite is outside, +X");
         assert!(centre_x(HandSide::Left) < -0.2, "left-hand sprite is outside, -X");
+    }
+}
+
+#[cfg(test)]
+mod armour_held_tests {
+    use super::*;
+    use crate::armour::{all_armour_combos, ArmourItem};
+    use crate::protocol::PlayerState;
+
+    fn armour(slot: ArmourSlot, material: ArmourMaterial) -> Item {
+        Item::Armour(ArmourItem::new(slot, material))
+    }
+
+    fn avatar_holding(wire: HeldWire) -> PlayerState {
+        PlayerState {
+            player_index: 1, x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0, health: 20.0,
+            held_kind: wire.kind, held_id: wire.id, anim_state: 0, flags: 0, skin_key: 0,
+            held_tool: wire.tool, off_kind: 0, off_id: 0, off_tool: HeldWire::NO_TOOL,
+        }
+    }
+
+    #[test]
+    fn every_armour_piece_in_a_hand_builds_a_model() {
+        let reg = BlockRegistry::new();
+        for (slot, material) in all_armour_combos() {
+            let item = armour(slot, material);
+            let local = HeldItem::of(&item);
+            assert!(!local.is_empty(), "{slot:?} {material:?} is not an empty hand");
+            for side in [HandSide::Right, HandSide::Left] {
+                assert!(!held_item_mesh(local, &reg, side).is_empty(), "{slot:?} {material:?} {side:?}");
+            }
+            // The local item and its wire form draw the same.
+            let wire = HeldWire::of(Some(&item));
+            assert_eq!(HeldItem::from_wire(wire), local, "{slot:?} {material:?}");
+            assert_eq!(
+                held_item_mesh(HeldItem::from_wire(wire), &reg, HandSide::Right).len(),
+                held_item_mesh(local, &reg, HandSide::Right).len()
+            );
+        }
+    }
+
+    #[test]
+    fn an_armour_piece_is_seen_in_first_person_and_on_the_third_person_hand() {
+        let reg = BlockRegistry::new();
+        let item = armour(ArmourSlot::Chestplate, ArmourMaterial::Diamond);
+        let held = HeldItem::of(&item);
+        let (_, first_person) = crate::viewmodel::build_viewmodel_vertices(
+            HandSide::Right, held, 0.0, 0.0, 0, &reg, crate::skin_uv::ArmModel::Classic, 16.0 / 9.0,
+        );
+        assert!(!first_person.is_empty(), "a chestplate held in first person is drawn");
+        let ps = avatar_holding(HeldWire::of(Some(&item)));
+        let (_, third_person) = crate::entity_model::build_player_avatar_vertices(
+            &ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic,
+        );
+        assert_eq!(
+            third_person.len(),
+            crate::armour_model::held_mesh(ArmourSlot::Chestplate, ArmourMaterial::Diamond).len(),
+            "the avatar's hand carries the piece's model"
+        );
+        let bare = avatar_holding(HeldWire::EMPTY);
+        let (_, nothing) = crate::entity_model::build_player_avatar_vertices(
+            &bare, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic,
+        );
+        assert!(nothing.is_empty());
+    }
+
+    #[test]
+    fn dropped_armour_is_its_own_model_not_an_iron_ingot_cube() {
+        let reg = BlockRegistry::new();
+        for (slot, material) in all_armour_combos() {
+            assert_eq!(item_look(&armour(slot, material), &reg), ItemLook::Armour { slot, material });
+        }
+        // Not the legacy pair either: that is the possession claim, which names no armour.
+        assert_eq!(crate::inventory::item_to_ref(&armour(ArmourSlot::Boots, ArmourMaterial::Iron)), ItemRef::Empty);
+    }
+
+    #[test]
+    fn a_held_plan_is_its_parchment_cube() {
+        let reg = BlockRegistry::new();
+        let plan = Item::Plan(crate::plan::PlanData::placeholder());
+        let held = HeldItem::of(&plan);
+        assert!(!held.is_empty());
+        assert_eq!(held_item_mesh(held, &reg, HandSide::Right).len(), 36);
+        assert_eq!(HeldItem::from_wire(HeldWire::of(Some(&plan))), held);
+        assert_eq!(item_look(&plan, &reg), PLAN_LOOK);
+    }
+
+    #[test]
+    fn a_newer_peers_unknown_armour_draws_an_empty_hand() {
+        let reg = BlockRegistry::new();
+        for wire in [
+            HeldWire { kind: crate::protocol::item_kind::ARMOUR, id: 99, tool: 0 },
+            HeldWire { kind: crate::protocol::item_kind::ARMOUR, id: 0, tool: 200 },
+            HeldWire { kind: crate::protocol::item_kind::ARMOUR, id: 300, tool: 0 },
+        ] {
+            let held = HeldItem::from_wire(wire);
+            assert!(held.is_empty(), "{wire:?}");
+            assert!(held_item_mesh(held, &reg, HandSide::Right).is_empty());
+        }
     }
 }
