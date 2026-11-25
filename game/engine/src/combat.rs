@@ -1137,12 +1137,19 @@ pub fn hostiles_in_reach(ecs: &hecs::World, player_pos: Vec3) -> Vec<MeleeContac
         }
         let to_player = player_pos - pos.0;
         let horiz_dist = Vec3::new(to_player.x, 0.0, to_player.z).length();
-        let vert_overlap = to_player.y >= 0.0 && to_player.y < 1.8; // Player height
-        if horiz_dist < HOSTILE_MELEE_RANGE && vert_overlap {
+        if horiz_dist < HOSTILE_MELEE_RANGE && in_melee_height(to_player.y) {
             out.push(MeleeContact { mob: id, kind: kind.0, to_player });
         }
     }
     out
+}
+
+/// The height band hostile melee reaches, `rise` being the player's feet above
+/// the mob's: level with them up to a body height (1.8) above. The one band
+/// for landing a hit ([`hostiles_in_reach`]) and for where a chaser holds at
+/// the player's box (`mob_ai::melee_approach_step`).
+pub(crate) fn in_melee_height(rise: f32) -> bool {
+    (0.0..1.8).contains(&rise)
 }
 
 /// The other half of [`hostile_melee_tick`]: each contact hits for the

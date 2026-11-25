@@ -127,9 +127,25 @@ pub const MELEE_CONTACT_GAP: f32 = 0.02;
 /// the sum of the half-widths. Stepping straight at the target shrinks both
 /// axis offsets in proportion, so the step that lands on that line is exact
 /// (a diagonal approach stops on the box, not on a circle that would still
-/// overlap at the corners). Horizontal only: a mob below a player on a pillar
-/// waits at the same ring instead of standing under them.
+/// overlap at the corners).
+///
+/// It holds only where the mob could hit from (`combat::in_melee_height`, the
+/// band a hostile's hit lands in): a mob on a ledge above the player keeps
+/// stepping, drops and attacks (while still above, its box overhanging the
+/// ledge, it can push the player 1.5 to 2.3 blocks across the drop, as before
+/// this rule; once down it holds), and a player two blocks up a pillar is walked
+/// under as before (no hit, and no box overlap to shove).
 pub fn melee_approach_step(mob_pos: Vec3, mob_half_width: f32, target: Vec3, speed: f32) -> f32 {
+    if !crate::combat::in_melee_height(target.y - mob_pos.y) {
+        return speed.max(0.0);
+    }
+    approach_step_to_box(mob_pos, mob_half_width, target, speed)
+}
+
+/// [`melee_approach_step`]'s box rule alone, at any height: the step
+/// (`0..=speed`) that stops the mob's box [`MELEE_CONTACT_GAP`] short of the
+/// player's, horizontally. The shark uses it as is (its bite ignores height).
+pub fn approach_step_to_box(mob_pos: Vec3, mob_half_width: f32, target: Vec3, speed: f32) -> f32 {
     let (dx, dz) = (target.x - mob_pos.x, target.z - mob_pos.z);
     let axis = dx.abs().max(dz.abs());
     let stop = crate::physics::PLAYER_WIDTH / 2.0 + mob_half_width + MELEE_CONTACT_GAP;
@@ -1363,5 +1379,57 @@ mod tests {
         assert_eq!(melee_approach_step(Vec3::new(0.0, 5.0, -stop), 0.3, target, 0.25), 0.0);
         assert_eq!(melee_approach_step(Vec3::new(0.0, 5.0, -0.2), 0.3, target, 0.25), 0.0);
         assert_eq!(melee_approach_step(target, 0.3, target, 0.25), 0.0);
+    }
+
+    /// A hostile on a 1-block ledge above a player standing at the foot of it
+    /// must still come down and attack: the stop at the player's box applies
+    /// only where the mob could hit from (the melee height band), else it
+    /// would stand on the ledge forever, out of reach. Every hostile.
+    #[test]
+    fn a_hostile_on_a_ledge_above_still_comes_down_and_reaches_the_player() {
+        let reg = BlockRegistry::new();
+        for def in crate::mob::MOBS.iter().filter(|d| d.category == MobCategory::Hostile) {
+            let mut world = World::new();
+            stone_floor(&mut world, 4);
+            // The ledge: one block up for every z < 0; its face is at z = 0.
+            for x in -20..=20 {
+                for z in -20..=-1 {
+                    world.set_block(x, 5, z, STONE);
+                }
+            }
+            let mut ecs = hecs::World::new();
+            let start = Vec3::new(0.5, 5.0, 0.4); // at the foot of the face
+            let mob = entity::spawn_mob(&mut ecs, def.mob_type, Vec3::new(0.5, 6.0, -5.0));
+            ecs.get::<&mut MobAi>(mob).unwrap().state = AiState::Chase;
+            let mut ppos = start;
+            let mut pvel = Vec3::ZERO;
+            for _ in 0..100 {
+                tick_mob_ai(&mut ecs, &world, &reg, &[ppos]);
+                entity::tick_entities(&mut ecs, &world, &reg);
+                entity::push_player_from_entities(&ecs, &mut ppos, &mut pvel);
+            }
+            let at = ecs.get::<&entity::Position>(mob).unwrap().0;
+            let reach: Vec<hecs::Entity> =
+                crate::combat::hostiles_in_reach(&ecs, ppos).iter().map(|c| c.mob).collect();
+            let shoved = Vec3::new(ppos.x - start.x, 0.0, ppos.z - start.z).length();
+            eprintln!("{:?}: shoved {shoved} blocks coming down", def.mob_type);
+            assert!(reach.contains(&mob), "{:?} stayed out of reach at {at:?} (player {ppos:?})", def.mob_type);
+            // Coming down past the player may shove it while the mob is still
+            // above (a wide mob's box overhangs the ledge before it drops; main
+            // did the same), but once down it holds: no walk.
+            let down = ppos;
+            for _ in 0..40 {
+                tick_mob_ai(&mut ecs, &world, &reg, &[ppos]);
+                entity::tick_entities(&mut ecs, &world, &reg);
+                entity::push_player_from_entities(&ecs, &mut ppos, &mut pvel);
+            }
+            let moved = Vec3::new(ppos.x - down.x, 0.0, ppos.z - down.z).length();
+            assert!(moved <= 1e-4, "{:?}: once down it still shoved the player {moved} blocks", def.mob_type);
+            assert!(
+                crate::combat::hostiles_in_reach(&ecs, ppos).iter().any(|c| c.mob == mob),
+                "{:?}: and stays in reach",
+                def.mob_type,
+            );
+        }
     }
 }

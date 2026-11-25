@@ -506,7 +506,7 @@ pub fn dispatch_sharks(
         // the swimmer's box (`mob_ai::melee_approach_step`, playtest
         // 2026-11-24): it bites from there and never shoves the swimmer.
         let dir = Vec3::new(ppos.x - pos.x, ppos.y - pos.y, ppos.z - pos.z).normalize_or_zero();
-        let step = crate::mob_ai::melee_approach_step(pos, mob_half_width(ecs, id, MobType::Shark), ppos, speed);
+        let step = crate::mob_ai::approach_step_to_box(pos, mob_half_width(ecs, id, MobType::Shark), ppos, speed);
         let k = if speed > 0.0 { step / speed } else { 0.0 };
         if let Ok(mut v) = ecs.get::<&mut Velocity>(id) {
             v.0 = Vec3::new(dir.x * speed * k, dir.y * speed, dir.z * speed * k);
