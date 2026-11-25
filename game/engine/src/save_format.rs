@@ -72,7 +72,12 @@ pub const WORLD_SAVE_FIELD_COUNT: u32 = 63;
 /// so the footer is 72 = 63 fields + revision 9. The off-hand release's shield
 /// (`ToolType::Shield`, an appended variant inside the nested item save) lands in the same
 /// revision 9: one bump for the one release, never two.
-pub const SAVE_LAYOUT_REVISION: u32 = 9;
+///
+/// 10 (pt1124, block id 385: Cobbled Deepslate, with ids 381..=384 registered as
+/// stand-ins held for Tier 3): the same reason again. No `WorldSave` field was
+/// added, so the footer is 73 = 63 fields + revision 10. (The Tier 3 branch's own
+/// blocks at 381..=384 must land in the same revision when the two merge.)
+pub const SAVE_LAYOUT_REVISION: u32 = 10;
 
 /// The `world.dat` format version this build writes, and the newest it opens.
 /// Monotonic: both terms only ever increase.
@@ -114,7 +119,8 @@ pub const SAVE_FORMAT_VERSION: u32 = WORLD_SAVE_FIELD_COUNT + SAVE_LAYOUT_REVISI
 /// | 69     | 61     | 8        | living world Tier 2 S7 (Site Boards, block 379)   | `site_boards`     |
 /// | 70     | 62     | 8        | `/weather clear` hold                             | `weather_clear_until` |
 /// | 71     | 63     | 8        | the off-hand slot (0.2.37 branch, before the lantern) | `player_offhands` |
-/// | 72     | 63     | 9        | the hand lantern, block 380 (this build)          | `player_offhands` |
+/// | 72     | 63     | 9        | the hand lantern, block 380 (0.2.38 to 0.2.41)    | `player_offhands` |
+/// | 73     | 63     | 10       | Cobbled Deepslate, block 385 (this build)         | `player_offhands` |
 ///
 /// (No commit wrote footer 63: S3 moved the field count and the layout revision together.)
 ///
@@ -142,6 +148,7 @@ pub const FOOTER_FIELD_COUNTS: &[(u32, &[u32])] = &[
     (70, &[62]),
     (71, &[63]),
     (72, &[63]),
+    (73, &[63]),
 ];
 
 /// The field counts a footer `version` was written with (empty for a footer the
@@ -430,17 +437,17 @@ mod tests {
     /// loading them as AIR and saving the holes back.
     #[test]
     fn a_world_written_now_carries_the_building_variants_version() {
-        // 72 as of the hand lantern (block 380, layout revision 9, over 71 = the off-hand slot's `player_offhands` field, 70 = the `/weather clear` hold's `weather_clear_until` field and 69 = living world Tier 2 S7's `site_boards` field and block 379; S6 took 378): 63 fields + layout revision 9.
-        assert_eq!(SAVE_FORMAT_VERSION, 72, "63 fields + layout revision 9");
+        // 73 as of Cobbled Deepslate (block 385, layout revision 10; 72 was the hand lantern, block 380, layout revision 9, over 71 = the off-hand slot's `player_offhands` field, 70 = the `/weather clear` hold's `weather_clear_until` field and 69 = living world Tier 2 S7's `site_boards` field and block 379; S6 took 378): 63 fields + layout revision 10.
+        assert_eq!(SAVE_FORMAT_VERSION, 73, "63 fields + layout revision 10");
         // The world holds no new block, and still carries the new version.
         let bytes = encode_world_save(&minimal_world_save_for_tests(5)).unwrap();
-        assert_eq!(split_save_footer(&bytes).1, Some(72));
+        assert_eq!(split_save_footer(&bytes).1, Some(73));
         assert!(check_version(split_save_footer(&bytes).1).is_ok(), "this build opens its own save");
-        // A build that stopped at 71 refuses this footer (72 > 71) the same
-        // way this build refuses 73: `check_version` is the one rule.
+        // A build that stopped at 72 refuses this footer (73 > 72) the same
+        // way this build refuses 74: `check_version` is the one rule.
         assert_eq!(
-            check_version(Some(72 + 1)),
-            Err(WorldSaveError::NewerVersion { found: 73, supported: 72 }),
+            check_version(Some(73 + 1)),
+            Err(WorldSaveError::NewerVersion { found: 74, supported: 73 }),
             "a footer one version past this build is refused"
         );
         let mut next = bincode::serialize(&minimal_world_save_for_tests(5)).unwrap();

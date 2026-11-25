@@ -686,8 +686,61 @@ pub const SITE_BOARD: BlockId = 379;
 /// The hand lantern (`lantern.rs`): held, placed and hung, one id. Light 15
 /// (`light_emission`; the torch stays 14, the paper lanterns 12). It stands on the
 /// top of a block and hangs from the underside of one (a state bit stamped at
-/// placement); it has no support rule and no collision, like a torch. Drops itself.
+/// placement); it has no collision, like a torch. Since pt1124 it needs a support
+/// (`BlockRegistry::attachment`, `support.rs`): a standing lantern the block under
+/// it, a hanging one the block (or lantern) over it. Drops itself.
 pub const LANTERN: BlockId = 380;
+// Reserved for Tier 3 (Hearth 381, Sawmill 382, Stone Mill 383, Bloomery 384); replaced at merge.
+/// First of the four ids held for the Tier 3 branch (`is_reserved`).
+pub const RESERVED_FIRST: BlockId = 381;
+/// Last of the four ids held for the Tier 3 branch (`is_reserved`).
+pub const RESERVED_LAST: BlockId = 384;
+// pt1124 (2026-11-25). Spec 02 §1, Spec 05 §3.
+/// Cobbled Deepslate: what mining any pure-deepslate cell drops (as stone drops
+/// cobblestone). Placeable; counts as cobblestone wherever cobblestone is the
+/// stone-tier crafting material (`is_stone_crafting_material`). Drawn with the
+/// cobblestone layer darkened by the shader (`mesh::DARK_FLAG`): the atlas has no
+/// free layer.
+pub const COBBLED_DEEPSLATE: BlockId = 385;
+
+/// Whether `id` is one of the ids held for the Tier 3 branch (381..=384): a
+/// registered stand-in that no player can place, give, craft or pick.
+// Reserved for Tier 3 (Hearth 381, Sawmill 382, Stone Mill 383, Bloomery 384); replaced at merge.
+#[inline]
+pub fn is_reserved(id: BlockId) -> bool {
+    (RESERVED_FIRST..=RESERVED_LAST).contains(&id)
+}
+
+/// The stone-tier crafting material (Minecraft's `stone_crafting_materials`):
+/// cobblestone and cobbled deepslate. The recipe matcher's one stone rule
+/// (`crafting::match_recipe`) reads every member as cobblestone wherever the
+/// output is not made of cobblestone itself.
+#[inline]
+pub fn is_stone_crafting_material(id: BlockId) -> bool {
+    matches!(id, COBBLESTONE | COBBLED_DEEPSLATE)
+}
+
+/// Whether a player's break of `id` is refused outright, whatever the tool:
+/// bedrock the world generated, always; bedrock a player placed (`World::is_placed`),
+/// except in Creative. The one rule for a seat's break arm and the server's
+/// edit checks.
+#[inline]
+pub fn unbreakable(id: BlockId, creative: bool, placed: bool) -> bool {
+    id == BEDROCK && !(creative && placed)
+}
+
+/// What an attached block must have next to it to stay (`BlockRegistry::attachment`,
+/// run by `support.rs`). Lose it and the block drops as its item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attachment {
+    /// Any of the six neighbours: a torch, which records no facing, so a wall,
+    /// a floor or a ceiling all hold it.
+    AnySide,
+    /// The cell below (a standing lantern).
+    Below,
+    /// The cell above (a hanging lantern).
+    Above,
+}
 
 /// The planted-sapling block for a species. Symmetric counterpart to
 /// `species_for_sapling` (which IS live, via `is_sapling_block`); this forward
@@ -3472,6 +3525,27 @@ impl BlockRegistry {
             color: [0.93, 0.74, 0.30],
             tex_top: TEX_PAINT_SOLID_BASE + 1, tex_bottom: TEX_PAINT_SOLID_BASE + 1, tex_side: TEX_PAPER_LANTERN_YELLOW,
         });
+        // Reserved for Tier 3 (Hearth 381, Sawmill 382, Stone Mill 383, Bloomery 384); replaced at merge.
+        // Plain stone-looking stand-ins so 385 can follow: `is_reserved` keeps them out
+        // of the creative list, the pick, the recipes and a joiner's edits.
+        debug_assert_eq!(blocks.len(), RESERVED_FIRST as usize, "the reserved ids follow the Lantern");
+        for name in ["genesis:reserved_381", "genesis:reserved_382", "genesis:reserved_383", "genesis:reserved_384"] {
+            blocks.push(BlockDef {
+                name,
+                solid: true, transparent: false, gravity: false,
+                color: [0.5, 0.5, 0.5],
+                tex_top: TEX_STONE, tex_bottom: TEX_STONE, tex_side: TEX_STONE,
+            });
+        }
+        // pt1124 — Cobbled Deepslate: the cobblestone layer, which the mesher flags
+        // and the shader darkens (`mesh::DARK_FLAG`); the atlas is full.
+        debug_assert_eq!(blocks.len(), COBBLED_DEEPSLATE as usize, "Cobbled Deepslate follows the reserved ids");
+        blocks.push(BlockDef { // 385 COBBLED_DEEPSLATE
+            name: "genesis:cobbled_deepslate",
+            solid: true, transparent: false, gravity: false,
+            color: [0.24, 0.24, 0.27],
+            tex_top: TEX_COBBLESTONE, tex_bottom: TEX_COBBLESTONE, tex_side: TEX_COBBLESTONE,
+        });
 
         Self { blocks, leaves_fast: false }
     }
@@ -3573,13 +3647,13 @@ impl BlockRegistry {
             WATER_WHEEL | WATER_WHEEL_TURNING => ItemStack::new_block(WATER_WHEEL, 1),
             // …and a turning Windmill mines back to its idle block, same rule.
             WINDMILL | WINDMILL_TURNING => ItemStack::new_block(WINDMILL, 1),
-            // Spec 16 Phase 3b — pure-deepslate visual variants
-            // normalise to the canonical id on drop so inventory icons
-            // stay consistent (the variant tier was a server-side
-            // signal at chunk-gen time; the player's pile of mined
-            // deepslate doesn't carry the visual richness through).
-            PURE_DEEPSLATE_THIN | PURE_DEEPSLATE_HEALTHY | PURE_DEEPSLATE_FAT => {
-                ItemStack::new_block(PURE_DEEPSLATE, 1)
+            // pt1124 — mining pure deepslate, any of its visual variants
+            // (Spec 16 Phase 3b) included, yields Cobbled Deepslate, as
+            // stone yields cobblestone (placed or natural alike). A Satori
+            // from a vein cell is a separate roll (`break_drops::satori_drop`)
+            // and is untouched.
+            PURE_DEEPSLATE | PURE_DEEPSLATE_THIN | PURE_DEEPSLATE_HEALTHY | PURE_DEEPSLATE_FAT => {
+                ItemStack::new_block(COBBLED_DEEPSLATE, 1)
             }
             // Campfire smoke is a render-only pillar. Mining it (e.g. with
             // a creative-mode break) yields nothing. The campfire tick
@@ -3848,6 +3922,20 @@ impl BlockRegistry {
         }
     }
 
+    /// The support block `id` with meta byte `meta` needs (pt1124, Spec 02 §1):
+    /// `None` for a block that stands on its own. The one table `support.rs`
+    /// reads: a torch on any side, a standing lantern on the cell below, a
+    /// hanging lantern from the cell above. Paper lanterns are full solid cubes
+    /// and need none.
+    pub fn attachment(&self, id: BlockId, meta: u8) -> Option<Attachment> {
+        match id {
+            TORCH => Some(Attachment::AnySide),
+            LANTERN if crate::lantern::is_hanging(meta) => Some(Attachment::Above),
+            LANTERN => Some(Attachment::Below),
+            _ => None,
+        }
+    }
+
     /// Spec 30 — light absorption (per-step decay) for a block id.
     /// 0 = transparent for light propagation; 15 = full opaque.
     /// Maps directly off the `transparent` flag with one carve-out
@@ -4071,13 +4159,28 @@ mod tests {
         assert!(reg.is_known(SITE_BOARD));
         assert!(reg.is_solid(SITE_BOARD));
         assert_eq!(reg.mine_drop(SITE_BOARD), crate::item::ItemStack::new_block(SITE_BOARD, 1), "a board drops itself");
-        // Off-hand slice 4: the Lantern (380) follows the Site Board and is the last registered id.
+        // Off-hand slice 4: the Lantern (380) follows the Site Board.
         assert_eq!(SITE_BOARD + 1, LANTERN);
         assert!(reg.is_known(LANTERN));
         assert!(!reg.is_solid(LANTERN) && reg.is_transparent(LANTERN), "light passes and you walk through it, like a torch");
         assert_eq!(reg.light_emission(LANTERN), 15);
         assert_eq!(reg.mine_drop(LANTERN), crate::item::ItemStack::new_block(LANTERN, 1), "a lantern drops itself");
-        assert!(!reg.is_known(LANTERN + 1));
+        // pt1124: four ids held for Tier 3 (381..=384), then Cobbled Deepslate (385),
+        // the last registered id.
+        assert_eq!(LANTERN + 1, RESERVED_FIRST);
+        assert_eq!(RESERVED_LAST + 1, COBBLED_DEEPSLATE);
+        for id in RESERVED_FIRST..=RESERVED_LAST {
+            assert!(reg.is_known(id) && is_reserved(id), "{id} is a registered stand-in");
+            assert_eq!(reg.light_emission(id), 0);
+        }
+        assert!(!is_reserved(LANTERN) && !is_reserved(COBBLED_DEEPSLATE));
+        assert!(reg.is_known(COBBLED_DEEPSLATE));
+        assert_eq!(reg.get(COBBLED_DEEPSLATE).name, "genesis:cobbled_deepslate");
+        assert_eq!(crate::item::Item::Block(COBBLED_DEEPSLATE).name(&reg), "Cobbled Deepslate");
+        assert!(reg.is_solid(COBBLED_DEEPSLATE) && !reg.is_transparent(COBBLED_DEEPSLATE));
+        assert_eq!(reg.mine_drop(COBBLED_DEEPSLATE), crate::item::ItemStack::new_block(COBBLED_DEEPSLATE, 1), "it drops itself");
+        assert!(!is_pure_deepslate_family(COBBLED_DEEPSLATE), "no Satori roll on cobbled deepslate");
+        assert!(!reg.is_known(COBBLED_DEEPSLATE + 1));
         assert!(!reg.is_known(u16::MAX));
     }
 
@@ -4267,17 +4370,16 @@ mod tests {
     }
 
     #[test]
-    fn mine_drop_normalises_variants_to_canonical_pure_deepslate() {
+    fn mine_drop_of_every_pure_deepslate_variant_is_cobbled_deepslate() {
+        // pt1124 — the canonical block and its three visual variants all yield
+        // Cobbled Deepslate, as stone yields cobblestone.
         let reg = BlockRegistry::new();
-        for variant in [PURE_DEEPSLATE_THIN, PURE_DEEPSLATE_HEALTHY, PURE_DEEPSLATE_FAT] {
-            let drop = reg.mine_drop(variant);
-            match drop.item {
-                crate::item::Item::Block(b) => assert_eq!(
-                    b, PURE_DEEPSLATE,
-                    "mining a variant must drop the canonical PURE_DEEPSLATE",
-                ),
-                _ => panic!("expected Block(PURE_DEEPSLATE), got {:?}", drop.item),
-            }
+        for variant in [PURE_DEEPSLATE, PURE_DEEPSLATE_THIN, PURE_DEEPSLATE_HEALTHY, PURE_DEEPSLATE_FAT] {
+            assert_eq!(
+                reg.mine_drop(variant),
+                crate::item::ItemStack::new_block(COBBLED_DEEPSLATE, 1),
+                "mining {variant} drops Cobbled Deepslate",
+            );
         }
     }
 
@@ -4604,14 +4706,31 @@ mod tests {
     }
 
     #[test]
-    fn pure_deepslate_drops_itself() {
-        use crate::item::Item;
-        let reg = BlockRegistry::new();
-        let drop = reg.mine_drop(PURE_DEEPSLATE);
-        match drop.item {
-            Item::Block(id) => assert_eq!(id, PURE_DEEPSLATE),
-            _ => panic!("pure deepslate should drop itself (cobbled deepslate is future polish)"),
+    fn the_stone_rule_and_the_bedrock_rule() {
+        // pt1124 — the stone-tier crafting material is cobblestone and cobbled
+        // deepslate, nothing else.
+        assert!(is_stone_crafting_material(COBBLESTONE));
+        assert!(is_stone_crafting_material(COBBLED_DEEPSLATE));
+        for other in [STONE, PURE_DEEPSLATE, SANDSTONE, COBBLESTONE_WALL, AIR] {
+            assert!(!is_stone_crafting_material(other), "{other}");
         }
+        // Generated bedrock holds for everyone; placed bedrock breaks in Creative only.
+        assert!(unbreakable(BEDROCK, false, false));
+        assert!(unbreakable(BEDROCK, true, false), "natural bedrock holds in Creative too");
+        assert!(unbreakable(BEDROCK, false, true), "placed bedrock holds in Survival");
+        assert!(!unbreakable(BEDROCK, true, true), "placed bedrock breaks in Creative");
+        assert!(!unbreakable(STONE, false, false));
+    }
+
+    #[test]
+    fn attachments_are_the_torch_and_the_two_lanterns() {
+        let reg = BlockRegistry::new();
+        let hanging = crate::lantern::placement_meta([0, -1, 0]);
+        assert_eq!(reg.attachment(TORCH, 0), Some(Attachment::AnySide));
+        assert_eq!(reg.attachment(LANTERN, 0), Some(Attachment::Below));
+        assert_eq!(reg.attachment(LANTERN, hanging), Some(Attachment::Above));
+        let attached: Vec<BlockId> = (0..reg.len() as BlockId).filter(|&id| reg.attachment(id, 0).is_some()).collect();
+        assert_eq!(attached, vec![TORCH, LANTERN], "the paper lanterns are solid cubes and stand alone");
     }
 
     #[test]

@@ -1714,6 +1714,18 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   is greyed after the light, so a torch can't tint it warm). The atlas is full,
   so it keeps half-grown wheat's texture and its stunted size (0.5 wide, 0.45
   high). Healthy crops and micro-model billboards never set the bit.
+- **Cobbled Deepslate's shade (pt1124).** Block 385 has no layer of its own
+  (the 512-layer atlas is full): it borrows `TEX_COBBLESTONE`, and every face
+  the greedy mesher emits for it, and its item cube (held, dropped, framed),
+  carries `mesh::DARK_FLAG`, bit 19 of `tex_layer` (`mesh::layer_flags`, the one
+  rule both read). `shade_block` (so `fs_main` and `fs_main_cutout` alike) masks
+  the layer and multiplies the texel by `DEEPSLATE_SHADE` (0.42, 0.42, 0.47)
+  before the light, so it reads as darker, cooler cobble by day and by
+  torchlight. The flag keeps it from merging with cobblestone in a greedy run
+  (the mask is keyed by block id anyway). Its slot icon is the cobblestone layer
+  drawn with the matching egui tint (`hud_icons::BlockIcon::Tinted`,
+  `DEEPSLATE_ICON_TINT`). The far-LOD billboard and the Workshop painter still
+  show plain cobblestone.
 - **Tests.** `item_model` (every block id's look against what the mesher
   really emits, sprite depth, the cutout bit only on sprites, edge strips only
   on opaque texels, winding, every sprite icon at least an eighth transparent

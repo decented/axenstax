@@ -119,12 +119,20 @@ pub(crate) enum BlockIcon {
     /// The hand lantern: a frame with a lit window under a handle (`lantern`). Its
     /// top face is the opaque lid fill, which as an icon was a black square.
     Lantern,
+    /// An atlas layer drawn tinted by `[r, g, b]` (multiplied): Cobbled Deepslate,
+    /// whose faces are the cobblestone layer the shader darkens (`mesh::DARK_FLAG`).
+    Tinted(u32, [u8; 3]),
 }
+
+/// The slot tint matching the shader's `DEEPSLATE_SHADE` (0.42, 0.42, 0.47).
+pub(crate) const DEEPSLATE_ICON_TINT: [u8; 3] = [107, 107, 120];
 
 /// The icon of block `id` (the one question every slot painter asks).
 pub(crate) fn block_icon(id: BlockId, registry: &BlockRegistry) -> BlockIcon {
     if id == crate::block::LANTERN {
         BlockIcon::Lantern
+    } else if crate::mesh::layer_flags(id) & crate::mesh::DARK_FLAG != 0 {
+        BlockIcon::Tinted(registry.tex_top(id), DEEPSLATE_ICON_TINT)
     } else {
         BlockIcon::Layer(registry.tex_top(id))
     }
@@ -148,6 +156,16 @@ pub(crate) fn paint_block_icon(
                     rect,
                     Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
+                );
+            }
+        }
+        BlockIcon::Tinted(layer, [r, g, b]) => {
+            if let Some(tex_id) = texture(layer) {
+                painter.image(
+                    tex_id,
+                    rect,
+                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                    Color32::from_rgb(r, g, b),
                 );
             }
         }
@@ -192,8 +210,13 @@ mod block_icon_tests {
         assert_eq!(block_icon(block::LANTERN, &reg), BlockIcon::Lantern);
         // Its top layer is the opaque lid fill (a black square as an icon): not the icon.
         assert_ne!(block_icon(block::LANTERN, &reg), BlockIcon::Layer(reg.tex_top(block::LANTERN)));
-        for id in [block::STONE, block::TORCH, block::PAPER_LANTERN_YELLOW, block::GLASS] {
+        for id in [block::STONE, block::TORCH, block::PAPER_LANTERN_YELLOW, block::GLASS, block::COBBLESTONE] {
             assert_eq!(block_icon(id, &reg), BlockIcon::Layer(reg.tex_top(id)), "block {id}");
         }
+        // pt1124 — Cobbled Deepslate: the cobblestone layer, tinted as the shader darkens it.
+        assert_eq!(
+            block_icon(block::COBBLED_DEEPSLATE, &reg),
+            BlockIcon::Tinted(block::TEX_COBBLESTONE, DEEPSLATE_ICON_TINT)
+        );
     }
 }

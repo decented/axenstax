@@ -454,6 +454,11 @@ const CUTOUT_FLAG: u32 = 0x20000u;
 // tex_layer): fs_plant draws it ash grey, the lit colour's luminance times
 // BLIGHT_GREY. The atlas has no free layer for a grey crop.
 const GREY_FLAG: u32 = 0x40000u;
+// Cobbled Deepslate (`mesh::DARK_FLAG`, bit 19 of tex_layer on its faces and
+// its item cube): shade_block multiplies the borrowed cobblestone texel by
+// DEEPSLATE_SHADE, darker and a little cooler. The atlas has no free layer.
+const DARK_FLAG: u32 = 0x80000u;
+const DEEPSLATE_SHADE: vec3<f32> = vec3<f32>(0.42, 0.42, 0.47);
 const BLIGHT_GREY: f32 = 0.85;
 // Rec. 709 luminance weights (as bloom_grade_level uses).
 const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
@@ -477,6 +482,9 @@ fn shade_block(in: VertexOutput, tex_sample: vec4<f32>) -> vec4<f32> {
     var tex_color = tex_sample;
     if ((in.tex_layer & LEAF_FILL_FLAG) != 0u && tex_sample.a < 0.5) {
         tex_color = vec4<f32>(fast_leaf_fill(in.uv, layer), 1.0);
+    }
+    if ((in.tex_layer & DARK_FLAG) != 0u) {
+        tex_color = vec4<f32>(tex_color.rgb * DEEPSLATE_SHADE, tex_color.a);
     }
 
     let brightness = camera.sun_dir.w;

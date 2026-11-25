@@ -8409,15 +8409,16 @@ mod tests {
         }
     }
 
-    /// The hand lantern moved the footer to 72 (layout revision 9, block 380) with no
-    /// new field. A save this branch wrote before the bump (footer 71, 63 fields) and
-    /// one from the 0.2.37 release (footer 70, 62 fields: no off-hand column) both
-    /// still load, the absent field defaulting; neither carries the new block id, so
-    /// the older footers lose nothing.
+    /// The hand lantern moved the footer to 72 (layout revision 9, block 380) and
+    /// Cobbled Deepslate (pt1124) to 73 (layout revision 10, block 385), both with
+    /// no new field. A save from 0.2.38 to 0.2.41 (footer 72), one from before the
+    /// lantern (footer 71, 63 fields) and one from the 0.2.37 release (footer 70,
+    /// 62 fields: no off-hand column) all still load, the absent field defaulting;
+    /// none carries the new block id, so the older footers lose nothing.
     #[test]
-    fn a_footer_71_save_from_before_the_lantern_and_a_footer_70_save_from_0_2_37_still_load() {
-        assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 72, "the build under test writes footer 72");
-        for (version, fields) in [(71u32, 63u32), (70, 62)] {
+    fn footer_72_71_and_70_saves_from_before_cobbled_deepslate_still_load() {
+        assert_eq!(crate::save_format::SAVE_FORMAT_VERSION, 73, "the build under test writes footer 73");
+        for (version, fields) in [(72u32, 63u32), (71, 63), (70, 62)] {
             let (expected, body) = writer_with_fields(41, fields);
             let (back, damaged) = read_world_save_reporting(&with_footer(body, version))
                 .unwrap_or_else(|e| panic!("a footer-{version} save must load: {e}"));
@@ -8430,11 +8431,12 @@ mod tests {
             );
             assert!(crate::save_format::allowed_field_counts(version).contains(&fields), "the table keeps footer {version}'s row");
         }
-        // The two older footers still load through the plain entry point as well, and a
+        // The older footers still load through the plain entry point as well, and a
         // footer one past this build's is the newer-version refusal.
         let (_, body) = writer_with_fields(42, 63);
+        assert!(read_world_save(&with_footer(body.clone(), 72)).is_ok());
         assert!(read_world_save(&with_footer(body.clone(), 71)).is_ok());
-        assert!(read_world_save(&with_footer(body, 73)).err().expect("a newer footer is refused").is_newer_version());
+        assert!(read_world_save(&with_footer(body, 74)).err().expect("a newer footer is refused").is_newer_version());
     }
 
     #[test]

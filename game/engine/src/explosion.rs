@@ -58,6 +58,7 @@ pub fn blast_resistance(id: BlockId) -> f32 {
         // demolition-not-mining rule).
         block::STONE
         | block::COBBLESTONE
+        | block::COBBLED_DEEPSLATE
         | block::SANDSTONE
         | block::COAL_ORE
         | block::IRON_ORE

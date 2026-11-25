@@ -159,7 +159,11 @@ pub fn block_look(id: BlockId, registry: &BlockRegistry) -> ItemLook {
     if id == crate::block::LANTERN && registry.is_known(id) {
         return ItemLook::Lantern;
     }
-    let cube = ItemLook::Cube { top: def.tex_top, side: def.tex_side, bottom: def.tex_bottom };
+    // pt1124 — a block whose faces carry a shader flag (Cobbled Deepslate's
+    // darkening) carries it on the item cube too, so held and dropped it looks
+    // as it does placed.
+    let f = crate::mesh::layer_flags(id);
+    let cube = ItemLook::Cube { top: def.tex_top | f, side: def.tex_side | f, bottom: def.tex_bottom | f };
     if !registry.is_known(id) || FULL_TILE_BLOCKS.contains(&id) {
         return cube;
     }

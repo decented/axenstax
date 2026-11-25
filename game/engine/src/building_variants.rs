@@ -265,7 +265,12 @@ pub fn material_for_base(base: BlockId) -> Option<usize> {
 /// The variant of `shape` made from the full-cube block `base`. Spruce planks
 /// and `Stairs` give spruce stairs; `None` if `base` is not a table material or
 /// its family has no such shape. The recipe matcher's one lookup.
+///
+/// pt1124 — Cobbled Deepslate crafts the deepslate variants: mining pure
+/// deepslate yields it, so without this no Survival player could make a
+/// deepslate slab, stair or wall.
 pub fn id_for_base(base: BlockId, shape: VShape) -> Option<BlockId> {
+    let base = if base == block::COBBLED_DEEPSLATE { block::PURE_DEEPSLATE } else { base };
     id_of(material_for_base(base)?, shape)
 }
 

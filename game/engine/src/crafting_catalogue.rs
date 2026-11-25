@@ -1910,6 +1910,35 @@ mod tests {
         assert!(!can_craft(&inv, card_named("Crafting Table")));
     }
 
+    /// pt1124 — the stone rule in the recipe book and Fill from bag: a bag of
+    /// Cobbled Deepslate pays for the Furnace and the stone tools, alone or
+    /// mixed with cobblestone, but never for a Cobblestone Wall.
+    #[test]
+    fn cobbled_deepslate_pays_for_stone_tier_cards_but_not_cobblestone_ones() {
+        let bag = |cobble: u8, deep: u8, sticks: u8| {
+            let mut inv = Inventory::new();
+            if cobble > 0 {
+                inv.set_slot(0, Some(ItemStack::new_block(block::COBBLESTONE, cobble)));
+            }
+            if deep > 0 {
+                inv.set_slot(1, Some(ItemStack::new_block(block::COBBLED_DEEPSLATE, deep)));
+            }
+            if sticks > 0 {
+                inv.set_slot(2, Some(ItemStack::new_material(MaterialId::Stick, sticks)));
+            }
+            inv
+        };
+        for (inv, why) in [(bag(0, 8, 0), "all cobbled deepslate"), (bag(5, 3, 0), "mixed stone")] {
+            assert!(can_craft(&inv, card_named("Furnace")), "{why}");
+            let laid = crate::crafting::affordable_grid(&inv, &card_named("Furnace").example_grid).unwrap();
+            assert_eq!(match_recipe(&laid).map(|o| o.item), Some(Item::Block(block::FURNACE)), "{why}");
+        }
+        assert!(!can_craft(&bag(4, 3, 0), card_named("Furnace")), "seven stones are not eight");
+        assert!(can_craft(&bag(0, 3, 2), card_named("Stone Pickaxe")));
+        assert!(!can_craft(&bag(0, 6, 0), card_named("Cobblestone Wall")), "a cobblestone wall needs cobblestone");
+        assert!(crate::crafting::affordable_grid(&bag(0, 6, 0), &card_named("Cobblestone Wall").example_grid).is_none());
+    }
+
     #[test]
     fn tree_specific_recipes_still_give_the_trees_own_item() {
         // Birch planks make a birch fence post, not an oak one.

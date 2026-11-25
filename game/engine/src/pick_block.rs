@@ -67,6 +67,10 @@ fn no_planting_item(b: BlockId) -> bool {
 
 /// Why `b` picks nothing, or `None` if it picks an item.
 pub fn picks_nothing_reason(b: BlockId) -> Option<&'static str> {
+    // Reserved for Tier 3 (Hearth 381, Sawmill 382, Stone Mill 383, Bloomery 384); replaced at merge.
+    if block::is_reserved(b) {
+        return Some("an id held for Tier 3: no block yet");
+    }
     if let Some((_, why)) = PICKS_NOTHING.iter().find(|(id, _)| *id == b) {
         return Some(why);
     }
@@ -87,9 +91,10 @@ pub fn places_as(item: &Item) -> Option<BlockId> {
 }
 
 /// The idle/unlit/canonical block a variant is carried as. The normalisations
-/// the break drop already makes (campfire, furnace, wheels, windmill,
-/// deepslate, tapped rubber log) plus the lit electrical twins that drop does
-/// not fold.
+/// the break drop already makes (campfire, furnace, wheels, windmill, tapped
+/// rubber log), the deepslate variants (picked as pure deepslate, though mining
+/// any of them drops Cobbled Deepslate) and the lit electrical twins that drop
+/// does not fold.
 pub fn canonical_block(b: BlockId) -> BlockId {
     match b {
         block::CAMPFIRE => block::CAMPFIRE_UNLIT,
@@ -329,7 +334,8 @@ mod tests {
             }
         }
         assert!(picked > 280, "the table covered {picked} picking blocks");
-        assert_eq!(nothing, PICKS_NOTHING.len() + 4 + 4 + 5 + 4, "the picks-nothing set is exactly the listed blocks plus the four no-planting-item crops");
+        // pt1124 — plus the four ids held for Tier 3 (`block::is_reserved`).
+        assert_eq!(nothing, PICKS_NOTHING.len() + 4 + 4 + 5 + 4 + 4, "the picks-nothing set is exactly the listed blocks plus the four no-planting-item crops and the four reserved ids");
     }
 
     #[test]
@@ -406,11 +412,15 @@ mod tests {
             block::FURNACE_LIT,
             block::WATER_WHEEL_TURNING,
             block::WINDMILL_TURNING,
-            block::PURE_DEEPSLATE_THIN,
-            block::PURE_DEEPSLATE_HEALTHY,
-            block::PURE_DEEPSLATE_FAT,
         ] {
             assert_eq!(reg.mine_drop(variant).item, item(canonical_block(variant)), "{}", reg.get(variant).name);
+        }
+        // pt1124 — pure deepslate's drop is Cobbled Deepslate (as stone's is
+        // cobblestone), but its pick, like stone's, is the block itself: every
+        // variant folds onto the canonical pure deepslate.
+        for variant in [block::PURE_DEEPSLATE_THIN, block::PURE_DEEPSLATE_HEALTHY, block::PURE_DEEPSLATE_FAT] {
+            assert_eq!(canonical_block(variant), block::PURE_DEEPSLATE);
+            assert_eq!(reg.mine_drop(variant).item, item(block::COBBLED_DEEPSLATE));
         }
     }
 

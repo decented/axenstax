@@ -64,7 +64,7 @@ At runtime, each namespaced ID is assigned a **numeric block ID** for compact st
 - IDs 1..1023 are reserved for built-in `genesis:*` blocks.
 - IDs 1024..65535 are available for plugins, assigned at world load time.
 
-**As-built id ranges (2026-10-24).** The shipped engine mints its built-in ids by
+**As-built id ranges (2026-10-24; 373 to 385 added since).** The shipped engine mints its built-in ids by
 appending to one registry (`BlockRegistry::new`, `game/engine/src/block.rs`); a minted id
 is never renumbered or reused, because a saved chunk stores the bare `u16`. Today:
 
@@ -74,6 +74,9 @@ is never renumbered or reused, because a saved chunk stores the bare `u16`. Toda
 | `1..=282` | Terrain, wood families, workstations, economy blocks, electricity (`electricity:*`), signals and sensors |
 | `283..=319` | F1 shaped blocks (`STONE_SLAB` 283, `STONE_STAIRS` 284, `OAK_FENCE_GATE` 285, `OAK_TRAPDOOR` 286, `GLASS_PANE` 287, `IRON_BARS` 288, `OAK_DOOR` 289, `COBBLESTONE_WALL` 290, sign, frame), Spec 49 explosives, pistons, saplings, snow layer, pet bed, water wheel, windmill (`WINDMILL_TURNING` 319) |
 | `320..=372` | **Building variants** (53 ids): the slab, stairs, door, trapdoor, fence gate and wall of every wood and stone that did not have one. Generated from one table (`game/engine/src/building_variants.rs`); see Spec 05 §1.4 |
+| `373..=380` | Living world blocks (Feast Table 373 to Site Board 379) and the hand Lantern 380 |
+| `381..=384` | **Held for the Tier 3 branch** (Hearth 381, Sawmill 382, Stone Mill 383, Bloomery 384), registered as plain stone-looking stand-ins (`genesis:reserved_381` to `_384`) so 385 can follow; `block::is_reserved` keeps them out of the creative list, the pick, the recipes and a joiner's edits (refused as malformed). Replaced by the real blocks when the branches merge |
+| `385` | `COBBLED_DEEPSLATE` (pt1124): what mining pure deepslate drops. Drawn with the cobblestone layer darkened by the shader (`mesh::DARK_FLAG`, Spec 03), because the 512-layer atlas is full |
 
 The variants table is **append-only**: a variant's id is its position, so a new material
 is a new row at the END of the table (new ids after 372), and a new shape for a family is
@@ -2358,7 +2361,7 @@ against the slice before allocating.
       2026-11-13: `quest_world` was 54, `worldgen_version` 55, `authority_clock` 56,
       `block_authors` 57, `region_use` 58, `plan_builds` 59, `plot_succession` 60, `site_boards` 61,
       `weather_clear_until` 62, `player_offhands` 63) +
-      `SAVE_LAYOUT_REVISION` (9 today; see the block-ids bullets below) = 72. The current `SAVE_FORMAT_VERSION` is `72` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
+      `SAVE_LAYOUT_REVISION` (10 today; see the block-ids bullets below) = 73. The current `SAVE_FORMAT_VERSION` is `73` (a test, `save_format::tests::spec_02_states_the_current_save_format_version`, fails if this sentence and the constant disagree, so a bump must edit this line). Two tripwire tests stop drift: serde's field list
       for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
       without bumping the version fails), and the tolerant reader must consume every
       byte of a current save (so a field listed in its struct literal without a read
@@ -2512,6 +2515,13 @@ against the slice before allocating.
       release's shield (`ToolType::Shield`, an appended variant inside the nested item save) lands in this same
       revision 9: one bump for the one release. The look needs no save: the standing and hanging shells are
       render-only micro-models painted from existing texture layers (Spec 03 §5.10). See Spec 05 §4.
+    - **Layout revision 10 and Cobbled Deepslate (format 73, pt1124, 2026-11-25).** Block id 385,
+      `COBBLED_DEEPSLATE`, and the four stand-ins held for Tier 3 (381..=384) follow the Lantern, so the revision
+      moves to 10 for the same reason as 4 to 9. No `WorldSave` field was added. Footer arithmetic: field count
+      63 + revision 10 = 73; `FOOTER_FIELD_COUNTS` gains `(73, [63])`, and worlds at footer 70, 71 or 72 still open
+      (`footer_72_71_and_70_saves_from_before_cobbled_deepslate_still_load`). No protocol bump: as with the
+      Lantern, a block id rides the existing `u16` in a `BlockChange` and a chunk. When the Tier 3 branch merges,
+      its blocks at 381..=384 land in this same revision 10, not an eleventh.
     - **The off-hand slot and field 63 (format 71, 2026-11-13).** A local player's off-hand item
       (`PlayerSlot.offhand: Option<ItemStack>`, beside the armour, not slot 36 of the inventory) is saved as the
       appended field 63, `WorldSave.player_offhands: Option<Vec<SavedSlot>>`, element `i` = local player `i`'s

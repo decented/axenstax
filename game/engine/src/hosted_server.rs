@@ -6809,7 +6809,11 @@ impl HostedServer {
         let Some(sp) = self.server.players.get(i) else {
             return Err(EditRefusal::Malformed);
         };
-        if !self.server.registry.is_known(bc.new_block) || bc.new_block == crate::block::BEDROCK {
+        // pt1124 — an id held for Tier 3 is no block a player can put down.
+        if !self.server.registry.is_known(bc.new_block)
+            || bc.new_block == crate::block::BEDROCK
+            || crate::block::is_reserved(bc.new_block)
+        {
             return Err(EditRefusal::Malformed);
         }
         let cs = crate::chunk::CHUNK_SIZE as i32;

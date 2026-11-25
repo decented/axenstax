@@ -289,6 +289,20 @@ pub const CUTOUT_FLAG: u32 = 1 << 17;
 /// grey crop, and the texture it borrows is half-grown wheat's.
 pub const GREY_FLAG: u32 = 1 << 18;
 
+/// Bit set in a vertex's `tex_layer` on every face of Cobbled Deepslate
+/// (pt1124): `shade_block` masks it off the layer index and darkens the texel
+/// (cooler and darker, `DEEPSLATE_SHADE` in the shader). The block borrows the
+/// cobblestone layer: the atlas has no free layer. Set by the greedy mesher and
+/// the item cube ([`layer_flags`]); the slot icon tints the same layer
+/// (`hud_icons::BlockIcon::Tinted`).
+pub const DARK_FLAG: u32 = 1 << 19;
+
+/// The flag bits block `id`'s faces carry on top of their layer (the one rule
+/// the greedy mesher and the item cube share). Only Cobbled Deepslate has any.
+pub fn layer_flags(id: crate::block::BlockId) -> u32 {
+    if id == crate::block::COBBLED_DEEPSLATE { DARK_FLAG } else { 0 }
+}
+
 /// How the chunk mesher draws a block: the one rule `emit_non_solid_blocks`
 /// branches on, which the item model reads too (`item_model::block_look`), so
 /// an item looks like its block. A block with a placed micro-model (a
@@ -1897,7 +1911,7 @@ fn greedy_transparent_face(
                     Face::Top => registry.tex_top(block),
                     Face::Bottom => registry.tex_bottom(block),
                     _ => registry.tex_side(block),
-                };
+                } | layer_flags(block);
                 let (bl_f, sl_f) = (bl as f32 / 15.0, sl as f32 / 15.0);
                 emit_quad(
                     face, layer, u, v, w, h,
@@ -2040,7 +2054,7 @@ fn greedy_face(
                     tex_layer | LEAF_FILL_FLAG
                 } else {
                     tex_layer
-                };
+                } | layer_flags(block);
 
                 let (bl_f, sl_f) = (bl as f32 / 15.0, sl as f32 / 15.0);
                 emit_quad(
@@ -2305,6 +2319,34 @@ mod tests {
     use super::*;
     use crate::block::{self, BlockRegistry};
     use crate::world::World;
+
+    /// pt1124 — Cobbled Deepslate draws the cobblestone layer with DARK_FLAG on
+    /// every face (the shader darkens it); cobblestone beside it is unflagged,
+    /// and the two never merge into one quad.
+    #[test]
+    fn cobbled_deepslate_faces_carry_the_dark_flag() {
+        let reg = BlockRegistry::new();
+        let mut w = World::new();
+        w.set_block(2, 2, 2, block::COBBLED_DEEPSLATE);
+        w.set_block(3, 2, 2, block::COBBLESTONE);
+        let m = build_chunk_meshes(0, 0, 0, &w, &reg);
+        let dark = m.opaque.vertices.iter().filter(|v| v.tex_layer & DARK_FLAG != 0).count();
+        let plain = m.opaque.vertices.iter().filter(|v| v.tex_layer & DARK_FLAG == 0).count();
+        assert_eq!((dark, plain), (20, 20), "five faces each, the shared face hidden");
+        assert!(m.opaque.vertices.iter().all(|v| v.tex_layer & !DARK_FLAG == block::TEX_COBBLESTONE));
+        assert_eq!(layer_flags(block::COBBLESTONE), 0);
+        assert_eq!(DARK_FLAG & (LEAF_FILL_FLAG | CUTOUT_FLAG | GREY_FLAG | crate::world_light::AVATAR_BLOCK_BITS), 0, "a bit of its own");
+        let src = include_str!("shader.wgsl");
+        assert!(src.contains("const DARK_FLAG: u32 = 0x80000u;"), "the shader reads the same bit");
+        assert_eq!(DARK_FLAG, 0x80000);
+        // The item cube carries the flag too, so held and dropped it matches.
+        match crate::item_model::block_look(block::COBBLED_DEEPSLATE, &reg) {
+            crate::item_model::ItemLook::Cube { top, side, bottom } => {
+                assert!([top, side, bottom].iter().all(|&l| l == block::TEX_COBBLESTONE | DARK_FLAG));
+            }
+            other => panic!("a cube item, got {other:?}"),
+        }
+    }
 
     #[test]
     fn plant_instances_carry_split_light_channels() {

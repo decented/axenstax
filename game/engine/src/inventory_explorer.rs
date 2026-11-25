@@ -381,7 +381,8 @@ pub fn enumerate_all_items(registry: &BlockRegistry) -> Vec<ExplorerEntry> {
     for id in 0u16..registry.len() as u16 {
         // Living world S3 (review L7) — a Feast Marker is a record of a feast
         // held, never an item: breaking one gives back a table.
-        if id == AIR || id == crate::block::FEAST_MARKER || id == crate::block::WORN_PATH || id == crate::block::BLIGHTED_CROP || variants.is_new(id) {
+        // pt1124 — the ids held for Tier 3 are no blocks yet.
+        if id == AIR || id == crate::block::FEAST_MARKER || id == crate::block::WORN_PATH || id == crate::block::BLIGHTED_CROP || crate::block::is_reserved(id) || variants.is_new(id) {
             continue;
         }
         for id in std::iter::once(id).chain(variants.after(id)) {
@@ -765,8 +766,10 @@ mod tests {
         // Every block but air, the Feast Marker (a record, never an item), the
         // Worn Path (trodden ground; it breaks to dirt, never an item) and the
         // Blighted Crop (a sickness; it breaks to nothing).
-        assert_eq!(block_count, registry.len() - 4);
-        assert!(entries.iter().all(|e| !matches!(&e.item, Item::Block(b) if *b == crate::block::FEAST_MARKER || *b == crate::block::WORN_PATH || *b == crate::block::BLIGHTED_CROP)));
+        // pt1124 — and the four ids held for Tier 3 (381..=384).
+        assert_eq!(block_count, registry.len() - 8);
+        assert!(entries.iter().all(|e| !matches!(&e.item, Item::Block(b) if *b == crate::block::FEAST_MARKER || *b == crate::block::WORN_PATH || *b == crate::block::BLIGHTED_CROP || crate::block::is_reserved(*b))));
+        assert!(entries.iter().any(|e| e.item == Item::Block(crate::block::COBBLED_DEEPSLATE)), "Cobbled Deepslate is listed");
     }
 
     #[test]

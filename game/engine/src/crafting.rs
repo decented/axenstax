@@ -311,6 +311,8 @@ pub fn block_hardness(block_id: BlockId) -> f32 {
         block::GRAVEL => 0.6,
         block::STONE => 10.0,               // playtest-tuned: 10s
         block::COBBLESTONE => 2.0,
+        // pt1124 — darker, rougher cobble, a little tougher (Minecraft: 3.5 vs 2).
+        block::COBBLED_DEEPSLATE => 3.5,
         // Every log (any species, the tapped rubber log too) takes oak's
         // owner-tuned 4.5 s by hand; one rule, not one entry per species.
         id if block::is_any_log_block(id) => 4.5,   // playtest-tuned: 4.5s
@@ -389,7 +391,7 @@ pub fn break_work(block_id: BlockId, harvestable: bool, was_player_placed: bool)
 /// Best tool type for a block.
 pub fn best_tool_for(block_id: BlockId) -> Option<ToolType> {
     match block_id {
-        block::STONE | block::COBBLESTONE | block::SANDSTONE | block::COMMONS_STONE
+        block::STONE | block::COBBLESTONE | block::COBBLED_DEEPSLATE | block::SANDSTONE | block::COMMONS_STONE
         | block::COAL_ORE | block::IRON_ORE | block::DIAMOND_ORE
         | block::COAL_BLOCK | block::IRON_BLOCK | block::DIAMOND_BLOCK
         | block::DEEPSLATE_COAL_ORE
@@ -434,7 +436,7 @@ pub fn tier_index(material: ToolMaterial) -> u8 {
 pub fn min_tool_tier(block_id: BlockId) -> Option<ToolMaterial> {
     match block_id {
         // Stone-like blocks all need a Wood pickaxe at minimum.
-        block::STONE | block::COBBLESTONE | block::SANDSTONE
+        block::STONE | block::COBBLESTONE | block::COBBLED_DEEPSLATE | block::SANDSTONE
         | block::COAL_ORE | block::COAL_BLOCK => Some(ToolMaterial::Wood),
         // Iron tier requires a Stone pickaxe.
         block::IRON_ORE | block::IRON_BLOCK => Some(ToolMaterial::Stone),
@@ -602,22 +604,36 @@ fn bag_affords(inv: &crate::inventory::Inventory, needs: &[(Item, u32)]) -> bool
 /// quietly makes another species' item. Pure in the example and the bag, so a
 /// joiner's client and the server's window choose the same grid (no wire
 /// change).
+///
+/// pt1124 — the stone rule's side of it: every `COBBLESTONE` cell may also
+/// become Cobbled Deepslate, all of them or (last) stone by stone from the bag,
+/// cobblestone first, under the same output check, so a bag of cobbled
+/// deepslate fills the Furnace and stone-tool cards but never a cobblestone
+/// wall's.
 pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot; 3]; 3]) -> Option<[[CraftSlot; 3]; 3]> {
+    #[derive(Clone, Copy)]
+    enum Stone {
+        Keep,
+        All,
+        FromBag,
+    }
     if bag_affords(inv, &grid_needs(example)) {
         return Some(*example);
     }
     let count_of = |b: BlockId| example.iter().flatten().filter(|s| **s == CraftSlot::Block(b)).count();
     let (has_planks, has_logs) = (count_of(block::OAK_PLANKS) > 0, count_of(block::OAK_LOG) > 0);
-    if !has_planks && !has_logs {
-        return None; // no oak cell to substitute: no scan at all
+    let has_cobble = count_of(block::COBBLESTONE) > 0;
+    if !has_planks && !has_logs && !has_cobble {
+        return None; // no oak or cobblestone cell to substitute: no scan at all
     }
-    // Cheap guard: a bag with no other tree's planks or logs, and no log
-    // material, has nothing to substitute (the recipe book asks this of every
-    // card every frame).
+    // Cheap guard: a bag with no other tree's planks or logs, no log
+    // material and no other stone-tier material has nothing to substitute (the
+    // recipe book asks this of every card every frame).
     let can_substitute = inv.slots_iter().flatten().any(|s| match &s.item {
         Item::Block(b) => {
             (has_planks && block::is_any_planks(*b) && *b != block::OAK_PLANKS)
                 || (has_logs && block::is_any_log_block(*b) && *b != block::OAK_LOG)
+                || (has_cobble && block::is_stone_crafting_material(*b) && *b != block::COBBLESTONE)
         }
         Item::Material(m) => {
             has_logs && matches!(m, MaterialId::GreenLog | MaterialId::SeasonedLog | MaterialId::KilnDriedLog)
@@ -643,6 +659,7 @@ pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot;
     } else {
         vec![CraftSlot::Block(block::OAK_LOG)]
     };
+    let stone_modes: &[Stone] = if has_cobble { &[Stone::Keep, Stone::All, Stone::FromBag] } else { &[Stone::Keep] };
     let stock: Vec<(BlockId, u32)> = block::ALL_WOOD_SPECIES
         .iter()
         .map(|s| {
@@ -650,34 +667,51 @@ pub fn affordable_grid(inv: &crate::inventory::Inventory, example: &[[CraftSlot;
             (b, bag_count(inv, &Item::Block(b)))
         })
         .collect();
+    let stone_stock: [(BlockId, u32); 2] = [block::COBBLESTONE, block::COBBLED_DEEPSLATE].map(|b| (b, bag_count(inv, &Item::Block(b))));
     for mode in plank_modes {
         for log in &log_choices {
-            // The planks each OAK_PLANKS cell takes, in row-major order.
-            let mut taken = stock.clone();
-            let mut grid = *example;
-            for cell in grid.iter_mut().flatten() {
-                match *cell {
-                    CraftSlot::Block(block::OAK_PLANKS) => {
-                        *cell = match mode {
-                            Some(s) => CraftSlot::Block(block::planks_block_for(s)),
-                            None => match taken.iter_mut().find(|(_, n)| *n > 0) {
-                                Some((b, n)) => {
-                                    *n -= 1;
-                                    CraftSlot::Block(*b)
-                                }
-                                None => *cell,
-                            },
+            for &stone in stone_modes {
+                // The planks each OAK_PLANKS cell takes, in row-major order.
+                let mut taken = stock.clone();
+                let mut stones = stone_stock;
+                let mut grid = *example;
+                for cell in grid.iter_mut().flatten() {
+                    match *cell {
+                        CraftSlot::Block(block::OAK_PLANKS) => {
+                            *cell = match mode {
+                                Some(s) => CraftSlot::Block(block::planks_block_for(s)),
+                                None => match taken.iter_mut().find(|(_, n)| *n > 0) {
+                                    Some((b, n)) => {
+                                        *n -= 1;
+                                        CraftSlot::Block(*b)
+                                    }
+                                    None => *cell,
+                                },
+                            }
                         }
+                        CraftSlot::Block(block::OAK_LOG) => *cell = *log,
+                        CraftSlot::Block(block::COBBLESTONE) => {
+                            *cell = match stone {
+                                Stone::Keep => *cell,
+                                Stone::All => CraftSlot::Block(block::COBBLED_DEEPSLATE),
+                                Stone::FromBag => match stones.iter_mut().find(|(_, n)| *n > 0) {
+                                    Some((b, n)) => {
+                                        *n -= 1;
+                                        CraftSlot::Block(*b)
+                                    }
+                                    None => *cell,
+                                },
+                            }
+                        }
+                        _ => {}
                     }
-                    CraftSlot::Block(block::OAK_LOG) => *cell = *log,
-                    _ => {}
                 }
-            }
-            if grid == *example || !bag_affords(inv, &grid_needs(&grid)) {
-                continue;
-            }
-            if match_recipe(&grid).is_some_and(|got| got.item == want.item && got.count == want.count) {
-                return Some(grid);
+                if grid == *example || !bag_affords(inv, &grid_needs(&grid)) {
+                    continue;
+                }
+                if match_recipe(&grid).is_some_and(|got| got.item == want.item && got.count == want.count) {
+                    return Some(grid);
+                }
             }
         }
     }
@@ -853,9 +887,11 @@ pub fn is_paperish_slot(slot: CraftSlot) -> bool {
     matches!(slot, CraftSlot::Material(MaterialId::PapyrusSheet))
 }
 
-/// The grid with every species' planks read as `OAK_PLANKS` and every species'
-/// log block as `OAK_LOG`; `None` when that changes nothing.
-fn wood_normalised(grid: &[[CraftSlot; 3]; 3]) -> Option<[[CraftSlot; 3]; 3]> {
+/// The grid with every species' planks read as `OAK_PLANKS`, every species'
+/// log block as `OAK_LOG` (the wood rule), and every stone-tier crafting
+/// material (`block::is_stone_crafting_material`: cobbled deepslate) as
+/// `COBBLESTONE` (the stone rule); `None` when that changes nothing.
+fn materials_normalised(grid: &[[CraftSlot; 3]; 3]) -> Option<[[CraftSlot; 3]; 3]> {
     let mut out = *grid;
     for cell in out.iter_mut().flatten() {
         if let CraftSlot::Block(b) = *cell {
@@ -863,6 +899,8 @@ fn wood_normalised(grid: &[[CraftSlot; 3]; 3]) -> Option<[[CraftSlot; 3]; 3]> {
                 *cell = CraftSlot::Block(block::OAK_PLANKS);
             } else if block::is_any_log_block(b) {
                 *cell = CraftSlot::Block(block::OAK_LOG);
+            } else if block::is_stone_crafting_material(b) {
+                *cell = CraftSlot::Block(block::COBBLESTONE);
             }
         }
     }
@@ -879,16 +917,34 @@ fn wood_normalised(grid: &[[CraftSlot; 3]; 3]) -> Option<[[CraftSlot; 3]; 3]> {
 /// (tools, a table, sticks, a chest, a door...) any planks and any log work,
 /// mixed species included, as Minecraft's "any planks" do. The three log
 /// materials keep their own rules (`is_logish_slot`).
+///
+/// **One stone rule** (pt1124; Spec 05). The same retry reads cobbled
+/// deepslate as cobblestone, so wherever cobblestone is the stone-tier
+/// material (stone tools and bows, the furnace, lever, dispenser, dropper,
+/// piston, salt lick, Commons Stone) cobbled deepslate works too, mixed with
+/// cobblestone or not. A cobblestone-made output (a cobblestone wall, slab or
+/// stairs) comes from real cobblestone alone.
 pub fn match_recipe(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
     match_recipe_exact(grid).or_else(|| {
-        let got = match_recipe_exact(&wood_normalised(grid)?)?;
+        let got = match_recipe_exact(&materials_normalised(grid)?)?;
         // The retry only ever returns a recipe with no wood species in its
         // output. A species-dependent output (planks, a slab, stairs, a
         // fence post, door, trapdoor or gate) comes from an exact match
         // alone, so a mixed row of birch, spruce and birch planks is still
-        // rejected rather than read as six oak slabs.
-        (!species_dependent_output(&got.item)).then_some(got)
+        // rejected rather than read as six oak slabs. Likewise a cobblestone
+        // output never comes from cobbled deepslate.
+        (!species_dependent_output(&got.item) && !cobblestone_output(&got.item)).then_some(got)
     })
+}
+
+/// Whether a recipe output is made of cobblestone (cobblestone itself, its
+/// wall, or a cobblestone building variant): the stone rule never makes these
+/// from cobbled deepslate.
+pub fn cobblestone_output(item: &Item) -> bool {
+    let Item::Block(b) = item else { return false };
+    *b == block::COBBLESTONE
+        || *b == block::COBBLESTONE_WALL
+        || crate::building_variants::info(*b).is_some_and(|(m, _)| m.base == block::COBBLESTONE)
 }
 
 /// Whether a recipe output carries a wood species: any species' planks or
@@ -5127,6 +5183,89 @@ mod tests {
         } else {
             panic!("expected bow tool");
         }
+    }
+
+    /// pt1124 — the stone rule: cobbled deepslate is cobblestone wherever
+    /// cobblestone is the stone-tier material, alone or mixed with it.
+    #[test]
+    fn cobbled_deepslate_is_the_stone_tier_material() {
+        let cd = CraftSlot::Block(block::COBBLED_DEEPSLATE);
+        let cob = CraftSlot::Block(block::COBBLESTONE);
+        let stick = CraftSlot::Material(MaterialId::Stick);
+        let tool = |g: &[[CraftSlot; 3]; 3]| match match_recipe(g).map(|s| s.item) {
+            Some(Item::Tool(t)) => (t.tool_type, t.material),
+            other => panic!("expected a tool, got {other:?}"),
+        };
+        // A pickaxe of cobbled deepslate, and one of mixed stone.
+        for head in [[cd, cd, cd], [cd, cob, cd]] {
+            let mut g = empty_grid();
+            g[0] = head;
+            g[1][1] = stick;
+            g[2][1] = stick;
+            assert_eq!(tool(&g), (ToolType::Pickaxe, ToolMaterial::Stone), "{head:?}");
+        }
+        // A sword.
+        let mut g = empty_grid();
+        g[0][1] = cd;
+        g[1][1] = cd;
+        g[2][1] = stick;
+        assert_eq!(tool(&g), (ToolType::Sword, ToolMaterial::Stone));
+        // A bow with a cobbled deepslate centre.
+        let string = CraftSlot::Material(MaterialId::String);
+        let mut g = empty_grid();
+        g[0][1] = stick; g[0][2] = string;
+        g[1][0] = stick; g[1][1] = cd; g[1][2] = string;
+        g[2][1] = stick; g[2][2] = string;
+        assert_eq!(tool(&g).1, ToolMaterial::Stone, "a stone bow");
+        // A furnace from a ring of cobbled deepslate, and from a mixed ring.
+        for alt in [cd, cob] {
+            let mut g = [[cd; 3]; 3];
+            g[1][1] = CraftSlot::Empty;
+            g[0][0] = alt;
+            assert_eq!(match_recipe(&g), Some(ItemStack::new_block(block::FURNACE, 1)));
+        }
+        // A lever: a stick on cobbled deepslate.
+        let mut g = empty_grid();
+        g[0][0] = stick;
+        g[1][0] = cd;
+        assert_eq!(match_recipe(&g), Some(ItemStack::new_block(block::LEVER, 1)));
+    }
+
+    /// pt1124 — a cobblestone-made output never comes from cobbled deepslate;
+    /// three in a row make deepslate slabs (the deepslate variants' material).
+    #[test]
+    fn cobbled_deepslate_makes_no_cobblestone_wall_or_slab() {
+        let cd = CraftSlot::Block(block::COBBLED_DEEPSLATE);
+        let cob = CraftSlot::Block(block::COBBLESTONE);
+        let deepslate_slab = crate::building_variants::id_for_base(block::PURE_DEEPSLATE, crate::building_variants::VShape::Slab).unwrap();
+        let mut g = empty_grid();
+        g[0] = [cd, cd, cd];
+        assert_eq!(match_recipe(&g), Some(ItemStack::new_block(deepslate_slab, 6)));
+        // A mixed row is neither cobblestone slabs nor deepslate slabs.
+        g[0] = [cd, cob, cd];
+        assert_eq!(match_recipe(&g), None);
+        // A wall of cobbled deepslate is a deepslate wall, never a cobblestone wall.
+        let mut g = empty_grid();
+        g[0] = [cd, cd, cd];
+        g[1] = [cd, cd, cd];
+        let wall = match_recipe(&g).map(|s| s.item);
+        assert_ne!(wall, Some(Item::Block(block::COBBLESTONE_WALL)));
+        assert_eq!(wall, crate::building_variants::id_for_base(block::PURE_DEEPSLATE, crate::building_variants::VShape::Wall).map(Item::Block));
+        let mut g = empty_grid();
+        g[0] = [cd, cob, cd];
+        g[1] = [cd, cob, cd];
+        assert_eq!(match_recipe(&g), None, "a mixed wall grid makes no cobblestone wall");
+        assert!(cobblestone_output(&Item::Block(block::COBBLESTONE_WALL)));
+        assert!(!cobblestone_output(&Item::Block(block::FURNACE)));
+    }
+
+    /// pt1124 — Cobbled Deepslate mines like a tougher cobblestone.
+    #[test]
+    fn cobbled_deepslate_mines_like_cobblestone() {
+        assert_eq!(best_tool_for(block::COBBLED_DEEPSLATE), Some(ToolType::Pickaxe));
+        assert_eq!(min_tool_tier(block::COBBLED_DEEPSLATE), Some(ToolMaterial::Wood));
+        assert!(block_hardness(block::COBBLED_DEEPSLATE) > block_hardness(block::COBBLESTONE));
+        assert!(block_hardness(block::COBBLED_DEEPSLATE) < block_hardness(block::PURE_DEEPSLATE));
     }
 
     #[test]
