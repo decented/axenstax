@@ -49,6 +49,18 @@ fn snap(hg: &mut HeadlessGame, path: &str) {
     eprintln!("ARMSHOT {path}");
 }
 
+/// The world time with the brightest sun (the fixed times other shots use read as
+/// dusk here, which hides plate colours).
+fn noon(hg: &HeadlessGame) -> u32 {
+    (0..48_000u32)
+        .step_by(250)
+        .max_by(|a, b| {
+            let sun = |t: &u32| crate::camera::compute_sun(hg.state.world.effective_world_time(*t)).1;
+            sun(a).total_cmp(&sun(b))
+        })
+        .unwrap_or(6000)
+}
+
 #[derive(Clone, Copy)]
 enum Motion {
     Idle,
@@ -90,14 +102,16 @@ fn pt1124_armour_shots() {
         }
     }
     settle(&mut hg);
-    set_time(&mut hg, 6000);
+    let day = noon(&hg);
+    eprintln!("ARMSHOT noon is world time {day}");
+    set_time(&mut hg, day);
     let (fx, fy, fz) = (tx as f32 + 0.5, (gy + 1) as f32, tz as f32 + 0.5);
 
     // Third person: the look direction is -Z (yaw 0); `view_yaw` swings the orbit
     // camera round to the front. The body is driven by real input.
     let shoot = |hg: &mut HeadlessGame, name: &str, motion: Motion, view_yaw: f32| {
         use winit::keyboard::KeyCode;
-        set_time(hg, 6000);
+        set_time(hg, day);
         let start_z = match motion {
             Motion::Idle => fz,
             Motion::Walk => fz + 8.0,
@@ -230,9 +244,10 @@ fn pt1124_armour_shots() {
             off(a).total_cmp(&off(b))
         })
         .unwrap();
-    // Look at the row from the south (+Z), 3 blocks off, a little down.
-    let drop_eye = [fx, fy + 1.4, fz - 3.5 + 2.6];
-    let (dx, dy, dz) = (0.0_f32, fy + 0.3 - drop_eye[1], -2.6_f32);
+    // Look at the row from the south (+Z), a little down.
+    // Farther than the pickup magnet (2.4 blocks), or the pieces fly into the player.
+    let drop_eye = [fx, fy + 1.8, fz - 3.5 + 4.2];
+    let (dx, dy, dz) = (0.0_f32, fy + 0.3 - drop_eye[1], -4.2_f32);
     let (yaw, pitch) = ((-dx).atan2(-dz), dy.atan2((dx * dx + dz * dz).sqrt()));
     pose_eye(&mut hg, drop_eye, yaw, pitch);
     hg.frames(1);
