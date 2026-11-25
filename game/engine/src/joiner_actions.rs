@@ -458,6 +458,19 @@ impl JoinerActions {
         self.pending.iter().any(|e| e.request.kind == kind)
     }
 
+    /// The sequence number of the request recorded last, if it is still pending:
+    /// what a caller that has just queued one asks for to remember it. `None`
+    /// when the request was released unsent (no connection, a refused reservation).
+    pub fn last_pending_seq(&self) -> Option<u32> {
+        self.pending.back().map(|e| e.seq).filter(|seq| *seq == self.next_seq)
+    }
+
+    /// The sequence number the next recorded request will follow (the last one
+    /// recorded): compare before and after a send to tell whether it queued one.
+    pub fn last_seq(&self) -> u32 {
+        self.next_seq
+    }
+
     /// Is an `Eat` still in flight (C2a verify M1)? A joiner sends no new one
     /// while it is: the entry waits for the outcome, and stops counting once
     /// the server has passed it by ([`Self::acknowledged`]), so a lost
@@ -1665,6 +1678,29 @@ mod tests {
         assert_eq!((s2, s3), (s1 + 1, s1 + 2));
         assert_eq!(a.len(), 2, "nothing waits for the craft or drop");
         assert!(a.take(s2).is_none());
+    }
+
+    #[test]
+    fn the_last_recorded_request_is_remembered_only_while_it_is_pending() {
+        let mut a = JoinerActions::default();
+        let req = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: None, hand: crate::hands::Hand::Main };
+        assert_eq!(a.last_pending_seq(), None, "nothing recorded yet");
+        let before = a.last_seq();
+        let seq = a.record(req, 1);
+        assert_ne!(seq, before);
+        assert_eq!(a.last_pending_seq(), Some(seq));
+        // Released unsent (no connection, a refused reservation): nothing is waiting.
+        a.release(seq);
+        assert_eq!(a.last_pending_seq(), None);
+        // A sequence number handed out for a request nothing waits on is not one.
+        let mut a = JoinerActions::default();
+        a.record(req_of(Asked::Eat), 1);
+        a.unanswered();
+        assert_eq!(a.last_pending_seq(), None);
+    }
+
+    fn req_of(kind: Asked) -> Pending {
+        Pending { kind, mob: None, hotbar_slot: 0, held: None, hand: crate::hands::Hand::Main }
     }
 
     #[test]
