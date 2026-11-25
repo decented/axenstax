@@ -987,6 +987,16 @@ impl HeldWire {
     /// The wire form of what a hand holds (`None`: empty).
     pub fn of(item: Option<&crate::item::Item>) -> Self {
         let Some(item) = item else { return Self::EMPTY };
+        // An armour piece and a Plan are not in the `ItemRef` pair (it is the
+        // possession claim too): the avatar says them with its own kinds.
+        match item {
+            crate::item::Item::Armour(piece) => {
+                let (id, material) = crate::inventory::held_armour_to_wire(piece);
+                return HeldWire { kind: item_kind::ARMOUR, id, tool: material };
+            }
+            crate::item::Item::Plan(_) => return HeldWire { kind: item_kind::PLAN, id: 0, tool: HeldWire::NO_TOOL },
+            _ => {}
+        }
         let (kind, id) = crate::inventory::item_to_ref(item).to_wire();
         HeldWire { kind, id, tool: crate::inventory::held_tool_to_wire(item) }
     }
@@ -1001,6 +1011,21 @@ impl HeldWire {
             return None;
         }
         crate::inventory::tool_type_from_held_wire(self.tool)
+    }
+
+    /// The armour piece this hand holds (`item_kind::ARMOUR`: the id is its slot,
+    /// the tool byte its material); `None` for any other hand, and for a slot or
+    /// material this build doesn't know (a newer peer: draw nothing).
+    pub fn armour(self) -> Option<(crate::armour::ArmourSlot, crate::armour::ArmourMaterial)> {
+        if self.kind != item_kind::ARMOUR {
+            return None;
+        }
+        crate::inventory::held_armour_from_wire(self.id, self.tool)
+    }
+
+    /// Whether this hand holds a Plan (`item_kind::PLAN`, id 0).
+    pub fn is_plan(self) -> bool {
+        self.kind == item_kind::PLAN
     }
 }
 
@@ -1020,6 +1045,15 @@ pub mod item_kind {
     /// placeholder where a joiner's own window names it
     /// (`inventory::PlanDecode::Marker`).
     pub const PLAN: u8 = 4;
+    /// 2026-11-25 — an armour piece in a hand of the avatar wire
+    /// (`PlayerState.held_kind` / `off_kind`, `InputPacket`): `id` is the slot
+    /// (`inventory::armour_slot_to_wire`), the tool byte the material
+    /// (`armour_material_to_wire`). No layout change: a peer that doesn't know
+    /// the kind decodes it to `ItemRef::Empty` and draws an empty hand
+    /// (`ItemRef::from_wire`'s `_` arm). It is presentation only: the server
+    /// reads a relayed kind 4 or 5 as an empty hand for possession
+    /// (`joiner_inventory::Hand::from_wire`), as armour and a Plan always were.
+    pub const ARMOUR: u8 = 5;
 }
 
 /// A reference to an item held by a player, encoded on the wire as a
@@ -5597,5 +5631,71 @@ mod oc_wire_tests {
         let worn = tag(&PlayerEventType::ShieldWorn { slot: 0, hand: crate::hands::Hand::Main, durability: 1, amount: 1 });
         assert_eq!(worn, grave + 1);
         assert_eq!(tag(&PlayerEventType::ArmourWorn { hits: 1 }), 5, "the armour report keeps its place");
+    }
+}
+
+#[cfg(test)]
+mod armour_wire_tests {
+    use super::*;
+    use crate::armour::{all_armour_combos, ArmourItem};
+
+    fn state(held: HeldWire, off: HeldWire) -> PlayerState {
+        PlayerState {
+            player_index: 1, x: 1.0, y: 2.0, z: 3.0, yaw: 0.5, pitch: 0.1, health: 20.0,
+            held_kind: held.kind, held_id: held.id, anim_state: 0, flags: 0, skin_key: 0,
+            held_tool: held.tool, off_kind: off.kind, off_id: off.id, off_tool: off.tool,
+        }
+    }
+
+    #[test]
+    fn an_armour_hand_survives_the_avatar_wire_in_either_hand() {
+        for (slot, material) in all_armour_combos() {
+            let item = crate::item::Item::Armour(ArmourItem::new(slot, material));
+            let wire = HeldWire::of(Some(&item));
+            assert_eq!(wire.kind, item_kind::ARMOUR);
+            assert_eq!(wire.armour(), Some((slot, material)));
+            assert_eq!(wire.tool_type(), None, "an armour byte is not a tool byte");
+            assert!(!wire.is_plan());
+            let sent = state(wire, wire);
+            let back: PlayerState = safe_deserialize(&bincode::serialize(&sent).unwrap()).unwrap();
+            assert_eq!(HeldWire { kind: back.held_kind, id: back.held_id, tool: back.held_tool }.armour(), Some((slot, material)));
+            assert_eq!(HeldWire { kind: back.off_kind, id: back.off_id, tool: back.off_tool }.armour(), Some((slot, material)));
+        }
+    }
+
+    #[test]
+    fn the_armour_kind_changes_no_layout_and_an_older_peer_draws_an_empty_hand() {
+        // No new field: a state holding armour is exactly as long as an empty one.
+        let armoured = HeldWire::of(Some(&crate::item::Item::Armour(ArmourItem::new(
+            crate::armour::ArmourSlot::Helmet,
+            crate::armour::ArmourMaterial::Iron,
+        ))));
+        assert_eq!(
+            bincode::serialize(&state(armoured, HeldWire::EMPTY)).unwrap().len(),
+            bincode::serialize(&state(HeldWire::EMPTY, HeldWire::EMPTY)).unwrap().len(),
+        );
+        // What an older peer does with the byte (`ItemRef::from_wire`'s unknown arm).
+        assert_eq!(ItemRef::from_wire(item_kind::ARMOUR, armoured.id), ItemRef::Empty);
+        assert_eq!(item_kind::ARMOUR, 5, "append-only: never renumbered");
+    }
+
+    #[test]
+    fn armour_and_a_plan_keep_the_possession_pair_empty() {
+        let piece = crate::item::Item::Armour(ArmourItem::new(crate::armour::ArmourSlot::Boots, crate::armour::ArmourMaterial::Rubber));
+        assert_eq!(crate::inventory::item_to_ref(&piece).to_wire(), (item_kind::EMPTY, 0));
+        let plan = crate::item::Item::Plan(crate::plan::PlanData::placeholder());
+        assert_eq!(crate::inventory::item_to_ref(&plan).to_wire(), (item_kind::EMPTY, 0));
+        let wire = HeldWire::of(Some(&plan));
+        assert_eq!((wire.kind, wire.id), (item_kind::PLAN, 0));
+        assert!(wire.is_plan());
+        assert_eq!(wire.armour(), None);
+    }
+
+    #[test]
+    fn a_slot_or_material_this_build_does_not_know_names_no_armour() {
+        assert_eq!(HeldWire { kind: item_kind::ARMOUR, id: 4, tool: 0 }.armour(), None);
+        assert_eq!(HeldWire { kind: item_kind::ARMOUR, id: 0, tool: 6 }.armour(), None);
+        assert_eq!(HeldWire { kind: item_kind::ARMOUR, id: 256, tool: 0 }.armour(), None);
+        assert_eq!(HeldWire { kind: item_kind::TOOL, id: 0, tool: 0 }.armour(), None, "only the armour kind says armour");
     }
 }

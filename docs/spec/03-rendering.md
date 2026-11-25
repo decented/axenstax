@@ -1634,6 +1634,28 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
   stays upright with its top bar at the fist and the body hanging below. First person, the item hangs from the fist
   (no lean) and the whole hand is raised `HANGING_FIST_RAISE_NDC` (0.30 of the half-view height) so the body is in view
   instead of off the bottom edge. A later hanging item (a pail, a bell) joins by returning `Hanging` with its own handle.
+- **Armour (as built, 2026-11-25; `armour_model.rs`).** One table of boxes per slot gives three looks that
+  always agree. Colour is flat and needs no new texture layer (the array is full): each box face carries one texel of
+  an existing item layer (the `held_tool_model` trick: the same uv on all four corners), and a material's three
+  paints (plate, a darker trim, a lighter trim) are the opaque texels of a few item layers nearest its inventory
+  swatch (`Item::color`; a test pins that they agree). **Worn:** boxes over the player's own parts, a fraction of the
+  part's box on each axis pushed out by 0.03 to 0.06 (the clothes overlay is 0.03125 out on the head and 0.015625
+  elsewhere, and a test pins that no plate face is within 0.01 of an overlay face, so nothing z-fights; fractions of the
+  part, so the slim arm fits the same table). The helmet is a cap, back plate, cheek plates, brow and nose guard (the
+  face stays open); the chestplate covers the torso and the upper arms with a shoulder cap each; the leggings both legs
+  from the knee up and a belt round the hips; the boots the feet and ankles. Each box rides the part's own angle
+  (`part_xrot`: the walk swing, the airborne lift, the attack swing, the guard, and the head's look pitch), then yaw,
+  then the part's position, the transform the skin part is built with, so armour never lags a limb. It is emitted at
+  the end of `build_player_avatar_vertices_travelling` into the held-item (entity pipeline) mesh, which is never
+  faded: a body whose fade alpha is under 0.5 (the third-person camera pulled in) takes its armour off rather than
+  leave plates floating across the view. The worn set (`SkinRenderOpts::worn`) comes from `PlayerSlot::worn_armour`
+  (broken pieces are not drawn) for the local self-avatar (F5) and every local split-screen body. **Held:** a
+  hand-sized model of the piece (`armour_model::held_mesh`, about 0.4 across, its open side toward the viewer) in
+  first person, on the third-person hand of the own body and of every peer, through the ordinary hand placement
+  (`HeldItem.armour`; a Plan is drawn as its parchment cube the same way, `HeldItem.plan`). **Dropped:** the same model
+  at 0.7 scale (`ItemLook::Armour`, `armour_model::drop_mesh`), bobbing and spinning like the drop cube; the old
+  iron-ingot cube is gone. **Known gap (BRIDGE):** a REMOTE peer's worn armour is not drawn: it is not on the avatar
+  wire (a field would be a protocol bump), so peers draw bare until `PlayerState` carries the worn set (Spec 04 §4.2a).
 - **The avatar's two hands.** `entity_model::build_player_avatar_vertices_with`
   holds the main-hand item (`held_*`) at the right arm's hand anchor and the
   off-hand item (`off_*`) at the left arm's (index 2), each through the same

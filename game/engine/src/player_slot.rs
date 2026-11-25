@@ -563,6 +563,13 @@ impl PlayerSlot {
         crate::armour::total_armour_points(self.equipped_armour())
     }
 
+    /// What this body wears, as the avatar draws it: each slot's material
+    /// (`armour_model::WornArmour`, helmet to boots), `None` for a bare or a
+    /// broken slot.
+    pub fn worn_armour(&self) -> crate::armour_model::WornArmour {
+        self.armour_slots.map(|piece| piece.filter(|a| !a.is_broken()).map(|a| a.material))
+    }
+
     /// Material of the currently-equipped Boots, if any (`None` = bare
     /// feet or a broken/unequipped piece — broken Boots are already
     /// dropped to `None` by `take_damage_with_armour_from`).
@@ -1237,5 +1244,23 @@ mod tests {
         assert_eq!(slot.offhand, None);
         slot.inventory.set_slot(sel, None);
         assert!(!swap_hands(&mut slot));
+    }
+}
+
+#[cfg(test)]
+mod worn_armour_tests {
+    use super::*;
+
+    #[test]
+    fn worn_armour_lists_each_slots_material_and_skips_broken_pieces() {
+        let mut slot = PlayerSlot::new(0, Vec3::new(0.0, 64.0, 0.0), 1.0);
+        assert_eq!(slot.worn_armour(), [None; 4]);
+        slot.armour_slots[ArmourSlot::Helmet as usize] = Some(ArmourItem::new(ArmourSlot::Helmet, ArmourMaterial::Iron));
+        slot.armour_slots[ArmourSlot::Boots as usize] = Some(ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Rubber));
+        assert_eq!(slot.worn_armour(), [Some(ArmourMaterial::Iron), None, None, Some(ArmourMaterial::Rubber)]);
+        let mut broken = ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Rubber);
+        broken.durability = 0;
+        slot.armour_slots[ArmourSlot::Boots as usize] = Some(broken);
+        assert_eq!(slot.worn_armour()[3], None, "a broken piece is not drawn");
     }
 }

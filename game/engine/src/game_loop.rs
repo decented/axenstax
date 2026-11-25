@@ -18036,6 +18036,8 @@ impl super::GameState {
                         fade,
                         &self.registry,
                         worn_arm,
+                        // Your own armour on your own body (Spec 03 §7.5a).
+                        self.players[pidx].worn_armour(),
                     );
                     // Campaign N — your own body dims with the world's light.
                     let ch = light_at(glam::Vec3::new(ps_self.x, ps_self.y, ps_self.z));
@@ -18084,6 +18086,7 @@ impl super::GameState {
                         // The session's model, not the worn one: the Arms row
                         // reshapes the mannequin live and only Pin commits it.
                         arm_model: s.arm_model,
+                        worn: crate::armour_model::NO_ARMOUR,
                     },
                     None => crate::entity_model::SkinRenderOpts {
                         edit_inflate: true,
@@ -18150,6 +18153,9 @@ impl super::GameState {
                     // Remote peers: Classic. The arm model is not on the wire
                     // (only `skin_key` is), the same reason remote players don't
                     // show custom skins yet — see `cosmetics::CosmeticDescriptor`.
+                    // BRIDGE: a remote peer's worn armour is not on the avatar wire,
+                    // so a peer draws bare (`SkinRenderOpts::worn`); replace when
+                    // `PlayerState` carries it (a protocol bump, Spec 04).
                     let (mut skin_v, mut held_v) = crate::entity_model::build_player_avatar_vertices(
                         rp,
                         swing_progress,
@@ -18203,7 +18209,7 @@ impl super::GameState {
                         0.0
                     };
                     let ps_j = self.local_player_state(j);
-                    let (mut skin_v, mut held_v) = crate::entity_model::build_player_avatar_vertices(
+                    let (mut skin_v, mut held_v) = crate::entity_model::build_player_avatar_vertices_worn(
                         &ps_j,
                         swing_progress,
                         self.falling_tick_counter,
@@ -18213,6 +18219,8 @@ impl super::GameState {
                         // look is; only slot 0 has a wardrobe today, so Classic.
                         &self.registry,
                         crate::skin_uv::ArmModel::Classic,
+                        // A local body's armour is known here, whoever's viewport.
+                        self.players[j].worn_armour(),
                     );
                     // Campaign N — split-screen bodies dim with the world's light.
                     let ch = light_at(pos);

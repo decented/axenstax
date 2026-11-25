@@ -464,7 +464,15 @@ pub fn broadcast_held_ref(sp: &ServerPlayer) -> (u8, u16) {
     if sp.server_simulated {
         (sp.held_kind, sp.held_id)
     } else {
-        server_player_item_ref(sp).to_wire()
+        // An armour piece or a Plan is no `ItemRef` (the possession claim never
+        // names them): the avatar's kind for it comes from `HeldWire::of`.
+        match sp.inventory.hotbar_slot(sp.hotbar_slot).map(|s| &s.item) {
+            Some(item) if matches!(item, crate::item::Item::Armour(_) | crate::item::Item::Plan(_)) => {
+                let wire = crate::protocol::HeldWire::of(Some(item));
+                (wire.kind, wire.id)
+            }
+            _ => server_player_item_ref(sp).to_wire(),
+        }
     }
 }
 
@@ -479,7 +487,7 @@ pub fn broadcast_held_wires(sp: &ServerPlayer) -> (crate::protocol::HeldWire, cr
     if sp.server_simulated {
         (HeldWire { kind, id, tool: sp.held_tool }, sp.off_held)
     } else {
-        let tool = sp.inventory.hotbar_slot(sp.hotbar_slot).map_or(HeldWire::NO_TOOL, |s| crate::inventory::held_tool_to_wire(&s.item));
+        let tool = sp.inventory.hotbar_slot(sp.hotbar_slot).map_or(HeldWire::NO_TOOL, |s| HeldWire::of(Some(&s.item)).tool);
         // A host's own seat keeps no off-hand copy here (the shadow's
         // `offhand` is a joiner's): its client's input fills `off_held`.
         (HeldWire { kind, id, tool }, sp.off_held)
@@ -5026,5 +5034,36 @@ mod tests {
         assert!(super::local_identity_pubkey(Some(&"a".repeat(66))).is_none());
         assert!(super::local_identity_pubkey(Some(&"z".repeat(64))).is_none());
         assert!(super::local_identity_pubkey(Some("npub1abc")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod armour_relay_tests {
+    use super::*;
+    use crate::armour::{ArmourItem, ArmourMaterial, ArmourSlot};
+    use crate::item::{Item, ItemStack};
+    use crate::protocol::{item_kind, HeldWire};
+
+    #[test]
+    fn a_joiners_armour_hand_is_relayed_as_it_was_sent() {
+        let mut sp = ServerPlayer::new(Vec3::ZERO);
+        sp.server_simulated = true;
+        let sent = HeldWire::of(Some(&Item::Armour(ArmourItem::new(ArmourSlot::Chestplate, ArmourMaterial::Satori))));
+        (sp.held_kind, sp.held_id, sp.held_tool) = (sent.kind, sent.id, sent.tool);
+        let (main, _) = broadcast_held_wires(&sp);
+        assert_eq!(main, sent);
+        assert_eq!(main.kind, item_kind::ARMOUR);
+        assert_eq!(main.armour(), Some((ArmourSlot::Chestplate, ArmourMaterial::Satori)));
+    }
+
+    #[test]
+    fn a_hosts_own_armour_hand_is_resolved_from_its_inventory() {
+        let mut sp = ServerPlayer::new(Vec3::ZERO);
+        sp.server_simulated = false;
+        sp.inventory.set_slot(2, Some(ItemStack::new_armour(ArmourSlot::Helmet, ArmourMaterial::Leather)));
+        sp.hotbar_slot = 2;
+        let (main, _) = broadcast_held_wires(&sp);
+        assert_eq!(main.armour(), Some((ArmourSlot::Helmet, ArmourMaterial::Leather)));
+        assert_eq!(broadcast_held_ref(&sp), (main.kind, main.id));
     }
 }

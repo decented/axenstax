@@ -772,6 +772,8 @@ fn emit_non_solid_blocks(
                         {
                             let facing = crate::meta::facing(m);
                             match crate::item_model::block_look(fb, registry) {
+                                // A framed item is a block: `block_look` never says armour.
+                                crate::item_model::ItemLook::Armour { .. } => {}
                                 crate::item_model::ItemLook::Sprite { layer } => emit_framed_sprite(
                                     [obx, oby, obz],
                                     facing,

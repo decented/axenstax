@@ -112,7 +112,13 @@ pub enum Hand {
 impl Hand {
     /// Decode the input's held pair (`InputPacket.held_kind`/`held_id`).
     pub fn from_wire(kind: u8, id: u16, registry: &crate::block::BlockRegistry) -> Self {
-        if kind == crate::protocol::item_kind::EMPTY {
+        // Armour and a Plan ride the avatar wire as their own kinds (they are
+        // drawn in the hand), but possession reads them as an empty hand, as it
+        // always did.
+        if matches!(
+            kind,
+            crate::protocol::item_kind::EMPTY | crate::protocol::item_kind::ARMOUR | crate::protocol::item_kind::PLAN
+        ) {
             return Hand::Empty;
         }
         match crate::inventory::item_from_ref(kind, id, registry).as_ref().and_then(placeable_block) {
@@ -779,5 +785,19 @@ mod tests {
         let later = t.note_mismatch(5_000 + MISMATCH_LOG_INTERVAL_TICKS);
         assert_eq!(mismatch_log_level(later), log::Level::Warn);
         assert_eq!(later, Some(1), "it reports the one it held back");
+    }
+}
+
+#[cfg(test)]
+mod armour_hand_tests {
+    use super::*;
+
+    #[test]
+    fn armour_and_a_plan_on_the_avatar_wire_read_as_an_empty_hand_to_possession() {
+        let reg = crate::block::BlockRegistry::new();
+        for kind in [crate::protocol::item_kind::ARMOUR, crate::protocol::item_kind::PLAN] {
+            assert_eq!(Hand::from_wire(kind, 1, &reg), Hand::Empty, "kind {kind}");
+        }
+        assert_eq!(Hand::from_wire(crate::protocol::item_kind::TOOL, 2, &reg), Hand::Other, "a tool is still not empty");
     }
 }
