@@ -438,7 +438,7 @@ impl crate::GameState {
             return PlaceRoute::Legacy(self.players[pidx].inventory.take_placeable_from_hotbar(hotbar));
         };
         let fwd = self.players[pidx].camera.forward();
-        let meta = crate::placement_meta::placement_meta(new, face, fwd).unwrap_or_else(|| self.world.meta_at(cell[0], cell[1], cell[2]));
+        let meta = crate::placement_meta::placement_meta_in(&self.world, &self.registry, new, cell, face, fwd).unwrap_or_else(|| self.world.meta_at(cell[0], cell[1], cell[2]));
         // C3d run 18 (Decision 20) — a door is ONE compound `DoorPlace`
         // naming its bottom; the server derives both halves. Never a plain
         // `Edit` (whose `judge` leaves doors to this class).

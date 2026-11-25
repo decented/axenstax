@@ -180,7 +180,9 @@ face is stamped standing: with nothing below it, it drops on the first pass. **S
 log is runtime-only, so every save (the client's `save_live_world` and autosave, the dedicated server's autosave,
 first and final save) first runs `support::settle` (passes until nothing waits, at most 1024), spawning the drops and
 telling clients, so a chain cut by a save finishes falling, exactly once, before the world is written, and the
-loaded world holds none of it. **Light on other machines** (review 12): a joined client relights a received change
+loaded world holds none of it. The settled drops are item entities, which a save does not keep (as any item on the
+ground), so a Save & Quit mid-collapse clears the chain and loses its items; a save that plays on keeps them. The
+server's gameplay-preparation save (`gameplay_attachment`) does not settle first: open, its next ordinary save does. **Light on other machines** (review 12): a joined client relights a received change
 when the old or new block gives light (`lighting::relight_received_change`) and redraws the sections round it; a
 lending host does the same for a joiner's edit and queues the sections round a dropped torch for redraw. Before,
 any torch another player broke (not only a support drop) left its light on a joined client.

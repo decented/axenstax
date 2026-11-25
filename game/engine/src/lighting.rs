@@ -538,8 +538,8 @@ mod tests {
         assert_eq!(w.block_light_at(6, 5, 5), 0, "relit: no light where the torch was");
         assert!(!relight_received_change(&mut w, (9, 5, 5), block::AIR, block::STONE, &r), "no emitter, no relight");
         // And a received torch lights.
+        w.set_block(5, 5, 5, block::TORCH); // the change lands first, as the callers do
         assert!(relight_received_change(&mut w, (5, 5, 5), block::AIR, block::TORCH, &r));
-        w.set_block(5, 5, 5, block::TORCH);
         assert!(w.block_light_at(6, 5, 5) > 0);
     }
 

@@ -135,6 +135,25 @@ pub fn placement_meta(placed: BlockId, face: [i32; 3], fwd: glam::Vec3) -> Optio
     stamped
 }
 
+/// [`placement_meta`] for a placement into `cell` of `world`, the one call both
+/// the place arm and a Strict client's typed `Edit` make, so the byte stamped
+/// and the byte sent agree. pt1124 review 11 — a torch put against a block that
+/// holds nothing (a flower, another torch: the block at `cell - face`) records
+/// no face and keeps the any-neighbour rule (meta 0).
+pub fn placement_meta_in(
+    world: &crate::world::World,
+    registry: &block::BlockRegistry,
+    placed: BlockId,
+    cell: [i32; 3],
+    face: [i32; 3],
+    fwd: glam::Vec3,
+) -> Option<u8> {
+    if placed == block::TORCH && !registry.is_solid(world.get_block(cell[0] - face[0], cell[1] - face[1], cell[2] - face[2])) {
+        return Some(0);
+    }
+    placement_meta(placed, face, fwd)
+}
+
 /// A directional power device's facing: the dominant horizontal axis of `fwd`.
 pub fn device_facing(fwd: glam::Vec3) -> crate::meta::Facing {
     if fwd.x.abs() > fwd.z.abs() {
@@ -180,5 +199,13 @@ mod tests {
         let on_wall = placement_meta(block::TORCH, [1, 0, 0], north).expect("stamps");
         assert_eq!(crate::support::torch_support_dir(on_wall), Some((-1, 0, 0)));
         assert_eq!(crate::support::torch_support_dir(0), None, "a torch from before records nothing");
+        // Against a block that holds nothing, no face is recorded.
+        let reg = block::BlockRegistry::new();
+        let mut w = crate::world::World::new();
+        w.set_block(0, 64, 0, block::STONE);
+        let solid = placement_meta_in(&w, &reg, block::TORCH, [0, 65, 0], [0, 1, 0], north).unwrap();
+        assert_eq!(crate::support::torch_support_dir(solid), Some((0, -1, 0)));
+        w.set_block(0, 64, 0, block::TORCH);
+        assert_eq!(placement_meta_in(&w, &reg, block::TORCH, [0, 65, 0], [0, 1, 0], north), Some(0));
     }
 }

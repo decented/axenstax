@@ -17168,11 +17168,15 @@ impl super::GameState {
                                     // pt1124 review 11 — a torch put against a block that holds
                                     // nothing (a flower, another torch) records no face: the
                                     // any-neighbour rule keeps it, as before.
-                                    let stamp = if block_to_place == block::TORCH && !self.registry.is_solid(self.world.get_block(pos[0], pos[1], pos[2])) {
-                                        Some(0)
-                                    } else {
-                                        crate::placement_meta::placement_meta(block_to_place, face, self.players[pidx].camera.forward())
-                                    };
+                                    // The same call a Strict client's typed `Edit` makes (`placement_meta_in`).
+                                    let stamp = crate::placement_meta::placement_meta_in(
+                                        &self.world,
+                                        &self.registry,
+                                        block_to_place,
+                                        [place_x, place_y, place_z],
+                                        face,
+                                        self.players[pidx].camera.forward(),
+                                    );
                                     if let Some(m) = stamp {
                                         self.world.set_meta((place_x, place_y, place_z), m);
                                     }

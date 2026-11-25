@@ -3597,6 +3597,7 @@ impl GameServer {
     /// world before it is written (`support::settle`): the drops land as items
     /// and every client is told, as a tick's pass does. The dedicated server
     /// calls it before each save; a lent world is settled by its host client.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn settle_support(&mut self) {
         if self.lent || !self.world.support_pending() {
             return;

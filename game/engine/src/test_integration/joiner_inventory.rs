@@ -1137,9 +1137,16 @@ fn in_creative_a_joiner_breaks_placed_bedrock_but_never_the_worlds() {
     }
     // Creative: the placed one breaks, the world's holds.
     rig.hs.server.set_play_mode(crate::play_mode::PlayMode::Creative);
+    rig.changes.clear();
     rig.send(None, &[(FLOOR, block::AIR)], &[]);
     rig.tick();
     assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::BEDROCK, "the world's bedrock holds in Creative");
+    // pt1124 review 7 — a Creative joiner asks (`block::break_gated_locally`), so the
+    // refused break is sent back: its predicted hole is filled again.
+    assert!(
+        rig.changes.iter().any(|bc| (bc.x, bc.y, bc.z) == FLOOR && bc.new_block == block::BEDROCK),
+        "the joiner is told the world's bedrock is still there"
+    );
     rig.send(None, &[(placed, block::AIR)], &[]);
     rig.tick();
     assert_eq!(rig.world().get_block(placed.0, placed.1, placed.2), block::AIR, "placed bedrock breaks in Creative");
