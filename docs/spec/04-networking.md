@@ -1005,6 +1005,18 @@ struct PlayerState {
   and materials, not just block ids). This replaced the old block-only
   `held_item: u16`. The client maps the pair back to a mesh via
   `item_model::held_item_mesh` for the avatar's hand.
+- **A held armour piece or Plan (2026-11-25, no layout change, no protocol bump).** `item_kind::ARMOUR = 5`
+  names an armour piece in a hand of the avatar wire (`PlayerState.held_*`/`off_*`, `InputPacket.held_*`/`off_*`):
+  `held_id` is the slot (`inventory::armour_slot_to_wire`: Helmet 0, Chestplate 1, Leggings 2, Boots 3) and the tool
+  byte the material (`armour_material_to_wire`: Leather 0, Iron 1, Diamond 2, Satori 3, Chainmail 4, Rubber 5), read
+  with `HeldWire::armour()`; a Plan is the existing `item_kind::PLAN` with id 0 (`HeldWire::is_plan()`). Both come only
+  from `HeldWire::of`: `inventory::item_to_ref` still says `Empty` for them, because that pair is also the possession
+  claim (`EntityAttack`, `ItemAction`, edit hands), which has never named them. A peer that doesn't know the kind
+  decodes it to `ItemRef::Empty` (`from_wire`'s unknown arm) and draws an empty hand; an unknown slot or material byte
+  draws nothing. Presentation only: the server relays the kind like any other, and possession reads kinds 4 and 5 as an
+  empty hand (`joiner_inventory::Hand::from_wire`), as armour and a Plan always were. **Known gap:** a peer's WORN
+  armour (the four slots on its body) is not on the wire; adding it means a trailing `PlayerState` field and a protocol
+  bump, so it is a separate decision (Spec 03 §7.5a "Armour").
 - **`anim_state`** is locomotion only: `0` idle, `1` walk, `2` jump. **Crouch is
   a flag, not a state** (`player_flags::CROUCHING`), so it can combine with any
   locomotion state.

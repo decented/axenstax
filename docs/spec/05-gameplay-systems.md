@@ -2006,6 +2006,12 @@ anti-cheat horizontal-speed gate; grounded only — Creative/Spectator flying sp
 untouched. Remote (hosted-session) players don't yet get the bonus — armour isn't
 tracked server-side for remote players today (same BRIDGE as reach, above).
 
+**What armour looks like (2026-11-25).** A worn piece is drawn on your own body in third person (F5) and on every
+local split-screen body, each plate riding its limb; a piece in the hand is a small model of that piece in first
+person and on the third-person hand (yours and a peer's); a dropped piece is the same small model on the ground.
+Rubber exists only as boots (the other slots have no Rubber recipe). Other players' worn armour is not drawn yet (it is not on
+the avatar wire). Spec 03 §7.5a "Armour"; Spec 04 §4.2a.
+
 ### 6.7 Death and Respawn
 
 On death (Survival):
