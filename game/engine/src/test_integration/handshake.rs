@@ -270,7 +270,8 @@ fn protocol_version_is_the_pinned_value() {
     // v100 (living world Tier 2 S6): block id 378 (Commons Shelf), no packet change.
     // v100 (living world Tier 2 S7): block id 379; ItemAction::SiteBoard; BlockView::SiteBoard.
     // v101 (off-hand plan slice 2): the hand on every use packet, WindowClick::Offhand (= 11) and SwapHands (= 12), WireWindowSlot::Offhand (= 5), the tool type and the off-hand on the avatar wire.
-    assert_eq!(protocol::PROTOCOL_VERSION, 101);
+    // v102 (0.2.42): furnace click source is any inventory slot or TAKE_BACK; block 385, 381..=384 reserved; held item kind ARMOUR = 5.
+    assert_eq!(protocol::PROTOCOL_VERSION, 102);
 }
 
 #[test]

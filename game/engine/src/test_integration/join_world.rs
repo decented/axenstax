@@ -275,3 +275,30 @@ fn a_protocol_100_client_is_refused_cleanly() {
     assert_eq!(reason, Some(protocol::protocol_mismatch_reason(100)));
     assert!(protocol::protocol_mismatch_reason(100).contains("100"), "and the reason names the version");
 }
+
+/// v102 (0.2.42) — a protocol-101 client decodes every packet of this build
+/// but reads a furnace click's source, block 385 and held kind 5 differently,
+/// so it is refused at join with the readable reason, never let in.
+#[test]
+fn a_protocol_101_client_is_refused_cleanly() {
+    assert_eq!(protocol::PROTOCOL_VERSION, 102);
+    let mut hs = start_open_server("t102-join-v101", 7);
+    let client = hs.attach_test_remote();
+    let mut req = build_join_request_guest("OldBuild", 0);
+    req.protocol_version = 101;
+    client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
+    hs.tick();
+    let mut reason = None;
+    let mut accepted = false;
+    while let Some(pkt) = client.try_recv_from_server() {
+        match protocol::deserialize_header(&pkt) {
+            Some((protocol::PacketType::JoinReject, payload)) => {
+                reason = protocol::safe_deserialize::<protocol::JoinRejectPacket>(payload).ok().map(|r| r.reason);
+            }
+            Some((protocol::PacketType::JoinAccept, _)) => accepted = true,
+            _ => {}
+        }
+    }
+    assert!(!accepted, "never let in");
+    assert_eq!(reason, Some(protocol::protocol_mismatch_reason(101)));
+}

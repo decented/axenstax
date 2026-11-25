@@ -3117,7 +3117,19 @@ pub struct ServerAnnouncePacket {
 ///   off-hand: `InputPacket` and `PlayerState` append `held_tool`, `off_kind`,
 ///   `off_id`, `off_tool` ([`HeldWire`]). Every shape above changed, so a v100
 ///   peer cannot decode them; the bump refuses it at join.
-pub const PROTOCOL_VERSION: u32 = 101;
+/// - v102 (2026-11-25, 0.2.42): **meaning changes with no shape change.** A
+///   furnace click's source (`WindowClick` on a furnace slot) is any inventory
+///   slot (0..36, hotbar and bag) or `furnace::TAKE_BACK` (255, take Input or
+///   Fuel back; Output ignores the source); v101 read only the hotbar and took
+///   Input or Fuel back with an empty selected slot, so the two would predict
+///   different moves and the server's correction would rebuild the wrong one.
+///   New block id 385 (Cobbled Deepslate), with 381..=384 reserved in the
+///   registry (never placed, granted or claimed as an item). `item_kind::ARMOUR`
+///   (= 5) on the avatar wire's held item: presentation only, and a v101 server
+///   would read it as `Hand::Other` in the possession fallback. A v101 peer
+///   decodes every packet but disagrees on these meanings, so the bump refuses
+///   it at join (`protocol_mismatch_reason`).
+pub const PROTOCOL_VERSION: u32 = 102;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -3327,7 +3339,8 @@ mod tests {
         // v100 — living world Tier 2 S6: block id 378 (Commons Shelf), `ChestTier::Shelf`, no packet change.
         // v100 — living world Tier 2 S7: Site Board (379), ItemAction::SiteBoard, BlockView::SiteBoard.
         // v101 — off-hand plan slice 2: the hand on every use packet, WindowClick::Offhand (= 11) and SwapHands (= 12), WireWindowSlot::Offhand (= 5), the tool type and the off-hand on the avatar wire.
-        assert_eq!(super::PROTOCOL_VERSION, 101);
+        // v102 — 0.2.42: furnace click source is any inventory slot or TAKE_BACK; block 385 (Cobbled Deepslate), 381..=384 reserved; held item kind ARMOUR = 5.
+        assert_eq!(super::PROTOCOL_VERSION, 102);
     }
 
     #[test]
@@ -4104,7 +4117,8 @@ mod tests {
         // v100 (living world Tier 2 S7): block id 379 (Site Board); ItemAction::SiteBoard (= 15); BlockView::SiteBoard (= 5).
         // v101 (off-hand review 4, appended before any build): `EntityUpdate.flags2` (`entity_flags2::BREED_BLOCKED`, `OWN_PET`).
         // v101 (off-hand plan slice 2): the hand on every use packet, WindowClick::Offhand (= 11) and SwapHands (= 12), WireWindowSlot::Offhand (= 5), the tool type and the off-hand on the avatar wire.
-        assert_eq!(PROTOCOL_VERSION, 101);
+        // v102 (0.2.42): furnace click source is any inventory slot or TAKE_BACK; block 385, 381..=384 reserved; held item kind ARMOUR = 5.
+        assert_eq!(PROTOCOL_VERSION, 102);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
