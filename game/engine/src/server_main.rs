@@ -1002,6 +1002,7 @@ pub fn run(args: &[String]) {
     // Persist the freshly-generated world immediately so `world.dat` exists from
     // tick 0 (a crash before the first autosave doesn't lose the generation).
     // Reached only when the world loaded or there was nothing saved to load.
+    hs.server.settle_support();
     hs.server.save();
 
     log::info!("──────────────────────────────────────────────");
@@ -1281,6 +1282,8 @@ pub fn run(args: &[String]) {
         }
 
         if last_save.elapsed() >= autosave_dt {
+            // pt1124 review 10 — a support collapse in progress finishes first.
+            hs.server.settle_support();
             hs.server.save();
             log::info!("Autosaved '{}'", cfg.world);
             last_save = Instant::now();
@@ -1308,6 +1311,7 @@ pub fn run(args: &[String]) {
 
     log::info!("Saving '{}' and shutting down…", cfg.world);
     hs.shutdown();
+    hs.server.settle_support();
     if !report_final_save(&cfg.world, hs.server.try_save()) {
         std::process::exit(1);
     }

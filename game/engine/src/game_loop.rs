@@ -6709,6 +6709,8 @@ impl super::GameState {
             self.autosave_counter = 0;
             #[cfg(not(target_arch = "wasm32"))]
             if let Err(e) = self.preflight_personal_local() { log::error!("Personal autosave failed: {e}"); return; }
+            // pt1124 review 10 — a support collapse in progress finishes first.
+            self.settle_support();
             let quest_world = match crate::quest_npcs::capture(self.world.quest_scope, &self.ecs) {
                 Ok(saved) => saved,
                 Err(error) => { log::error!("Quest autosave failed: {error}"); return; }
@@ -17163,7 +17165,15 @@ impl super::GameState {
                                     // power device's axis facing) is ONE pure rule, hoisted so a Strict
                                     // client's typed `Edit` carries it before anything is predicted
                                     // (`placement_meta`). The chunk re-mesh below picks up the meta.
-                                    if let Some(m) = crate::placement_meta::placement_meta(block_to_place, face, self.players[pidx].camera.forward()) {
+                                    // pt1124 review 11 — a torch put against a block that holds
+                                    // nothing (a flower, another torch) records no face: the
+                                    // any-neighbour rule keeps it, as before.
+                                    let stamp = if block_to_place == block::TORCH && !self.registry.is_solid(self.world.get_block(pos[0], pos[1], pos[2])) {
+                                        Some(0)
+                                    } else {
+                                        crate::placement_meta::placement_meta(block_to_place, face, self.players[pidx].camera.forward())
+                                    };
+                                    if let Some(m) = stamp {
                                         self.world.set_meta((place_x, place_y, place_z), m);
                                     }
                                     // Dispenser/Dropper (2026-07-04) — an EAGER block-entity so the

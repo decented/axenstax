@@ -157,7 +157,8 @@ drop as their item when it goes. The table is `BlockRegistry::attachment(id, met
 
 | Block | Needs |
 |---|---|
-| Torch (23) | any solid neighbour, on any of the six sides (a torch records no facing) |
+| Torch (23), placed against a face | the solid block it was placed against (meta: state 0b11, aux 0b101, facing = the direction of that block; `support::torch_meta`, stamped by `placement_meta`) |
+| Torch (23), no face recorded (meta not that mark: every torch placed before pt1124 review 11, a structure's, a `/we` write's, one put against a non-solid block) | any solid neighbour, on any of the six sides |
 | Lantern (380), standing | the cell below solid |
 | Lantern (380), hanging (state bit 0) | the cell above solid, or a lantern (a lantern hangs under a lantern) |
 
@@ -165,7 +166,9 @@ Everything else stands on its own (paper lanterns are solid cubes; signs, ladder
 crops and flowers are not in the table yet). *Solid* is `BlockDef.solid`, so glass, leaves, slabs, fences,
 walls and fence posts all hold. The rule runs in one place, `support::tick_support`: every block change
 outside world-gen passes `World::set_block`, which logs the cell (at most `MAX_SUPPORT_LOG` 8192 between
-passes, runtime only); the pass checks each logged cell and its six neighbours, decides every drop against
+passes, runtime only; past that the change marks its 16-cube section instead, and a pass that has drained the
+cell log below `MAX_CELLS_PER_PASS` rescans up to `MAX_SECTIONS_PER_PASS` (4) such sections, each with a one-cell
+ring round it, so no change is lost, review 9); the pass checks each logged cell and its six neighbours, decides every drop against
 the world as it stood at the start of the pass, then sets each to AIR (meta 0, not player-placed), takes its
 light out and returns the block's mining drop. A cleared cell is logged in turn, so a chain falls one link per
 pass. A neighbour in a column the world holds nothing of counts as holding (unknown is never a reason to drop).
@@ -173,7 +176,14 @@ The pass runs beside the falling blocks (every 4th tick) on the side that owns t
 a lending host's server, a dedicated server; the server sends each AIR change and spawns the item in its ECS,
 and a joined client discards its own log. A save restore and a pushed chunk never fill the log, so a torch
 already floating in an old world stays until something beside it changes. A lantern placed on a block's side
-face is stamped standing: with nothing below it, it drops on the first pass.
+face is stamped standing: with nothing below it, it drops on the first pass. **Saving settles it** (review 10): the
+log is runtime-only, so every save (the client's `save_live_world` and autosave, the dedicated server's autosave,
+first and final save) first runs `support::settle` (passes until nothing waits, at most 1024), spawning the drops and
+telling clients, so a chain cut by a save finishes falling, exactly once, before the world is written, and the
+loaded world holds none of it. **Light on other machines** (review 12): a joined client relights a received change
+when the old or new block gives light (`lighting::relight_received_change`) and redraws the sections round it; a
+lending host does the same for a joiner's edit and queues the sections round a dropped torch for redraw. Before,
+any torch another player broke (not only a support drop) left its light on a joined client.
 
 ### 1.4 Block States
 

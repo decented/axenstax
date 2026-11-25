@@ -1426,7 +1426,8 @@ second by hand.
   (`meta::state` bit 0) that `placement_meta::placement_meta` stamps, a joiner's placement carries in its `BlockChange.meta`,
   and the mesher reads to pick the standing or the hanging shell (`lantern::model_key`).
 - **Support (pt1124).** A standing lantern needs the block below it and a hanging one the block (or lantern) above
-  it; a torch needs any solid neighbour. When that goes, by any cause (a break by any seat, a blast, a piston, a fall,
+  it; a torch needs the block it was placed against (a torch placed before review 11, or against a block that holds
+  nothing, needs any solid neighbour). When that goes, by any cause (a break by any seat, a blast, a piston, a fall,
   fire), the block drops as its item within a fifth of a second, and a chain of hanging lanterns follows one link at a
   time. One rule for all of them: Spec 02 §1.3 "Support". A lantern clicked onto a block's side is stamped standing,
   so with nothing under it it drops at once.

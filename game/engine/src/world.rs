@@ -494,8 +494,9 @@ pub struct BrowseEntry {
 pub const MAX_TABLES_GONE_LOGGED: usize = 256;
 
 /// pt1124 — most cells [`World`]'s support log holds between two support
-/// passes (a pass drains it at 5 Hz). Past it a change is not logged, so an
-/// attached block beside it stays until its next neighbour change.
+/// passes (a pass drains it at 5 Hz). Past it a change marks its 16-cube
+/// section for a later rescan instead (`support_sections`), so a bulk edit
+/// loses no support check.
 pub const MAX_SUPPORT_LOG: usize = 8192;
 
 /// C3c-3b — most face-attachment changes a world's log holds between a
@@ -596,6 +597,10 @@ pub struct World {
     /// already floating in a loaded world stay until a neighbour changes.
     /// Runtime-only.
     support_log: std::collections::BTreeSet<(i32, i32, i32)>,
+    /// pt1124 review 9 — the sections (chunk coordinates) whose changes did not
+    /// fit in `support_log`: a later support pass rescans each whole section
+    /// (and the cells round it) once the cell log has room. Runtime-only.
+    support_sections: std::collections::BTreeSet<(i32, i32, i32)>,
     /// C3c-3b — the faces whose attachment changed (set, removed, or a laid
     /// Blueprint developed) since the last [`World::take_attachment_changes`],
     /// oldest first, at most [`MAX_ATTACHMENT_CHANGES_LOGGED`]; a face can
@@ -1006,6 +1011,7 @@ impl World {
             edited_columns: None,
             tables_gone: None,
             support_log: std::collections::BTreeSet::new(),
+            support_sections: std::collections::BTreeSet::new(),
             attachment_log: None,
             disk_chunks: std::sync::Mutex::new(ahash::AHashSet::new()),
             block_entities: AHashMap::new(),
@@ -1375,16 +1381,40 @@ impl World {
         out
     }
 
+    /// pt1124 review 9 — up to `max` sections whose changes overflowed the
+    /// cell log, in order, taken off for a rescan (`support::tick_support`).
+    pub fn take_support_sections(&mut self, max: usize) -> Vec<(i32, i32, i32)> {
+        let mut out = Vec::with_capacity(max.min(self.support_sections.len()));
+        while out.len() < max {
+            let Some(section) = self.support_sections.pop_first() else { break };
+            out.push(section);
+        }
+        out
+    }
+
     /// pt1124 — drop the support log unread: a joined client's world, whose
     /// server runs the support pass and sends what it drops.
     pub fn discard_support_log(&mut self) {
         self.support_log.clear();
+        self.support_sections.clear();
     }
 
     /// pt1124 — how many changed cells wait for the support pass.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn support_log_len(&self) -> usize {
         self.support_log.len()
+    }
+
+    /// pt1124 review 9 — how many overflowed sections wait for a rescan.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn support_sections_len(&self) -> usize {
+        self.support_sections.len()
+    }
+
+    /// pt1124 review 10 — whether any support work is waiting (cells or
+    /// overflowed sections): the save boundary settles it first.
+    pub fn support_pending(&self) -> bool {
+        !self.support_log.is_empty() || !self.support_sections.is_empty()
     }
 
     /// C3c-3b — start logging face-attachment changes (see the
@@ -2705,6 +2735,8 @@ impl World {
             // be one put where nothing holds it): the support pass checks it.
             if self.support_log.len() < MAX_SUPPORT_LOG {
                 self.support_log.insert((x, y, z));
+            } else {
+                self.support_sections.insert((cx, cy, cz));
             }
             // C3b-fix-d (A-L5) — a table gone, for a server's table grace.
             if was == block::CRAFTING_TABLE

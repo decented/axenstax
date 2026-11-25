@@ -2,10 +2,11 @@
 //! "Support", Spec 05 §3).
 //!
 //! * **The table.** `BlockRegistry::attachment` names what each attached block
-//!   needs: a torch any solid neighbour (it records no facing), a standing
-//!   lantern the cell below, a hanging lantern the cell above (a solid block or
-//!   another lantern, so a lantern can hang under a lantern). Every other block
-//!   stands on its own.
+//!   needs: a torch the solid block it was placed against ([`torch_meta`]
+//!   records that face; a torch placed before it records none and keeps the old
+//!   rule, any solid neighbour), a standing lantern the cell below, a hanging
+//!   lantern the cell above (a solid block or another lantern, so a lantern can
+//!   hang under a lantern). Every other block stands on its own.
 //! * **The queue.** Every block change outside world-gen passes
 //!   `World::set_block`, which logs the cell (`World::take_support_cells`). A
 //!   player's break, a blast, a piston, a falling block, fire, a fluid and a
@@ -21,6 +22,12 @@
 //!   mining drop comes back to the caller to spawn. A cleared cell is logged in
 //!   turn, so a chain (a lantern under a lantern, a torch on a block that
 //!   itself dropped) falls one link per pass.
+//!   A bulk edit past the log's bound marks whole sections instead, which a
+//!   later pass rescans ([`MAX_SECTIONS_PER_PASS`] a pass), so no change is
+//!   lost.
+//! * **Saving.** A save settles the work first ([`settle`]): the passes run
+//!   until nothing waits, so a collapse cut by a save is finished before the
+//!   world is written, never stranded half-way (the log is runtime-only).
 //! * **Old worlds.** A save restore and a pushed chunk never fill the log, so a
 //!   block already floating in a loaded world stays until something next to it
 //!   changes.
@@ -31,6 +38,42 @@ use crate::world::World;
 
 /// Most logged cells one pass checks; the rest wait for the next pass.
 pub const MAX_CELLS_PER_PASS: usize = 2048;
+
+/// Most overflowed sections (`World::take_support_sections`) one pass
+/// rescans, once the cell log has been drained below a full pass.
+pub const MAX_SECTIONS_PER_PASS: usize = 4;
+
+/// Most passes [`settle`] runs: a chain falls one link a pass, and no chain is
+/// taller than the world.
+pub const MAX_SETTLE_PASSES: usize = 1024;
+
+/// The state and aux bits that mark a torch's meta as recording its support
+/// face (the facing bits): a combination no other block's stale byte is likely
+/// to leave in a cell, and 0 (every torch placed before) is "unknown".
+const TORCH_ORIENTED_STATE: u8 = 0b11;
+const TORCH_ORIENTED_AUX: u8 = 0b101;
+
+/// pt1124 review 11 — the meta a torch placed against the face `face` (the
+/// clicked face's outward normal: the torch is at the clicked block plus
+/// `face`, so its support is at minus `face`) stamps. `None` for a face that is
+/// not one of the six.
+pub fn torch_meta(face: [i32; 3]) -> Option<u8> {
+    let toward = [-face[0], -face[1], -face[2]];
+    if toward.iter().map(|c| c.abs()).sum::<i32>() != 1 {
+        return None;
+    }
+    let f = crate::block_shape::facing_from_face_normal(toward);
+    let m = crate::meta::with_facing(0, f);
+    Some(crate::meta::with_aux(crate::meta::with_state(m, TORCH_ORIENTED_STATE), TORCH_ORIENTED_AUX))
+}
+
+/// The direction of the block a torch with meta `meta` was placed against, or
+/// `None` for a torch that recorded none (placed before review 11, by a
+/// structure or a `/we` write): those keep the any-neighbour rule.
+pub fn torch_support_dir(meta: u8) -> Option<(i32, i32, i32)> {
+    (crate::meta::state(meta) == TORCH_ORIENTED_STATE && crate::meta::aux(meta) == TORCH_ORIENTED_AUX)
+        .then(|| crate::meta::facing(meta).offset())
+}
 
 const SIDES: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)];
 
@@ -73,6 +116,7 @@ pub fn is_supported(world: &World, registry: &BlockRegistry, cell: (i32, i32, i3
     match registry.attachment(id, meta) {
         None => true,
         Some(Attachment::AnySide) => SIDES.iter().any(|&d| holds(world, registry, add(cell, d), false)),
+        Some(Attachment::Toward(d)) => holds(world, registry, add(cell, d), false),
         Some(Attachment::Below) => holds(world, registry, add(cell, (0, -1, 0)), false),
         Some(Attachment::Above) => holds(world, registry, add(cell, (0, 1, 0)), true),
     }
@@ -84,24 +128,44 @@ pub fn is_supported(world: &World, registry: &BlockRegistry, cell: (i32, i32, i3
 /// tells whoever draws the world (a broadcast `BlockChange` to AIR, a remesh).
 pub fn tick_support(world: &mut World, registry: &BlockRegistry) -> Vec<Dropped> {
     let logged = world.take_support_cells(MAX_CELLS_PER_PASS);
-    if logged.is_empty() {
+    // Review 9 — the sections a bulk edit overflowed into, once the cell log
+    // has been drained below a full pass.
+    let sections = if logged.len() < MAX_CELLS_PER_PASS {
+        world.take_support_sections(MAX_SECTIONS_PER_PASS)
+    } else {
+        Vec::new()
+    };
+    if logged.is_empty() && sections.is_empty() {
         return Vec::new();
+    }
+    let mut candidates: std::collections::BTreeSet<(i32, i32, i32)> = std::collections::BTreeSet::new();
+    for &cell in &logged {
+        candidates.extend(std::iter::once(cell).chain(SIDES.iter().map(|&d| add(cell, d))));
+    }
+    // A section's own cells and the ring round it (an attached block just
+    // outside it may have lost a support inside it).
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    for &(sx, sy, sz) in &sections {
+        for x in sx * cs - 1..=sx * cs + cs {
+            for y in sy * cs - 1..=sy * cs + cs {
+                for z in sz * cs - 1..=sz * cs + cs {
+                    if registry.attachment(world.get_block(x, y, z), 0).is_some() {
+                        candidates.insert((x, y, z));
+                    }
+                }
+            }
+        }
     }
     // Decide every drop against the world as it stands now, then clear them.
     let mut doomed: std::collections::BTreeSet<(i32, i32, i32)> = std::collections::BTreeSet::new();
-    for &cell in &logged {
-        for c in std::iter::once(cell).chain(SIDES.iter().map(|&d| add(cell, d))) {
-            if doomed.contains(&c) {
-                continue;
-            }
-            let id = world.get_block(c.0, c.1, c.2);
-            if registry.attachment(id, 0).is_none() {
-                continue;
-            }
-            let meta = world.meta_at(c.0, c.1, c.2);
-            if !is_supported(world, registry, c, id, meta) {
-                doomed.insert(c);
-            }
+    for c in candidates {
+        let id = world.get_block(c.0, c.1, c.2);
+        if registry.attachment(id, 0).is_none() {
+            continue;
+        }
+        let meta = world.meta_at(c.0, c.1, c.2);
+        if !is_supported(world, registry, c, id, meta) {
+            doomed.insert(c);
         }
     }
     let mut dropped = Vec::with_capacity(doomed.len());
@@ -115,6 +179,22 @@ pub fn tick_support(world: &mut World, registry: &BlockRegistry) -> Vec<Dropped>
         dropped.push(Dropped { cell, block: id, item: registry.mine_drop(id) });
     }
     dropped
+}
+
+/// pt1124 review 10 — run support passes until nothing waits (at most
+/// [`MAX_SETTLE_PASSES`]) and return everything that dropped, in pass order.
+/// The save boundary calls it, so a collapse in progress (one link a pass,
+/// carried by the runtime-only log) finishes before the world is written: a
+/// loaded world never holds half a fallen chain, and nothing falls twice.
+pub fn settle(world: &mut World, registry: &BlockRegistry) -> Vec<Dropped> {
+    let mut all = Vec::new();
+    for _ in 0..MAX_SETTLE_PASSES {
+        if !world.support_pending() {
+            break;
+        }
+        all.extend(tick_support(world, registry));
+    }
+    all
 }
 
 /// Spawn each dropped block's item at its cell, as a break's drop lands.
@@ -250,6 +330,59 @@ mod tests {
         w.set_block(15, HIGH - 10, 15, STONE); // the torch's own column is held
         w.set_block(15, HIGH, 15, TORCH);
         assert!(is_supported(&w, &reg, (15, HIGH, 15), TORCH, 0), "the column at x 16 is unknown, so it holds");
+    }
+
+    /// pt1124 review 11 — a torch placed on a floor drops when the floor goes, even with
+    /// a wall beside it; a torch from before (meta 0, no face) keeps the any-neighbour
+    /// rule; a wall torch holds while only its floor goes.
+    #[test]
+    fn a_torch_needs_the_face_it_was_placed_against() {
+        let reg = BlockRegistry::new();
+        let floor_torch = torch_meta([0, 1, 0]).unwrap();
+        let wall_torch = torch_meta([-1, 0, 0]).unwrap(); // clicked the west face of the wall at +x
+        for (meta, drops, what) in [(floor_torch, true, "a floor torch"), (0, false, "a torch from before"), (wall_torch, false, "a wall torch")] {
+            let mut w = world();
+            w.set_block(0, HIGH - 1, 0, STONE);
+            w.set_block(1, HIGH, 0, STONE);
+            w.set_block(0, HIGH, 0, TORCH);
+            w.set_meta((0, HIGH, 0), meta);
+            assert!(tick_support(&mut w, &reg).is_empty(), "{what} holds");
+            w.set_block(0, HIGH - 1, 0, AIR);
+            let dropped = tick_support(&mut w, &reg);
+            assert_eq!(!dropped.is_empty(), drops, "{what}: floor gone");
+            assert_eq!(w.get_block(0, HIGH, 0) == TORCH, !drops, "{what}");
+        }
+        // The wall torch goes with its wall.
+        let mut w = world();
+        w.set_block(1, HIGH, 0, STONE);
+        w.set_block(0, HIGH - 1, 0, STONE);
+        w.set_block(0, HIGH, 0, TORCH);
+        w.set_meta((0, HIGH, 0), wall_torch);
+        w.discard_support_log();
+        w.set_block(1, HIGH, 0, AIR);
+        assert_eq!(tick_support(&mut w, &reg).len(), 1, "a wall torch drops with its wall, floor or not");
+        assert_eq!(torch_meta([0, 0, 0]), None);
+    }
+
+    /// pt1124 review 9 — an edit past the log's bound is not lost: its section is
+    /// rescanned by a later pass, so a lantern whose support went in the overflow drops.
+    #[test]
+    fn a_support_lost_past_the_log_bound_is_found_by_a_section_rescan() {
+        let reg = BlockRegistry::new();
+        let mut w = world();
+        w.set_block(0, HIGH - 1, 0, STONE);
+        w.set_block(0, HIGH, 0, LANTERN);
+        w.discard_support_log();
+        for i in 0..crate::world::MAX_SUPPORT_LOG as i32 {
+            w.set_block(i % 64 - 32, HIGH + 20 + i / 4096, (i / 64) % 64 - 32, STONE);
+        }
+        assert_eq!(w.support_log_len(), crate::world::MAX_SUPPORT_LOG);
+        w.set_block(0, HIGH - 1, 0, AIR); // over the bound: not a logged cell
+        assert_eq!(w.support_sections_len(), 1, "its section is marked instead");
+        let dropped = settle(&mut w, &reg);
+        assert_eq!(dropped.iter().map(|d| d.cell).collect::<Vec<_>>(), vec![(0, HIGH, 0)], "the lantern drops, once");
+        assert!(!w.support_pending());
+        assert_eq!(w.get_block(0, HIGH, 0), AIR);
     }
 
     #[test]

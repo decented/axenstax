@@ -742,9 +742,12 @@ pub fn break_gated_locally(id: BlockId, creative: bool, placed_here: bool, joine
 /// run by `support.rs`). Lose it and the block drops as its item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attachment {
-    /// Any of the six neighbours: a torch, which records no facing, so a wall,
-    /// a floor or a ceiling all hold it.
+    /// Any of the six neighbours: a torch placed before pt1124 review 11, which
+    /// records no face, so a wall, a floor or a ceiling all hold it.
     AnySide,
+    /// The one neighbour in this direction: a torch that recorded the face it
+    /// was placed against (`support::torch_meta`).
+    Toward((i32, i32, i32)),
     /// The cell below (a standing lantern).
     Below,
     /// The cell above (a hanging lantern).
@@ -3933,12 +3936,16 @@ impl BlockRegistry {
 
     /// The support block `id` with meta byte `meta` needs (pt1124, Spec 02 §1):
     /// `None` for a block that stands on its own. The one table `support.rs`
-    /// reads: a torch on any side, a standing lantern on the cell below, a
+    /// reads: a torch on the face it was placed against (any side for a torch
+    /// that recorded none), a standing lantern on the cell below, a
     /// hanging lantern from the cell above. Paper lanterns are full solid cubes
     /// and need none.
     pub fn attachment(&self, id: BlockId, meta: u8) -> Option<Attachment> {
         match id {
-            TORCH => Some(Attachment::AnySide),
+            TORCH => Some(match crate::support::torch_support_dir(meta) {
+                Some(dir) => Attachment::Toward(dir),
+                None => Attachment::AnySide,
+            }),
             LANTERN if crate::lantern::is_hanging(meta) => Some(Attachment::Above),
             LANTERN => Some(Attachment::Below),
             _ => None,

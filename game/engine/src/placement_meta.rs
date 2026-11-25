@@ -24,6 +24,12 @@ pub fn placement_meta(placed: BlockId, face: [i32; 3], fwd: glam::Vec3) -> Optio
     if placed == block::LANTERN {
         stamped = Some(crate::lantern::placement_meta(face));
     }
+    // pt1124 review 11 — a torch records the face it was placed against, so it
+    // drops when that block goes (`support::torch_meta`); a face that is not one
+    // of the six stamps 0 (the any-neighbour rule), never a stale byte.
+    if placed == block::TORCH {
+        stamped = Some(crate::support::torch_meta(face).unwrap_or(0));
+    }
     // F1 — shaped-block orientation (slab half / stair facing) from the
     // clicked face + camera, so it renders + collides correctly.
     if crate::block_shape::is_shaped(placed) {
@@ -167,5 +173,12 @@ mod tests {
         // It stamps over whatever the cell held: a cell that was a hanging lantern's
         // is not still hanging for a lantern placed on top of a block.
         assert_eq!(placement_meta(block::LANTERN, [0, 1, 0], north), Some(0));
+        // Review 11 — a torch records the face it was placed against: on a floor
+        // (clicked the top face) it hangs on the cell below, on a wall on that wall.
+        let on_floor = placement_meta(block::TORCH, [0, 1, 0], north).expect("a torch always stamps");
+        assert_eq!(crate::support::torch_support_dir(on_floor), Some((0, -1, 0)));
+        let on_wall = placement_meta(block::TORCH, [1, 0, 0], north).expect("stamps");
+        assert_eq!(crate::support::torch_support_dir(on_wall), Some((-1, 0, 0)));
+        assert_eq!(crate::support::torch_support_dir(0), None, "a torch from before records nothing");
     }
 }

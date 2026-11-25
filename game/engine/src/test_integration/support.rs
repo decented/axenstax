@@ -118,3 +118,53 @@ fn a_floating_torch_in_a_loaded_world_stays_until_something_beside_it_changes() 
     assert_eq!(dropped(&host, TORCH), 1);
     assert_eq!(host.server.registry.mine_drop(TORCH), ItemStack::new_block(TORCH, 1));
 }
+
+/// pt1124 review 10 — a save between two passes of a lantern chain's collapse
+/// settles it first: every link falls exactly once (one item each), the saved
+/// world holds none of them, and the loaded world has nothing left to drop.
+#[test]
+fn a_save_mid_collapse_finishes_the_chain_once_and_it_loads_fallen() {
+    let _g = crate::save::WorldsRootGuard::new("support-settle");
+    let name = "support-settle".to_string();
+    let mut s = crate::server::GameServer::new(1, name.clone(), 31);
+    for x in -4..=4 {
+        for z in -4..=4 {
+            s.world.set_block(x, 150, z, STONE);
+        }
+    }
+    let hanging = crate::lantern::placement_meta([0, -1, 0]);
+    s.world.set_block(0, 200, 0, STONE);
+    s.world.set_block(2, 198, 0, STONE); // a control block in the chain's chunk
+    for y in 197..=199 {
+        s.world.set_block(0, y, 0, LANTERN);
+        s.world.set_meta((0, y, 0), hanging);
+    }
+    s.world.discard_support_log();
+    s.world.set_block(0, 200, 0, AIR);
+    let first = crate::support::tick_support(&mut s.world, &s.registry);
+    crate::support::spawn_drops(&mut s.ecs, &first);
+    assert_eq!(first.len(), 1, "one link a pass");
+    assert!(s.world.support_pending(), "the rest waits on the runtime log");
+    s.settle_support();
+    let lanterns: u32 = s
+        .ecs
+        .query::<&crate::entity::ItemEntity>()
+        .iter()
+        .filter(|(_, ie)| ie.stack.item == Item::Block(LANTERN))
+        .map(|(_, ie)| u32::from(ie.stack.count))
+        .sum();
+    assert_eq!(lanterns, 3, "each link dropped exactly once");
+    for y in 197..=199 {
+        assert_eq!(s.world.get_block(0, y, 0), AIR);
+    }
+    assert!(!s.world.support_pending());
+    s.try_save().unwrap();
+    drop(s);
+    let mut loaded = crate::server::GameServer::new(1, name, 31);
+    loaded.initial_load().unwrap();
+    assert_eq!(loaded.world.get_block(2, 198, 0), STONE, "the chain's chunk loaded");
+    for y in 197..=199 {
+        assert_eq!(loaded.world.get_block(0, y, 0), AIR, "no link left hanging at {y}");
+    }
+    assert!(crate::support::tick_support(&mut loaded.world, &loaded.registry).is_empty(), "nothing falls twice");
+}
