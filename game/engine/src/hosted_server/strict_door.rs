@@ -30,7 +30,10 @@ impl HostedServer {
         if cell[1] < 0 || cell[1] >= crate::world::WORLD_HEIGHT { return Err(EditRefusal::OutOfWorld); }
         if !self.server.loaded_columns.contains(&(cell[0].div_euclid(cs), cell[2].div_euclid(cs))) { return Err(EditRefusal::Unloaded); }
         let current = self.server.world.get_block(cell[0], cell[1], cell[2]);
-        if current == crate::block::BEDROCK { return Err(EditRefusal::Protected); }
+        // pt1124 — generated bedrock holds; placed bedrock breaks in Creative.
+        if crate::block::unbreakable(current, self.server.is_creative, self.server.world.is_placed(cell[0], cell[1], cell[2])) {
+            return Err(EditRefusal::Protected);
+        }
         if sp.server_simulated {
             self.remote_may_touch(sp, cell[0], cell[2])?;
             let npub = verified_npub(sp.verified_pubkey);

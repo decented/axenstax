@@ -6828,7 +6828,8 @@ impl HostedServer {
             return Err(EditRefusal::Unloaded);
         }
         let current = self.server.world.get_block(bc.x, bc.y, bc.z);
-        if current == crate::block::BEDROCK {
+        // pt1124 — generated bedrock holds; placed bedrock breaks in Creative.
+        if crate::block::unbreakable(current, self.server.is_creative, self.server.world.is_placed(bc.x, bc.y, bc.z)) {
             return Err(EditRefusal::Protected);
         }
         let eye = sp.player.eye_pos();

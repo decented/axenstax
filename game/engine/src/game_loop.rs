@@ -12721,7 +12721,9 @@ impl super::GameState {
                             && !plot_break_blocked
                             && !commons_break_blocked
                             && !plot_marker_break_blocked
-                            && blk != block::BEDROCK
+                            // pt1124 — bedrock the world made holds; placed
+                            // bedrock breaks in Creative (`block::unbreakable`).
+                            && !block::unbreakable(blk, self.is_creative, self.world.is_placed(pos[0], pos[1], pos[2]))
                             && self.play_mode.can_edit_world()
                         {
                             // Release the plot if this break removes an owned

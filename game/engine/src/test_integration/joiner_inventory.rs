@@ -1083,3 +1083,70 @@ fn a_joiners_tool_type_and_off_hand_are_relayed_on_the_avatar_wire() {
     assert_eq!(protocol::HeldWire { kind: state.off_kind, id: state.off_id, tool: state.off_tool }.tool_type(), None);
     assert_eq!(state.off_kind, protocol::item_kind::EMPTY);
 }
+
+/// pt1124 — a joiner's break of the block a torch stands on drops the torch on
+/// the server, dedicated and lending host alike: the cell goes to AIR, the
+/// joiner is told, and the torch is an item (on the ground, or already picked
+/// up by the joiner standing next to it).
+#[test]
+fn a_joiners_break_drops_the_torch_its_block_held() {
+    for lent in [false, true] {
+        let mut rig = if lent { Rig::lent("support") } else { Rig::dedicated("support") };
+        rig.world().set_block(ABOVE.0, ABOVE.1, ABOVE.2, block::TORCH);
+        for _ in 0..4 {
+            rig.tick();
+        }
+        assert_eq!(rig.world().get_block(ABOVE.0, ABOVE.1, ABOVE.2), block::TORCH, "lent {lent}: it stands on the floor");
+        rig.mine(FLOOR, block::AIR, Some(pick(ToolMaterial::Wood)));
+        for _ in 0..8 {
+            rig.tick();
+        }
+        assert_eq!(rig.world().get_block(ABOVE.0, ABOVE.1, ABOVE.2), block::AIR, "lent {lent}: the torch went with its floor");
+        assert!(
+            rig.changes.iter().any(|bc| (bc.x, bc.y, bc.z) == ABOVE && bc.new_block == block::AIR),
+            "lent {lent}: the joiner is told"
+        );
+        let torch = Item::Block(block::TORCH);
+        let ecs = match rig.host.as_ref() {
+            Some(h) => &h.ecs,
+            None => &rig.hs.server.ecs,
+        };
+        let on_ground: u32 = ecs
+            .query::<&crate::entity::ItemEntity>()
+            .iter()
+            .filter(|(_, ie)| ie.stack.item == torch)
+            .map(|(_, ie)| u32::from(ie.stack.count))
+            .sum();
+        assert_eq!(on_ground + rig.granted(&torch), 1, "lent {lent}: one torch item");
+    }
+}
+
+/// pt1124 — in Creative a joiner may break bedrock a player placed, never the
+/// bedrock the world made; in Survival neither.
+#[test]
+fn in_creative_a_joiner_breaks_placed_bedrock_but_never_the_worlds() {
+    let mut rig = Rig::dedicated("bedrock");
+    let placed = (FLOOR.0 + 1, FLOOR.1, FLOOR.2);
+    rig.world().set_block(FLOOR.0, FLOOR.1, FLOOR.2, block::BEDROCK);
+    rig.world().place_player_block(placed.0, placed.1, placed.2, block::BEDROCK);
+    // Survival: both hold.
+    for cell in [FLOOR, placed] {
+        rig.send(None, &[(cell, block::AIR)], &[]);
+        rig.tick();
+        assert_eq!(rig.world().get_block(cell.0, cell.1, cell.2), block::BEDROCK, "survival: {cell:?} holds");
+    }
+    // Creative: the placed one breaks, the world's holds.
+    rig.hs.server.set_play_mode(crate::play_mode::PlayMode::Creative);
+    rig.send(None, &[(FLOOR, block::AIR)], &[]);
+    rig.tick();
+    assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::BEDROCK, "the world's bedrock holds in Creative");
+    rig.send(None, &[(placed, block::AIR)], &[]);
+    rig.tick();
+    assert_eq!(rig.world().get_block(placed.0, placed.1, placed.2), block::AIR, "placed bedrock breaks in Creative");
+    // A joiner still never puts bedrock (or a reserved id) down.
+    for id in [block::BEDROCK, block::RESERVED_FIRST, block::RESERVED_LAST] {
+        rig.send(None, &[(placed, id)], &[]);
+        rig.tick();
+        assert_eq!(rig.world().get_block(placed.0, placed.1, placed.2), block::AIR, "a joiner cannot place {id}");
+    }
+}
