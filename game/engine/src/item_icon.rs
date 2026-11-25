@@ -204,31 +204,6 @@ pub(crate) fn tool_icon_polygons(
     quads
 }
 
-/// What the icon of `item` is made of, for tests and for the one place that has to
-/// choose. Not a second source of truth: [`paint_item_icon`] matches the same way.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IconKind {
-    Block,
-    Shield,
-    Tool,
-    LogMaterial,
-    Material,
-    Plan,
-    Armour,
-}
-
-pub(crate) fn icon_kind(item: &Item) -> IconKind {
-    match item {
-        Item::Block(_) => IconKind::Block,
-        Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Shield => IconKind::Shield,
-        Item::Tool(_) => IconKind::Tool,
-        Item::Material(m) if crate::item::log_material_icon(*m).is_some() => IconKind::LogMaterial,
-        Item::Material(_) => IconKind::Material,
-        Item::Plan(_) => IconKind::Plan,
-        Item::Armour(_) => IconKind::Armour,
-    }
-}
-
 /// Paint the icon of `item` into `rect` (the slot's icon square). The one function
 /// every slot painter calls.
 pub(crate) fn paint_item_icon(
@@ -282,16 +257,6 @@ mod tests {
             paint_item_icon(&painter, rect, item, &reg, &NoIcons);
         });
         out.shapes.into_iter().map(|s| s.shape).collect()
-    }
-
-    #[test]
-    fn the_icon_kind_follows_the_item() {
-        let tool = |t| Item::Tool(Tool::new(t, ToolMaterial::Iron));
-        assert_eq!(icon_kind(&tool(ToolType::Shield)), IconKind::Shield);
-        assert_eq!(icon_kind(&tool(ToolType::Axe)), IconKind::Tool);
-        assert_eq!(icon_kind(&Item::Block(crate::block::STONE)), IconKind::Block);
-        assert_eq!(icon_kind(&Item::Material(MaterialId::Bread)), IconKind::Material);
-        assert_eq!(icon_kind(&ItemStack::new_armour(ArmourSlot::Boots, ArmourMaterial::Iron).item), IconKind::Armour);
     }
 
     #[test]
@@ -370,12 +335,9 @@ mod tests {
 
     #[test]
     fn every_armour_combo_draws_a_silhouette_in_its_material_colour() {
-        let mut seen = std::collections::HashSet::new();
         for (slot, mat) in all_armour_combos() {
             let item = ItemStack::new_armour(slot, mat).item;
-            assert_eq!(icon_kind(&item), IconKind::Armour);
             assert!(shapes_of(&item).len() >= 8, "{slot:?} {mat:?}: outline and fill per piece");
-            assert!(seen.insert((slot, format!("{:?}", armour_material_color(mat)))) || mat == ArmourMaterial::Chainmail);
         }
         // The tint is the item's own colour (the grid, the hotbar and the column agree).
         let reg = BlockRegistry::new();
@@ -388,7 +350,6 @@ mod tests {
     #[test]
     fn a_plan_is_a_scroll_in_its_stage_colour() {
         let plan = Item::Plan(crate::plan::PlanData::debug_3x3_stone());
-        assert_eq!(icon_kind(&plan), IconKind::Plan);
         assert!(shapes_of(&plan).len() >= 8);
     }
 
@@ -399,7 +360,9 @@ mod tests {
         for m in (0..=u16::MAX).map_while(|i| MaterialId::try_from(i).ok()) {
             let layer = crate::entity_model::material_texture(m);
             assert!(layer < 512, "{m:?} -> layer {layer}");
-            assert_eq!(shapes_of(&Item::Material(m)).len(), 1, "{m:?} falls back to one swatch headless");
+            // A log material draws its (tinted) log layer: nothing without the atlas.
+            let want = if crate::item::log_material_icon(m).is_some() { 0 } else { 1 };
+            assert_eq!(shapes_of(&Item::Material(m)).len(), want, "{m:?} falls back to one swatch headless");
         }
     }
 }

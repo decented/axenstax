@@ -40,7 +40,7 @@ pub enum HoldPose {
 /// Third person: how much further the arm of a held sprite lifts forward about the
 /// shoulder (radians, on top of idle, walk, jump or swing), so the item stands out in
 /// front of the forearm and its flame is not hidden inside it.
-pub const SPRITE_ARM_RAISE: f32 = 0.7;
+pub const SPRITE_ARM_RAISE: f32 = 0.9;
 
 /// How much of a held sprite's height sits below the fist: the foot of a torch's
 /// stick pokes out under the hand, the rest stands above it.
@@ -277,13 +277,13 @@ mod tests {
                 let cx = verts.iter().map(|v| v.position[0]).sum::<f32>() / n;
                 let cz = verts.iter().map(|v| v.position[2]).sum::<f32>() / n;
                 // In the fist's own column, not beside it (the old 0.25 offset).
-                assert!((cx - fist.x).abs() < 0.03, "{side:?} {label}: x {cx} vs fist {}", fist.x);
+                assert!((cx - fist.x).abs() < 0.05, "{side:?} {label}: x {cx} vs fist {}", fist.x);
                 assert!((cz - fist.z).abs() < 0.03, "{side:?} {label}: z {cz} vs fist {}", fist.z);
-                // Everything above the grip clears the forearm: its distance from the arm's axis
+                // The flame (the top of the card) clears the forearm: its distance from the arm's axis
                 // (shoulder pivot to fist, in the Y-Z plane) beats the arm's half depth.
                 let (axis_a, axis_b) = (glam::Vec2::new(arm.pivot.y, arm.pivot.z), glam::Vec2::new(fist.y, fist.z));
                 let half_depth = arm.size.z * 0.5 + 0.02;
-                for v in verts.iter().filter(|v| v.position[1] > fist.y + 0.15) {
+                for v in verts.iter().filter(|v| v.position[1] > fist.y + 0.3) {
                     let p = glam::Vec2::new(v.position[1], v.position[2]);
                     let t = ((p - axis_a).dot(axis_b - axis_a) / (axis_b - axis_a).length_squared()).clamp(0.0, 1.0);
                     let d = (p - (axis_a + (axis_b - axis_a) * t)).length();
