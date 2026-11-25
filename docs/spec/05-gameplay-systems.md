@@ -362,7 +362,9 @@ If the tool is the wrong type for the block (e.g., pickaxe vs dirt), `tool_speed
 visual variants, placed or natural, now drops **Cobbled Deepslate** (block 385, `BlockRegistry::mine_drop`), as stone
 drops cobblestone; before it dropped pure deepslate itself, which no stone-tier recipe took. The Satori roll is
 unchanged and separate (`break_drops::satori_drop`, only the pure-deepslate family rolls; cobbled deepslate is not in
-it): a vein cell still yields its Satori alongside the block's drop. Pick block on deepslate still picks pure deepslate
+it), and it is untouched on purpose: a qualifying vein hit gave pure deepslate plus its Satori before, and now gives
+Cobbled Deepslate plus its Satori (the Satori is never instead of the block's drop; the vein hash, eligibility and
+exposure are as they were). Pick block on deepslate still picks pure deepslate
 (as on stone it picks stone). Cobbled Deepslate breaks in 3.5 s by hand (cobblestone 2 s, pure deepslate 15 s), wants a
 pickaxe, drops itself with a wooden one or better, and resists a keg like cobblestone (6.0, `explosion::blast_resistance`). **The stone rule** is the
 wood rule's twin, in the same retry of `crafting::match_recipe` (`materials_normalised`): if the exact grid makes
