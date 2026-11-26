@@ -1884,6 +1884,15 @@ mod oc_tests {
         assert!(items.iter().any(|i| matches!(i, Item::Tool(_))) && items.iter().any(|i| matches!(i, Item::Armour(_))));
         for item in &items {
             let units = 70_000;
+            // Ids 381..=384 are held for Tier 3 and never decode as items, so
+            // the wire refuses them rather than send what the client drops.
+            if let Item::Block(id) = item {
+                if crate::block::is_reserved(*id) {
+                    let debt = CorrectionDebt::from_entries(vec![(item.clone(), units)]).unwrap();
+                    assert_eq!(debt.wire_safe(&reg).1, 1, "{item:?} is reserved and never sent");
+                    continue;
+                }
+            }
             let entry = OwedEntry::capture(item, units);
             let entry: OwedEntry = bincode::deserialize(&bincode::serialize(&entry).unwrap()).unwrap();
             assert_eq!(entry.restore().unwrap(), (item.clone(), units), "{item:?} on disk");
