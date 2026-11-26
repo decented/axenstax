@@ -82,14 +82,19 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     // goldens were recomputed again with 101 by the same independent script
     // (sha256 over the documented layouts, the generation a little-endian
     // u32); that script first reproduced the protocol-100 values above exactly,
-    // and the 101 fence it gives is the code's.
+    // and the 101 fence it gives is the code's. Protocol 102 (0.2.42): recomputed
+    // once more by the same independent script (sha256 over the freeze and parked
+    // layouts in `park.rs`, the version a little-endian u32, the generation 7 a
+    // little-endian u32, participant and runtime the generator x coordinate); it
+    // first reproduced the three protocol-101 values exactly, and the 102 fence
+    // it gives is the code's.
     assert_eq!(
         hex::encode(authority_digest(&authority)),
         "30a50bb9c25270bddc7157141c13c3fbd7efc722c1cf66b8b043feee033b62c1"
     );
     assert_eq!(
         hex::encode(fence.digest(&authority).unwrap()),
-        "148be4373ebdd6457d083fec4df0e7c1fecf01cefc044396a1e11865fee85ff2"
+        "0fc9cebacda3f21ef68afc5c07c426830633769d988b73ce064581de93c83918"
     );
     assert_eq!(
         hex::encode(attachment.digest()),
@@ -97,7 +102,7 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     );
     assert_eq!(
         hex::encode(fence.message(&authority, attachment).unwrap()),
-        "f8aea598096e7cffb80d2fd0eb61b79ff352cc04d30511499b16378e245af5b8"
+        "410b48266ace637bf99aaeab40d0be53c5ba2128c5d613dc760b830ccb6f5e80"
     );
     let imported = Attachment {
         context: GameplayContext::Imported(crate::personal_value::PersonalContext {
@@ -114,7 +119,7 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     );
     assert_eq!(
         hex::encode(fence.message(&authority, imported).unwrap()),
-        "229cff57a0c46d05e7a712654af6ba3efbba8d65616a7446327a4f9d6b1112ae"
+        "7ce3a5ed5088e2999125696b8071c68e18dc5101ebfaefb3c1480f04e1413b03"
     );
 }
 
