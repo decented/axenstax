@@ -1472,6 +1472,24 @@ pub fn avatar_hand_anchor(side: crate::viewmodel::HandSide, arm_model: crate::sk
     Vec3::new(arm.origin.x, arm.origin.y - arm.size.y * 0.5, arm.origin.z)
 }
 
+/// Where a hand's item is in the avatar's model space, at rest: the hand anchor
+/// carried about the arm's pivot by the item's hold-pose lift
+/// (`HoldPose::arm_raise`), the same rotation the builder gives the arm and the
+/// drawn item when no walk, swing or bite is on it; a hanging item's body is a
+/// handle's height below that fist, as the builder hangs it. Carried lights sit here.
+pub fn avatar_held_point(
+    side: crate::viewmodel::HandSide,
+    arm_model: crate::skin_uv::ArmModel,
+    pose: crate::hold_pose::HoldPose,
+) -> Vec3 {
+    let arm = &player_model_for(arm_model)[side.arm_index()];
+    let fist = rot_x_about(avatar_hand_anchor(side, arm_model), arm.pivot, pose.arm_raise());
+    match pose {
+        crate::hold_pose::HoldPose::Hanging { handle } => fist - Vec3::new(0.0, handle, 0.0),
+        _ => fist,
+    }
+}
+
 /// Vertices for the LOCAL player's OWN avatar, gated by camera mode. In
 /// first-person the player sees the viewmodel hand instead, so this returns
 /// `(empty, empty)`; in any third-person mode it returns the same body + held

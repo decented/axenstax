@@ -797,8 +797,12 @@ lit brighter keeps its colour (a max, never a sum), and the emissive sentinel (>
 It is the same one rule: warm colour, the fixed per-face shade, no time input. `world_light::carried_block`
 is the CPU twin and the drift guard checks the WGSL constants (`CARRIED_MAX` 8, `CARRIED_LEVELS` 15)
 and that every call site goes through it. **Sources** (`carried_light.rs`): each hand that holds a
-light is one light at that hand: the avatar's own hand anchor (`entity_model::avatar_hand_anchor`, the
-classic arm: 0.375 out to its side, 0.70 up from the feet) placed by the avatar's own transform
+light is one light where that hand holds the item: the avatar's own hand anchor (`entity_model::avatar_hand_anchor`, the
+classic arm: 0.375 out to its side, 0.70 up from the feet) carried about the shoulder by the item's
+hold-pose lift, as the drawn item is (`entity_model::avatar_held_point`: a held torch's sprite arm
+stands forward by `SPRITE_ARM_RAISE`, a hanging lantern's body is a handle's height below its fist;
+the resting pose, so the light does not bob with the walk cycle; fixed 0.2.42, when the torch grip
+moved forward and the light had stayed at the bare anchor 0.75 behind the drawn torch) placed by the avatar's own transform
 (`entity_model::avatar_world_point`: the state's yaw plus the builder's quarter turn, then the feet; one
 copy of that convention, which the held-item vertices use too), lowered with a crouching body, for every local slot and every peer's `PlayerState` (`held_*`, `off_*`: nothing new on the
 wire); a block gives its `light_emission`, a Sparkler 12 and a Flare 15. **Cost and limits.** Per

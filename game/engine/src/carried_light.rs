@@ -11,10 +11,11 @@
 //! **Sources.** Any held light, in either hand: a block by its `light_emission`
 //! (torch, lantern, paper lantern, glowstone-class and every other emitter) and
 //! the two handheld materials, Sparkler (12) and Flare (15). Each hand that holds a
-//! light is one light, at that hand: the avatar's own hand anchor
-//! (`entity_model::avatar_hand_anchor`, the classic arm), placed on the holder by
-//! the avatar's own transform (`entity_model::avatar_world_point`, one copy of the
-//! yaw convention), so the light sits where the held item is drawn. (The nearest
+//! light is one light, at that hand's fist as the item's hold pose carries it
+//! (`entity_model::avatar_held_point`: the classic arm's hand anchor, lifted by
+//! the pose's arm raise like the drawn item), placed on the holder by the avatar's own
+//! transform (`entity_model::avatar_world_point`, one copy of the yaw convention),
+//! so the light sits where the held item is drawn. (The nearest
 //! eight over all holders' hands win the camera's eight slots.)
 //!
 //! **Method.** At most [`MAX_LIGHTS`] point lights ride in the camera uniform
@@ -70,22 +71,40 @@ pub fn wire_level(hand: HeldWire, registry: &BlockRegistry) -> u8 {
 /// avatar's own transform (`entity_model::avatar_world_point`: the state's yaw
 /// plus the builder's quarter turn, then the feet). `foot` is where the avatar is
 /// drawn: a crouching holder's is lowered by `entity_model::CROUCH_DIP`
-/// ([`sources`] does that).
+/// ([`sources`] does that). The bare anchor, before any hold pose (the tests'
+/// reference for the transform).
+#[cfg(test)]
 pub fn hand_position(foot: Vec3, yaw: f32, side: HandSide) -> Vec3 {
     let anchor = crate::entity_model::avatar_hand_anchor(side, crate::skin_uv::ArmModel::Classic);
     crate::entity_model::avatar_world_point(foot, yaw, anchor)
 }
 
-/// The lights one holder gives: one per hand that holds a light, at that hand.
-/// `main` and `off` are the two hands' levels. A non-finite position gives none.
-pub fn holder_lights(foot: Vec3, yaw: f32, main: u8, off: u8) -> Vec<CarriedLight> {
+/// Where the item in a holder's hand is: the fist of the avatar's arm, lifted by
+/// the item's hold pose (`hold_pose::HoldPose::arm_raise`: a held torch's arm
+/// stands forward, a lantern's a little and its body hangs below the fist), by the
+/// same transform the avatar builder carries the drawn item with
+/// (`entity_model::avatar_held_point`), so the light moves with the item when the
+/// pose changes. The resting pose: no walk cycle,
+/// swing or bite (the light does not bob with the arm).
+pub fn held_position(foot: Vec3, yaw: f32, side: HandSide, pose: crate::hold_pose::HoldPose) -> Vec3 {
+    let point = crate::entity_model::avatar_held_point(side, crate::skin_uv::ArmModel::Classic, pose);
+    crate::entity_model::avatar_world_point(foot, yaw, point)
+}
+
+/// One hand's light: its level (0 for none) and how the item in it is held.
+pub type HandLight = (u8, crate::hold_pose::HoldPose);
+
+/// The lights one holder gives: one per hand that holds a light, where that hand
+/// holds it ([`held_position`]). `main` and `off` are the two hands' levels and
+/// poses. A non-finite position gives none.
+pub fn holder_lights(foot: Vec3, yaw: f32, main: HandLight, off: HandLight) -> Vec<CarriedLight> {
     if !(foot.x.is_finite() && foot.y.is_finite() && foot.z.is_finite() && yaw.is_finite()) {
         return Vec::new();
     }
     [(HandSide::Right, main), (HandSide::Left, off)]
         .into_iter()
-        .filter(|(_, level)| *level > 0)
-        .map(|(side, level)| CarriedLight { pos: hand_position(foot, yaw, side), level: f32::from(level) })
+        .filter(|(_, (level, _))| *level > 0)
+        .map(|(side, (level, pose))| CarriedLight { pos: held_position(foot, yaw, side, pose), level: f32::from(level) })
         .collect()
 }
 
@@ -95,8 +114,12 @@ pub fn holder_lights(foot: Vec3, yaw: f32, main: u8, off: u8) -> Vec<CarriedLigh
 pub fn sources(states: &[PlayerState], registry: &BlockRegistry) -> Vec<CarriedLight> {
     let mut out = Vec::new();
     for ps in states {
-        let main = wire_level(HeldWire { kind: ps.held_kind, id: ps.held_id, tool: ps.held_tool }, registry);
-        let off = wire_level(HeldWire { kind: ps.off_kind, id: ps.off_id, tool: ps.off_tool }, registry);
+        let hand = |wire: HeldWire| {
+            let pose = crate::hold_pose::hold_pose(crate::item_model::HeldItem::from_wire(wire), registry);
+            (wire_level(wire, registry), pose)
+        };
+        let main = hand(HeldWire { kind: ps.held_kind, id: ps.held_id, tool: ps.held_tool });
+        let off = hand(HeldWire { kind: ps.off_kind, id: ps.off_id, tool: ps.off_tool });
         let dip = if ps.flags & crate::protocol::player_flags::CROUCHING != 0 { crate::entity_model::CROUCH_DIP } else { 0.0 };
         out.extend(holder_lights(Vec3::new(ps.x, ps.y - dip, ps.z), ps.yaw, main, off));
     }
@@ -238,8 +261,8 @@ mod tests {
         let both = sources(&[state(0.0, 0.0, 0.0, 0.0, Some(torch), Some(crate::item::Item::Block(block::LANTERN)))], &r);
         assert_eq!(both.iter().map(|l| l.level).collect::<Vec<_>>(), vec![14.0, 15.0], "each lit hand is its own light");
         let foot = Vec3::new(10.0, 64.0, -3.0);
-        assert!(holder_lights(Vec3::new(f32::NAN, 0.0, 0.0), 0.0, 14, 0).is_empty(), "a non-finite position gives no light");
-        assert!(holder_lights(foot, f32::INFINITY, 14, 0).is_empty());
+        assert!(holder_lights(Vec3::new(f32::NAN, 0.0, 0.0), 0.0, (14, crate::hold_pose::HoldPose::Default), (0, crate::hold_pose::HoldPose::Default)).is_empty(), "a non-finite position gives no light");
+        assert!(holder_lights(foot, f32::INFINITY, (14, crate::hold_pose::HoldPose::Default), (0, crate::hold_pose::HoldPose::Default)).is_empty());
     }
 
     /// The avatar's own hand anchor, in the world: where the builder puts the hand
@@ -279,10 +302,11 @@ mod tests {
     /// quarter-turn error would put them more than half a block apart).
     #[test]
     fn the_light_is_with_the_item_the_builder_draws_in_that_hand() {
-        let torch = crate::item::Item::Block(block::TORCH);
         let reg = reg();
         let q = std::f32::consts::FRAC_PI_2;
         let foot = Vec3::new(5.0, 70.0, 5.0);
+        // A torch is held as a sprite (its arm stands forward), a lantern hangs.
+        for torch in [crate::item::Item::Block(block::TORCH), crate::item::Item::Block(block::LANTERN)] {
         for yaw in [0.0, q, -q, std::f32::consts::PI] {
             for side in [HandSide::Right, HandSide::Left] {
                 let (main, off) = match side {
@@ -297,8 +321,9 @@ mod tests {
                 let lights = sources(&[ps], &reg);
                 assert_eq!(lights.len(), 1);
                 let d = (lights[0].pos - centre).length();
-                assert!(d < 0.4, "yaw {yaw}, {side:?}: light {} vs drawn item {centre} ({d})", lights[0].pos);
+                assert!(d < 0.4, "{torch:?} yaw {yaw}, {side:?}: light {} vs drawn item {centre} ({d})", lights[0].pos);
             }
+        }
         }
     }
 
@@ -313,10 +338,10 @@ mod tests {
             assert!(((a - b).length() - 0.75).abs() < 1e-4, "a classic body's hands are 0.75 apart");
         }
         // Only a lit hand gives a light, at its own side.
-        let lights = holder_lights(foot, 0.0, 0, 14);
+        let lights = holder_lights(foot, 0.0, (0, crate::hold_pose::HoldPose::Default), (14, crate::hold_pose::HoldPose::Default));
         assert_eq!(lights.len(), 1);
         assert_eq!(lights[0].pos, hand_position(foot, 0.0, HandSide::Left));
-        assert!(holder_lights(foot, 0.0, 0, 0).is_empty());
+        assert!(holder_lights(foot, 0.0, (0, crate::hold_pose::HoldPose::Default), (0, crate::hold_pose::HoldPose::Default)).is_empty());
     }
 
     /// A crouching holder's lights are lowered with the avatar.
