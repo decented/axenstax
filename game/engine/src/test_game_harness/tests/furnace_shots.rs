@@ -8,6 +8,7 @@
 //! The window size is `FU_SIZE` (`1280x720` by default); the folder `FU_SHOTS_OUT`.
 //!
 //! Run: FU_SHOTS_OUT=<dir> cargo test --lib -- --ignored --test-threads=1 --nocapture pt1124_furnace_shots
+//! The block icons are uploaded as the windowed game does at start.
 use super::*;
 use crate::block;
 use crate::furnace::FurnaceData;
@@ -29,6 +30,14 @@ fn pt1124_furnace_shots() {
     let mut hg =
         HeadlessGame::boot_into_world_sized("harness-furnace-shots", w, h, crate::local_routing::LocalRouting::Standalone);
     hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+    // The headless renderer skips the block-icon upload the windowed game makes
+    // at start (`Renderer::new`), so without this every block and material in a
+    // slot would draw as a bare count or a flat swatch.
+    {
+        let textures = crate::texture_gen::generate_textures();
+        let r = &mut hg.state.renderer;
+        r.egui.upload_block_textures(&r.device, &r.queue, &textures, 16);
+    }
     hg.frames(2);
 
     // Ore and fuel in the bag, fuel on the hotbar, and things a furnace has no use for.

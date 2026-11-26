@@ -102,11 +102,16 @@ pub fn draw_furnace_ui(
         .show(ctx, |ui| {
             ui.set_min_width(PANEL_WIDTH);
             ui.set_max_width(PANEL_WIDTH);
-            // The panel is as tall as the window (less its margin) whatever its
-            // content measured last frame, so the hotbar row is never cut off by an
-            // earlier, shorter measurement; a window shorter than the panel scrolls.
+            // The panel is as tall as the window (less its margin). An egui Area
+            // gives its content last frame's size as its room, and its first frame
+            // the default area size (400 points tall): a scroll area that only fills
+            // the room it is given stays that short for good, which cut the hotbar
+            // row off at about y 420 of a 720 window. Claiming the whole height here
+            // grows the Area's room to it; a window shorter than the panel scrolls.
+            let panel_height = (viewport.height as f32 - 32.0).max(120.0);
+            ui.set_min_height(panel_height);
             egui::ScrollArea::vertical()
-                .max_height((viewport.height as f32 - 32.0).max(120.0))
+                .max_height(panel_height)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
@@ -297,7 +302,8 @@ mod tests {
     use crate::item::MaterialId;
 
     /// The rows of inventory slots a pass at window height `h` puts on the screen:
-    /// the distinct top and bottom of every slot-sized square it paints.
+    /// the distinct top and bottom of every slot-sized square it paints whole
+    /// inside its clip (a row painted past the scroll area's clip is not seen).
     fn slot_rows(h: u32) -> Vec<(f32, f32)> {
         let ctx = egui::Context::default();
         let reg = BlockRegistry::new();
@@ -318,6 +324,7 @@ mod tests {
             rows.clear();
             for clipped in &out.shapes {
                 if let egui::Shape::Rect(r) = &clipped.shape
+                    && clipped.clip_rect.contains_rect(r.rect)
                     && (r.rect.width() - INV_SLOT).abs() < 0.01
                     && (r.rect.height() - INV_SLOT).abs() < 0.01
                     && !rows.iter().any(|(top, _)| (*top - r.rect.top()).abs() < 0.5)
