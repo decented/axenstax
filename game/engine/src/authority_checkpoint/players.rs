@@ -458,7 +458,9 @@ const INPUT_BYTES: usize = 8 + 4 + 4 + 4 + 4 + 4 + 8 + 8 + 2 + 1 + 4;
 
 /// Which of an intent's flags a server reads; the rest are client-local and
 /// never set on an input built from a packet (`PlayerIntent::from_input_packet`).
-fn intent_flags(i: &crate::player_intent::PlayerIntent) -> [bool; 11] {
+/// Append-only: a new flag takes the next bit, so an old checkpoint's inputs (the
+/// bit clear) read as before. Bit 11 is a spyglass look (pt1124 review 4 item 7).
+fn intent_flags(i: &crate::player_intent::PlayerIntent) -> [bool; 12] {
     [
         i.sprint,
         i.sneak,
@@ -471,6 +473,7 @@ fn intent_flags(i: &crate::player_intent::PlayerIntent) -> [bool; 11] {
         i.drop_item,
         i.pause,
         i.cursor_captured,
+        i.sighting,
     ]
 }
 
@@ -525,6 +528,7 @@ fn read_input(r: &mut Reader<'_>) -> Result<QueuedInput, Malformed> {
         drop_item: on(8),
         pause: on(9),
         cursor_captured: on(10),
+        sighting: on(11),
         hotbar_select,
         scroll_delta,
         ..Default::default()
@@ -636,4 +640,44 @@ fn read_seat(r: &mut Reader<'_>, sp: &mut ServerPlayer) -> Result<(), Malformed>
     sp.seat_input.jump = r.bool()?;
     sp.local_seated = r.bool()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// pt1124 review 4 item 7 — a queued input's spyglass look survives the
+    /// checkpoint, so its restored step walks at sneak speed and does not sprint. The
+    /// look is a new bit of the existing flag mask: an input without it encodes to
+    /// the same bytes as before.
+    #[test]
+    fn a_queued_inputs_spyglass_look_round_trips_and_adds_no_bytes() {
+        let input = |sighting: bool| QueuedInput {
+            seq: 9,
+            yaw: 1.5,
+            pitch: -0.25,
+            intent: crate::player_intent::PlayerIntent {
+                move_forward: 1.0,
+                sprint: true,
+                sighting,
+                cursor_captured: true,
+                ..Default::default()
+            },
+            health_delta: 0.0,
+        };
+        let encode = |q: &QueuedInput| {
+            let mut w = Writer::uncapped();
+            write_input(&mut w, q);
+            w.into_bytes()
+        };
+        let looking = encode(&input(true));
+        let plain = encode(&input(false));
+        assert_eq!(looking.len(), plain.len(), "the look adds no bytes");
+        let back = read_input(&mut Reader::new(&looking)).unwrap();
+        assert!(back.intent.sighting && back.intent.sprint, "the look and the sprint both come back");
+        assert!(!read_input(&mut Reader::new(&plain)).unwrap().intent.sighting, "no look stays no look");
+        // An old checkpoint's input (no look bit) reads exactly as before.
+        let flags_at = 8 + 4 + 4 + 4 + 4 + 4 + 8 + 8;
+        assert_eq!(u16::from_le_bytes([plain[flags_at], plain[flags_at + 1]]) & (1 << 11), 0);
+    }
 }
