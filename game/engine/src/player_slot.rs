@@ -796,6 +796,24 @@ impl PlayerSlot {
         landed
     }
 
+    /// pt1124 (0.2.43) — the view zooms while this seat looks through its spyglass,
+    /// in first person only (third person draws the avatar raising it, at the normal
+    /// field of view).
+    pub fn apply_spyglass_zoom(&mut self) {
+        self.camera.set_zoom(self.sighting && self.camera.mode.shows_viewmodel());
+    }
+
+    /// F5 — the next perspective (`CameraMode::next`). Review 4 item 10: while
+    /// looking, the zoom follows the new perspective in the same frame.
+    pub fn cycle_camera(&mut self) -> crate::camera::CameraMode {
+        self.camera.mode = self.camera.mode.next();
+        // A zoom that is not a look's (the skin painter's key) is left alone.
+        if self.sighting {
+            self.apply_spyglass_zoom();
+        }
+        self.camera.mode
+    }
+
     /// The main-hand item and the off-hand item, as [`crate::hands::use_hand`] reads them.
     pub fn hands_items(&self) -> (Option<&crate::item::Item>, Option<&crate::item::Item>) {
         (
@@ -1290,6 +1308,29 @@ mod tests {
 #[cfg(test)]
 mod worn_armour_tests {
     use super::*;
+
+    /// pt1124 review 4 item 10 — F5 while looking: the zoom agrees with the new
+    /// perspective in the same frame (off in third person, back on in first), and a
+    /// zoom that is not a look's (the skin painter's key) is left alone.
+    #[test]
+    fn f5_while_looking_moves_the_zoom_with_the_perspective_at_once() {
+        use crate::camera::CameraMode;
+        let mut slot = PlayerSlot::new(0, Vec3::new(0.0, 64.0, 0.0), 1.0);
+        slot.camera.mode = CameraMode::FirstPerson;
+        slot.sighting = true;
+        slot.apply_spyglass_zoom();
+        assert!(slot.camera.zooming, "a first-person look zooms");
+        assert_eq!(slot.cycle_camera(), CameraMode::OverShoulder);
+        assert!(!slot.camera.zooming, "third person: no zoom, this frame");
+        slot.cycle_camera();
+        assert!(!slot.camera.zooming);
+        assert_eq!(slot.cycle_camera(), CameraMode::FirstPerson);
+        assert!(slot.camera.zooming, "back in first person: zoomed, this frame");
+        slot.sighting = false;
+        slot.camera.set_zoom(true);
+        slot.cycle_camera();
+        assert!(slot.camera.zooming, "a zoom that is not a look's is left alone");
+    }
 
     #[test]
     fn worn_armour_lists_each_slots_material_and_skips_broken_pieces() {

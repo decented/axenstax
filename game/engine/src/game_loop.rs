@@ -4795,6 +4795,7 @@ impl super::GameState {
         let frame = crate::spyglass::LookFrame {
             key_held,
             raised: self.local_sight.contains(&pidx),
+            use_held: (intent.place_block || intent.use_held) && intent.cursor_captured,
             spyglass_in_hand: crate::spyglass::spyglass_hand(main, off).is_some(),
             hotbar_slot: p.hotbar_slot,
             swapped,
@@ -4825,8 +4826,7 @@ impl super::GameState {
         }
         let p = &mut self.players[pidx];
         p.sighting = out.looking;
-        let first_person = p.camera.mode.shows_viewmodel();
-        p.camera.set_zoom(out.looking && first_person);
+        p.apply_spyglass_zoom();
     }
 
     /// [`Self::end_use_press`] for every seat: the pause, where the frame path never
@@ -13936,11 +13936,9 @@ impl super::GameState {
             // independently. Works in any world. Render-only — the aim ray is
             // unaffected (guarded by the eye-anchored-aim invariant test).
             if intent.camera_cycle {
-                let new_mode = {
-                    let cam = &mut self.players[pidx].camera;
-                    cam.mode = cam.mode.next();
-                    cam.mode
-                };
+                // pt1124 review 4 item 10 — while looking, the zoom follows the new
+                // perspective this same frame (`PlayerSlot::cycle_camera`).
+                let new_mode = self.players[pidx].cycle_camera();
                 // Phase 6 — remember this perspective so a reloaded world starts
                 // in it (persisted via GraphicsSettings; per-slot during play).
                 if self.graphics.default_camera_mode != new_mode {

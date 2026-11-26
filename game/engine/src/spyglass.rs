@@ -80,6 +80,8 @@ pub struct LookFrame {
     /// The use press's raise is up and it lifts a spyglass
     /// (`hands::seat_raise` gave `Raise::Spyglass` when the press started).
     pub raised: bool,
+    /// The use button is physically held (read before a Zoom-key look masks it).
+    pub use_held: bool,
     /// A spyglass is in either hand.
     pub spyglass_in_hand: bool,
     /// The selected hotbar slot.
@@ -118,11 +120,17 @@ pub fn look_frame(state: &mut LookState, f: LookFrame) -> LookOut {
     {
         state.key = if f.key_held { Press::Decided { raised: false } } else { Press::Idle };
         state.anchor = None;
-        return LookOut { looking: false, by_key: false, end_raise: f.raised };
+        // Review 4 item 8 — the use button as physically held, not only a raise it
+        // holds up: a right-click held under a Zoom-key look is kept down too, so it
+        // is never taken as a fresh raise once the look has ended.
+        return LookOut { looking: false, by_key: false, end_raise: f.raised || f.use_held };
     }
     let (hold, key) = crate::hands::shield_press(state.key, f.key_held, f.spyglass_in_hand, || true);
     state.key = key;
-    let looking = hold.raised || f.raised;
+    // Review 4 item 9 — the use press's raise was decided on an earlier frame: it
+    // looks only while a spyglass is still in a hand THIS frame (a Q-drop of the
+    // last one ends the lens now, not a frame later).
+    let looking = hold.raised || (f.raised && f.spyglass_in_hand);
     state.anchor = looking.then_some(f.hotbar_slot);
     LookOut { looking, by_key: hold.raised, end_raise: false }
 }
@@ -179,7 +187,107 @@ mod tests {
     }
 
     fn frame(key_held: bool, raised: bool, in_hand: bool, slot: usize) -> LookFrame {
-        LookFrame { key_held, raised, spyglass_in_hand: in_hand, hotbar_slot: slot, swapped: false, blocked: false }
+        LookFrame { key_held, raised, use_held: raised, spyglass_in_hand: in_hand, hotbar_slot: slot, swapped: false, blocked: false }
+    }
+
+    /// One frame of a seat in the frame path's order: the look ([`look_frame`]) with
+    /// the raise the use press left last frame, the caller's `end_raise` (the press
+    /// kept down), the Zoom key's look masking the use button, then the use press
+    /// itself (`hands::shield_press`), whose raise lifts the spyglass for the next
+    /// frame. Both hands hold a spyglass. Returns whether this frame looks.
+    struct Seat {
+        look: LookState,
+        press: Press,
+        sight: bool,
+    }
+
+    impl Seat {
+        fn new() -> Self {
+            Seat { look: LookState::default(), press: Press::Idle, sight: false }
+        }
+
+        fn frame(&mut self, key: bool, use_button: bool, swapped: bool) -> bool {
+            let f = LookFrame {
+                key_held: key,
+                raised: self.sight,
+                use_held: use_button,
+                spyglass_in_hand: true,
+                hotbar_slot: 0,
+                swapped,
+                blocked: false,
+            };
+            let out = look_frame(&mut self.look, f);
+            if out.end_raise {
+                self.press = Press::Decided { raised: false };
+                self.sight = false;
+            }
+            let seen = use_button && !out.by_key;
+            let (hold, press) = crate::hands::shield_press(self.press, seen, true, || true);
+            self.press = press;
+            self.sight = hold.raised;
+            out.looking
+        }
+    }
+
+    /// pt1124 review 4 item 8 — C and right-click both held through F: the look ends
+    /// and stays off while both are still down (the right-click is not taken as a new
+    /// raise), and while the one still held is down; once both are let go, either one
+    /// pressed again looks. Each trigger is its own: one let go and pressed again looks.
+    #[test]
+    fn both_triggers_held_through_f_stay_down_until_both_are_let_go() {
+        let through_f = || {
+            let mut seat = Seat::new();
+            assert!(seat.frame(true, true, false), "C with the right-click held looks");
+            assert!(seat.frame(true, true, false));
+            assert!(!seat.frame(true, true, true), "F ends it");
+            for n in 0..4 {
+                assert!(!seat.frame(true, true, false), "both still held: stays off (frame {n})");
+            }
+            seat
+        };
+        for again_by_key in [true, false] {
+            let mut seat = through_f();
+            assert!(!seat.frame(true, false, false), "the right-click let go, C still held: off");
+            assert!(!seat.frame(true, false, false));
+            assert!(!seat.frame(false, false, false), "both up");
+            if again_by_key {
+                assert!(seat.frame(true, false, false), "C pressed again looks at once");
+            } else {
+                // The raise is taken by the use press and lifts the spyglass the next frame.
+                seat.frame(false, true, false);
+                assert!(seat.frame(false, true, false), "a right-click pressed again looks");
+            }
+        }
+        let mut seat = through_f();
+        assert!(!seat.frame(false, true, false), "C let go, the right-click still held: off");
+        assert!(!seat.frame(false, true, false));
+        assert!(!seat.frame(false, false, false), "both up");
+        // C held through F and still down: a new right-click is the right-click's own press.
+        let mut seat = through_f();
+        assert!(!seat.frame(true, false, false), "the right-click let go");
+        seat.frame(true, true, false);
+        assert!(seat.frame(true, true, false), "and pressed again: its own new press looks");
+    }
+
+    /// pt1124 review 4 item 8 — the same through a slot change.
+    #[test]
+    fn both_triggers_held_through_a_slot_change_stay_down() {
+        let mut look = LookState::default();
+        let both = |slot: usize| LookFrame { use_held: true, ..frame(true, false, true, slot) };
+        assert!(look_frame(&mut look, both(0)).looking);
+        let out = look_frame(&mut look, both(1));
+        assert!(!out.looking && out.end_raise, "the held right-click is kept down too");
+    }
+
+    /// pt1124 review 4 item 9 — a use-triggered look needs a spyglass in a hand THIS
+    /// frame: a Q-drop of the last one ends it before a lens frame is drawn.
+    #[test]
+    fn a_raised_look_ends_the_frame_the_spyglass_leaves_the_hands() {
+        let mut s = LookState::default();
+        assert!(look_frame(&mut s, frame(false, true, true, 3)).looking);
+        let out = look_frame(&mut s, frame(false, true, false, 3));
+        assert!(!out.looking, "no spyglass in either hand: no lens");
+        assert!(!s.looking());
     }
 
     #[test]
