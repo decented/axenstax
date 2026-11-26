@@ -413,7 +413,8 @@ impl Player {
         // (`sprint_boots_mult`, refreshed by the caller each tick from the
         // equipped Boots material); walking/sneaking are unaffected.
         // Off-hand release (slice 5) — a raised shield: sneak speed, no sprint.
-        let speed = if input.guarding {
+        // pt1124 (0.2.43) — so does a spyglass look.
+        let speed = if input.guarding || input.sighting {
             SNEAK_SPEED
         } else if input.sprint {
             SPRINT_SPEED * self.sprint_boots_mult
@@ -479,7 +480,7 @@ impl Player {
             self.on_ground = false;
 
             // Sprint-jump: boost forward velocity for ~4 block jump distance
-            if input.sprint && !input.guarding && move_dir.length_squared() > 0.0 {
+            if input.sprint && !input.guarding && !input.sighting && move_dir.length_squared() > 0.0 {
                 let boost_dir = move_dir.normalize();
                 self.velocity.x += boost_dir.x * 0.2;
                 self.velocity.z += boost_dir.z * 0.2;
@@ -1494,6 +1495,28 @@ mod tests {
         assert!(sneak < walk && walk < sprint, "the speeds are ordered ({sneak} < {walk} < {sprint})");
         assert!((guard - sneak).abs() < 1e-4, "guarding walks at sneak speed ({guard} vs {sneak})");
         assert!((guard_sprint - sneak).abs() < 1e-4, "and a sprint held with it does not sprint ({guard_sprint})");
+    }
+
+    /// pt1124 (0.2.43) — looking through a spyglass walks at sneak speed and does not
+    /// sprint, as a raised shield does.
+    #[test]
+    fn looking_through_a_spyglass_walks_at_sneak_speed_and_does_not_sprint() {
+        let (world, registry, cam) = runway_setup();
+        let run = |intent: PlayerIntent| {
+            let mut p = Player::new(Vec3::new(0.0, 64.0, 0.0));
+            for _ in 0..60 {
+                p.tick(&intent, &cam, &world, &registry, PlayMode::Survival);
+            }
+            p.velocity.length()
+        };
+        let sneak = run(PlayerIntent { move_right: 1.0, sneak: true, ..Default::default() });
+        let look = run(PlayerIntent { move_right: 1.0, sighting: true, ..Default::default() });
+        let look_sprint = run(PlayerIntent { move_right: 1.0, sighting: true, sprint: true, ..Default::default() });
+        assert!((look - sneak).abs() < 1e-4, "looking walks at sneak speed ({look} vs {sneak})");
+        assert!((look_sprint - sneak).abs() < 1e-4, "and a sprint held with it does not sprint ({look_sprint})");
+        // The server builds the same intent from the joiner's input.
+        let pkt = crate::protocol::InputPacket { spyglass_raised: true, ..Default::default() };
+        assert!(PlayerIntent::from_input_packet(&pkt).sighting);
     }
 
     /// A guard is not a crouch: no ledge protection, so a body walks off an edge.

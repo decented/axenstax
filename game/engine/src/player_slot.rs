@@ -340,6 +340,11 @@ pub struct PlayerSlot {
     /// Wearing blocks since the game loop last played the clack: it drains this
     /// ([`Self::take_shield_clacks`]). Runtime only.
     pub shield_clacks: u8,
+    /// pt1124 (0.2.43) — looking through a spyglass this frame
+    /// (`spyglass::look_frame`, set by the frame path): the view zooms behind the
+    /// lens, the first-person hand hides, the avatar raises it and the tick walks
+    /// the body at sneak speed. Runtime only.
+    pub sighting: bool,
     /// Spec 26 — Builder villager entity whose Commission dialog is
     /// currently open for this player. `Some` while the dialog is
     /// visible (including during the Pick-build-site sub-flow, in which
@@ -536,6 +541,7 @@ impl PlayerSlot {
             offhand: None,
             shield_ticks: 0,
             shield_clacks: 0,
+            sighting: false,
             open_commission_villager: None,
             pending_commission: None,
             riding: None,

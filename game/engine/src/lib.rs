@@ -344,6 +344,7 @@ mod mob_uses; // Off-hand review 3: the per-mob predicates (feed, tame, Lead, mi
 mod tool_uses; // Off-hand review fixes: the per-target predicates the right-click arms and the hand rule share.
 mod shield; // Off-hand slice 5 — the shield: the front-arc block rule, wear and the raise.
 mod shield_pose; // Off-hand slice 5 — where the shield's mesh goes in each view and pose.
+mod spyglass; // pt1124 (0.2.43) — the Spyglass: the look (two triggers, one state), its ends and its raised pose.
 mod hold_pose; // How a held item is carried: default, shield, or hanging by a handle (the hand lantern).
 mod starter_kit;
 mod inventory_sync;
@@ -1490,6 +1491,14 @@ pub(crate) struct GameState {
     /// tick turns it into `PlayerIntent::guarding` and counts the raise
     /// (`PlayerSlot::shield_ticks`). Also suppresses the use swing.
     pub(crate) local_guard: std::collections::HashSet<usize>,
+    /// pt1124 (0.2.43) — local player indices whose held use button currently puts
+    /// a spyglass to the eye (the raise the use rule picked lifts a spyglass,
+    /// `hands::seat_raise`), written by the frame path beside `local_guard`. The
+    /// look itself is `spyglass_look`'s.
+    pub(crate) local_sight: std::collections::HashSet<usize>,
+    /// pt1124 (0.2.43) — each seat's spyglass look (`spyglass::LookState`: the Zoom
+    /// key's press and the slot the look began at). Absent = not looking.
+    pub(crate) spyglass_look: std::collections::HashMap<usize, crate::spyglass::LookState>,
     /// Each seat's use press, classified once per press and kept until the button is
     /// released (`hands::shield_press`). Absent = the button is up.
     pub(crate) shield_press: std::collections::HashMap<usize, hands::Press>,
@@ -2357,6 +2366,8 @@ impl GameState {
             eating: std::collections::HashMap::new(),
             local_off_use: std::collections::HashSet::new(),
             local_guard: std::collections::HashSet::new(),
+            local_sight: std::collections::HashSet::new(),
+            spyglass_look: std::collections::HashMap::new(),
             shield_press: std::collections::HashMap::new(),
             local_sneak: std::collections::HashMap::new(),
             net_send_seq: 0,

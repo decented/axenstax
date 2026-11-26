@@ -138,6 +138,36 @@ pub fn block_has_use(b: BlockId) -> bool {
         )
 }
 
+/// What a held use button lifts when the click has no other use: a shield is
+/// raised, a spyglass is put to the eye (pt1124, 0.2.43). Both follow ONE rule
+/// ([`pick`]: the last claimant of the click, the main hand's first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Raise {
+    Shield,
+    Spyglass,
+}
+
+/// What `item` lifts when its hand takes a raise: `None` for anything that is
+/// not a shield or a spyglass.
+pub fn raise_of(item: Option<&Item>) -> Option<Raise> {
+    if crate::shield::is_shield(item) {
+        Some(Raise::Shield)
+    } else if crate::spyglass::is_spyglass(item) {
+        Some(Raise::Spyglass)
+    } else {
+        None
+    }
+}
+
+/// The item a raise lifts, given both hands: the main hand's if it holds a shield
+/// or a spyglass, else the off-hand's. One rule for the raise the click picks
+/// ([`pick`]), for which hand a raised pose draws, and for whether a raise is a
+/// shield's at all: a spyglass in the main hand and a shield in the off-hand raise
+/// the spyglass, and the shield does not guard.
+pub fn raised_item(main: Option<&Item>, off: Option<&Item>) -> Option<(Hand, Raise)> {
+    [(Hand::Main, main), (Hand::Off, off)].into_iter().find_map(|(h, i)| raise_of(i).map(|r| (h, r)))
+}
+
 /// Who takes the click and why: the one decision behind [`hand_with_use`],
 /// [`use_hand`], [`either_hand_has_use`] and [`shield_raises`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,7 +189,7 @@ fn hand_acts(item: Option<&Item>, target: &UseTarget) -> bool {
     if target.mob_facts.is_some_and(|f| hand_mob_use(item, &f, target.sneak) == MobUse::Acts) {
         return true;
     }
-    item.is_some_and(|i| !crate::shield::is_shield(Some(i)) && non_mob_use(i, target))
+    item.is_some_and(|i| raise_of(Some(i)).is_none() && non_mob_use(i, target))
 }
 
 /// In the click's order: the block that takes whatever is held, then each hand in
@@ -201,10 +231,7 @@ fn pick(main: Option<&Item>, off: Option<&Item>, target: &UseTarget, off_acts: b
     if target.block.is_some_and(block_has_use) {
         return None;
     }
-    [(Hand::Main, main), (Hand::Off, off)]
-        .into_iter()
-        .find(|(_, i)| crate::shield::is_shield(*i))
-        .map(|(h, _)| Pick::Raise(h))
+    raised_item(main, off).map(|(h, _)| Pick::Raise(h))
 }
 
 /// The hand whose item has a use for `target`, in the click's order, or `None` when
@@ -263,6 +290,14 @@ pub fn shield_raises(main: Option<&Item>, off: Option<&Item>, target: &UseTarget
 /// taken off, a mount, a trade) run on a Strict seat and still take the click.
 pub fn seat_shield_raises(strict: bool, main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> bool {
     matches!(pick(main, off, target, !strict), Some(Pick::Raise(_)))
+}
+
+/// What a use press that raises ([`seat_shield_raises`]) lifts: the hand and the
+/// item ([`raised_item`]). `None` when the press does not raise. (The frame path
+/// asks the two halves apart: the press is classified once, the item each frame.)
+#[cfg(test)]
+pub fn seat_raise(strict: bool, main: Option<&Item>, off: Option<&Item>, target: &UseTarget) -> Option<(Hand, Raise)> {
+    if seat_shield_raises(strict, main, off, target) { raised_item(main, off) } else { None }
 }
 
 /// What the shield does this frame: `raised` is the state the frame applies,
@@ -332,7 +367,7 @@ pub fn swing_hands(break_block: bool, place_block: bool, place_uses_off_hand: bo
 /// raise, wherever no block with a use of its own is aimed at.
 #[cfg(test)]
 pub fn item_has_use(item: &Item, target: &UseTarget) -> bool {
-    if crate::shield::is_shield(Some(item)) {
+    if raise_of(Some(item)).is_some() {
         return !target.block.is_some_and(block_has_use);
     }
     hand_acts(Some(item), target)
@@ -362,8 +397,9 @@ fn non_mob_use(item: &Item, target: &UseTarget) -> bool {
             // Melee and digging tools have no right-click use (the chain has no
             // shovel path or axe strip).
             ToolType::Pickaxe | ToolType::Axe | ToolType::Sword | ToolType::Shovel => false,
-            // A shield's use is the raise, which [`pick`] asks last.
-            ToolType::Shield => false,
+            // A shield's use is the raise, which [`pick`] asks last; so is a
+            // spyglass's (it is put to the eye).
+            ToolType::Shield | ToolType::Spyglass => false,
         },
         Item::Material(m) => {
             if item.is_food() {
@@ -1139,4 +1175,38 @@ mod tests {
         click_offhand(&mut off, &mut cur, false);
         assert_eq!((off, cur), (None, None));
     }
+    // --- pt1124 (0.2.43): the spyglass follows the shield's raise rule exactly ---
+
+    #[test]
+    fn a_spyglass_is_raised_by_the_shields_rule_in_either_hand() {
+        let spy = tool(ToolType::Spyglass);
+        let shield = tool(ToolType::Shield);
+        let sword = tool(ToolType::Sword);
+        let torch = Item::Block(block::TORCH);
+        let air = UseTarget::default();
+        // Main hand, aimed at the air or at stone: it goes to the eye.
+        assert_eq!(seat_raise(false, Some(&spy), None, &air), Some((Hand::Main, Raise::Spyglass)));
+        assert_eq!(seat_raise(false, Some(&spy), None, &stone_target()), Some((Hand::Main, Raise::Spyglass)));
+        // Off-hand, when the main hand has no use of its own: a sword in the air.
+        assert_eq!(seat_raise(false, Some(&sword), Some(&spy), &air), Some((Hand::Off, Raise::Spyglass)));
+        // A torch in the main hand aimed at stone is placed: no look.
+        assert_eq!(seat_raise(false, Some(&torch), Some(&spy), &stone_target()), None, "the main hand's use wins");
+        // A spyglass main with a torch off on stone: the torch is placed, as with a shield.
+        assert_eq!(seat_raise(false, Some(&spy), Some(&torch), &stone_target()), None);
+        assert_eq!(use_hand(Some(&spy), Some(&torch), &stone_target()), Hand::Off);
+        // A block with a use of its own takes the click (a chest, a door).
+        assert_eq!(seat_raise(false, Some(&spy), None, &aimed(block::CRAFTING_TABLE, UP)), None);
+        // Main hand first: a spyglass main and a shield off look; the shield does not guard.
+        assert_eq!(seat_raise(false, Some(&spy), Some(&shield), &air), Some((Hand::Main, Raise::Spyglass)));
+        assert_eq!(raised_item(Some(&spy), Some(&shield)), Some((Hand::Main, Raise::Spyglass)));
+        // ... and a shield main with a spyglass off raises the shield.
+        assert_eq!(seat_raise(false, Some(&shield), Some(&spy), &air), Some((Hand::Main, Raise::Shield)));
+        // A Strict seat runs its main hand only, and a spyglass in either hand still raises.
+        assert_eq!(seat_raise(true, Some(&sword), Some(&spy), &air), Some((Hand::Off, Raise::Spyglass)));
+        // Nothing to raise: no raise.
+        assert_eq!(seat_raise(false, Some(&sword), None, &air), None);
+        assert!(item_has_use(&spy, &air));
+        assert!(!hand_acts(Some(&spy), &stone_target()), "its only use is the look");
+    }
+
 }

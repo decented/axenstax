@@ -101,7 +101,7 @@ pub struct InputState {
     /// Edge-triggered; only acted on while an avatar paint session is open.
     pub workshop_redo: bool,
     /// Campaign S: O press → toggle the skin-paint colour picker window (the
-    /// legacy alias for the Tab panel). NOT C — C is the global hold-to-zoom.
+    /// legacy alias for the Tab panel). NOT C — C is the Zoom key (a spyglass look; the painter's zoom).
     /// Edge-triggered; only acted on while an avatar paint session is open.
     pub workshop_picker: bool,
     /// Tab press → toggle the skin paint panel (colour wheel + every option).
@@ -401,7 +401,7 @@ impl InputState {
             Action::PaintUndo => self.workshop_undo = true,
             Action::PaintRedo => self.workshop_redo = true,
             // Campaign S — the skin-paint colour picker (the legacy alias for
-            // the paint panel). Not C — C is the global hold-to-zoom.
+            // the paint panel). Not C — C is the Zoom key (a spyglass look; the painter's zoom).
             Action::PaintPicker => self.workshop_picker = true,
             // The skin paint panel (colour wheel + every option). Consumed
             // ONLY while a skin-paint session is open.
@@ -585,6 +585,7 @@ impl InputState {
             // (the game loop sets it each tick from the raise).
             use_held: false,
             guarding: false,
+            sighting: false, // set per tick by the game loop (a spyglass look)
             toggle_inventory: self.inventory_toggle,
             drop_item: self.drop_item,
             pause: false, // Escape is handled in main.rs event loop, not here

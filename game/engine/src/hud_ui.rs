@@ -1263,6 +1263,66 @@ fn draw_hotbar(
 /// Off-hand release (slice 5) — the shield's inventory icon: a board of the oak
 /// planks tile with an iron rim and a boss, painted from the existing planks layer
 /// (no new texture). Shared by the hotbar, the off-hand box and the inventory screen.
+/// pt1124 (0.2.43) — the lens a spyglass is looked through: the view outside a
+/// centred circle is dark, a thin brass rim rings the circle and a soft shadow
+/// falls just inside it. The circle's diameter is [`SPYGLASS_LENS_SHARE`] of the
+/// rect's shorter side. Paints only into `rect` (one viewport, in points).
+pub(crate) const SPYGLASS_LENS_SHARE: f32 = 0.84;
+
+pub(crate) fn paint_spyglass_lens(painter: &egui::Painter, rect: egui::Rect) {
+    let painter = painter.with_clip_rect(rect);
+    for (r_in, r_out, colour) in spyglass_lens_rings(rect) {
+        painter.add(egui::Shape::mesh(ring_mesh(rect.center(), r_in, r_out, colour)));
+    }
+}
+
+/// The lens's rings, painted in order, as `(inner radius, outer radius, colour)`
+/// about the rect's centre: the soft shadow inside the rim (darkest at the rim),
+/// the dark from the circle out past the far corner, then the brass rim and its
+/// darker outer line. Explicit rings, not circle strokes (egui strokes a circle on
+/// the outside of its radius, which put the dark and the shadow outside the rim).
+pub(crate) fn spyglass_lens_rings(rect: egui::Rect) -> Vec<(f32, f32, egui::Color32)> {
+    let r = rect.width().min(rect.height()) * SPYGLASS_LENS_SHARE * 0.5;
+    let far = (rect.width() * 0.5).hypot(rect.height() * 0.5) + 4.0;
+    let w = r * 0.018;
+    let mut rings: Vec<(f32, f32, egui::Color32)> = [70u8, 45, 25, 12]
+        .into_iter()
+        .enumerate()
+        .map(|(i, a)| (r - w * (i as f32 + 1.0), r - w * i as f32, egui::Color32::from_black_alpha(a)))
+        .collect();
+    rings.push((r, far, egui::Color32::from_rgb(8, 7, 6)));
+    rings.push((r, r + 4.0, egui::Color32::from_rgb(150, 98, 46)));
+    rings.push((r + 4.0, r + 5.5, egui::Color32::from_rgb(60, 38, 20)));
+    rings
+}
+
+/// A flat ring between `r_in` and `r_out` about `c`, as triangles.
+fn ring_mesh(c: egui::Pos2, r_in: f32, r_out: f32, colour: egui::Color32) -> egui::Mesh {
+    const SEGMENTS: u32 = 160;
+    let mut mesh = egui::Mesh::default();
+    for k in 0..=SEGMENTS {
+        let a = std::f32::consts::TAU * k as f32 / SEGMENTS as f32;
+        let d = egui::vec2(a.cos(), a.sin());
+        mesh.colored_vertex(c + d * r_in, colour);
+        mesh.colored_vertex(c + d * r_out, colour);
+    }
+    for k in 0..SEGMENTS {
+        let (i0, o0, i1, o1) = (2 * k, 2 * k + 1, 2 * k + 2, 2 * k + 3);
+        mesh.add_triangle(i0, o0, o1);
+        mesh.add_triangle(i0, o1, i1);
+    }
+    mesh
+}
+
+/// [`paint_spyglass_lens`] over one player's viewport, beneath the rest of the HUD
+/// (its hotbar and hearts stay readable on top of the dark).
+pub fn draw_spyglass_lens(ctx: &egui::Context, viewport: &ViewportRect, player_index: usize) {
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
+    let rect = egui::Rect::from_min_size(egui::pos2(vp.x, vp.y), egui::vec2(vp.width, vp.height));
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new(("spyglass_lens", player_index))));
+    paint_spyglass_lens(&painter, rect);
+}
+
 pub(crate) fn paint_shield_icon(painter: &egui::Painter, icon_rect: egui::Rect, egui_integration: &EguiIntegration) {
     // A shield is taller than wide: a board in the middle of the slot.
     let h = icon_rect.height();
@@ -3403,5 +3463,35 @@ mod phone_placement_tests {
             draw_objective_panel(ctx, vp, "Grey Quarry", "Break the stone", "0 / 3", &Bindings::defaults());
         });
         assert_centred_across(rect, egui::Rangef::new(600.0, 1200.0), 460.0, "the objective panel");
+    }
+}
+
+#[cfg(test)]
+mod spyglass_lens_tests {
+    use super::*;
+
+    /// pt1124 (0.2.43) — the lens is dark from the circle outward to the corners,
+    /// the shadow lies inside the rim, and every ring's mesh stays within its radii.
+    #[test]
+    fn the_spyglass_lens_is_dark_outside_the_circle_and_shaded_just_inside_it() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 720.0));
+        let r = 720.0 * SPYGLASS_LENS_SHARE * 0.5;
+        let rings = spyglass_lens_rings(rect);
+        let dark = rings.iter().find(|(_, _, c)| *c == egui::Color32::from_rgb(8, 7, 6)).expect("the dark");
+        assert!((dark.0 - r).abs() < 1e-3, "the dark starts at the circle ({})", dark.0);
+        assert!(dark.1 > 640.0f32.hypot(360.0), "and covers the corners ({})", dark.1);
+        let shadows: Vec<_> = rings.iter().filter(|(_, _, c)| c.r() == 0 && c.a() < 255).collect();
+        assert_eq!(shadows.len(), 4);
+        assert!(shadows.iter().all(|(a, b, _)| *b <= r + 1e-3 && *a < *b && *a > r * 0.9), "inside the rim");
+        let rim = rings.iter().find(|(_, _, c)| *c == egui::Color32::from_rgb(150, 98, 46)).expect("the rim");
+        assert!((rim.0 - r).abs() < 1e-3 && rim.1 - rim.0 <= 6.0, "a thin rim at the circle");
+        for (r_in, r_out, colour) in rings {
+            let m = ring_mesh(rect.center(), r_in, r_out, colour);
+            assert!(!m.indices.is_empty());
+            for v in &m.vertices {
+                let d = (v.pos - rect.center()).length();
+                assert!(d >= r_in - 1e-2 && d <= r_out + 1e-2, "{d} outside {r_in}..{r_out}");
+            }
+        }
     }
 }

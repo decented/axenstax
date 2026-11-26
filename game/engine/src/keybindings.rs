@@ -214,7 +214,9 @@ const ACTION_TABLE: [ActionRow; 61] = {
         (Hotbar7, "hotbar_7", "Hotbar 7", Gameplay, key(KeyCode::Digit7), false),
         (Hotbar8, "hotbar_8", "Hotbar 8", Gameplay, key(KeyCode::Digit8), false),
         (Hotbar9, "hotbar_9", "Hotbar 9", Gameplay, key(KeyCode::Digit9), false),
-        (Zoom, "zoom", "Zoom (hold)", Gameplay, key(KeyCode::KeyC), false),
+        // pt1124 (0.2.43) — zooms only with a spyglass in a hand (`spyglass.rs`); the
+        // id "zoom" stays so saved bindings still load.
+        (Zoom, "zoom", "Zoom (hold, needs a spyglass)", Gameplay, key(KeyCode::KeyC), false),
         (FreeLook, "free_look", "Free-look (hold)", Gameplay, key(KeyCode::AltLeft), false),
         (Explorer, "explorer", "Search items", Gameplay, key(KeyCode::KeyB), false),
         (Help, "help", "Help", Gameplay, key(KeyCode::KeyH), false),

@@ -2578,7 +2578,10 @@ impl super::GameState {
         let (anim_state, mut flags) =
             crate::server::player_anim_fields(speed, on_ground, sneaking, acting);
         // Off-hand release (slice 5) — the guard pose, from this body's own raise.
-        if slot.shield_ticks > 0 {
+        if slot.sighting {
+            // pt1124 (0.2.43) — the raised spyglass, from this body's own look.
+            flags |= crate::protocol::player_flags::SIGHTING;
+        } else if slot.shield_ticks > 0 {
             flags |= crate::protocol::player_flags::GUARDING;
         }
         crate::protocol::PlayerState {
@@ -4687,7 +4690,8 @@ impl super::GameState {
         let holding = (intent.place_block || intent.use_held) && intent.cursor_captured && !p.combat.dead;
         let (main, off) = p.hands_items();
         let strict = self.strict_window_connection();
-        let shield_in_hand = crate::shield::is_shield(main) || crate::shield::is_shield(off);
+        // pt1124 (0.2.43) — a spyglass is raised by the same rule (`hands::raise_of`).
+        let shield_in_hand = crate::hands::raised_item(main, off).is_some();
         let prev = self.shield_press.get(&pidx).copied().unwrap_or_default();
         // The target is asked only when it can decide: the press frame.
         crate::hands::shield_press(prev, holding, shield_in_hand, || {
@@ -4749,7 +4753,75 @@ impl super::GameState {
     fn end_use_press(&mut self, pidx: usize) {
         self.shield_press.remove(&pidx);
         self.local_guard.remove(&pidx);
+        self.local_sight.remove(&pidx);
         self.local_off_use.remove(&pidx);
+    }
+
+    /// pt1124 (0.2.43) — end seat `pidx`'s spyglass look with nothing held down (a
+    /// screen over its view, the cursor free, dead or seated): the zoom and the lens
+    /// go at once, and a trigger still held when play comes back is a new press.
+    fn end_spyglass_look(&mut self, pidx: usize) {
+        if let Some(state) = self.spyglass_look.get_mut(&pidx) {
+            state.end();
+        }
+        self.spyglass_look.remove(&pidx);
+        if let Some(p) = self.players.get_mut(pidx) {
+            p.sighting = false;
+            p.camera.set_zoom(false);
+        }
+    }
+
+    /// pt1124 (0.2.43) — one frame of seat `pidx`'s spyglass look, in play
+    /// (`spyglass::look_frame`): the Zoom key (player 0's keyboard or touch Zoom
+    /// button) with a spyglass in either hand, or the use press's raise when it lifts
+    /// a spyglass (`local_sight`, last written by the use chain). A slot change or
+    /// `swapped` (F this frame) ends it until the trigger is let go. While looking
+    /// nothing is mined or attacked, and a Zoom-key look places nothing; in first
+    /// person the view zooms (the Zoom FOV setting) behind the lens. The skin
+    /// painter keeps its plain zoom on the key (a painting aid, no spyglass).
+    fn frame_spyglass_look(&mut self, pidx: usize, intent: &mut PlayerIntent, swapped: bool) {
+        let key_held = pidx == 0
+            && intent.cursor_captured
+            && (self.input.action_held(crate::keybindings::Action::Zoom)
+                || (crate::touch_input::TOUCH_PLATFORM && self.touch.zoom_held));
+        if self.skin_paint.is_some() {
+            self.spyglass_look.remove(&pidx);
+            self.players[pidx].sighting = false;
+            self.players[pidx].camera.set_zoom(key_held);
+            return;
+        }
+        let p = &self.players[pidx];
+        let (main, off) = p.hands_items();
+        let frame = crate::spyglass::LookFrame {
+            key_held,
+            raised: self.local_sight.contains(&pidx),
+            spyglass_in_hand: crate::spyglass::spyglass_hand(main, off).is_some(),
+            hotbar_slot: p.hotbar_slot,
+            swapped,
+        };
+        let mut state = self.spyglass_look.get(&pidx).copied().unwrap_or_default();
+        let out = crate::spyglass::look_frame(&mut state, frame);
+        if state == crate::spyglass::LookState::default() {
+            self.spyglass_look.remove(&pidx);
+        } else {
+            self.spyglass_look.insert(pidx, state);
+        }
+        if out.end_raise {
+            // The use press stays down until the button is let go (`hands::Press`).
+            self.shield_press.insert(pidx, crate::hands::Press::Decided { raised: false });
+            self.local_sight.remove(&pidx);
+        }
+        if out.by_key {
+            intent.place_block = false;
+            intent.use_held = false;
+        }
+        if out.looking {
+            intent.break_block = false;
+        }
+        let p = &mut self.players[pidx];
+        p.sighting = out.looking;
+        let first_person = p.camera.mode.shows_viewmodel();
+        p.camera.set_zoom(out.looking && first_person);
     }
 
     /// [`Self::end_use_press`] for every seat: the pause, where the frame path never
@@ -4757,7 +4829,12 @@ impl super::GameState {
     fn end_all_use_presses(&mut self) {
         self.shield_press.clear();
         self.local_guard.clear();
+        self.local_sight.clear();
         self.local_off_use.clear();
+        // pt1124 (0.2.43) — pausing ends every spyglass look too.
+        for pidx in 0..self.players.len() {
+            self.end_spyglass_look(pidx);
+        }
     }
 
     /// pt1124 review 3 items 2 and 3 — whether this joined client can ask its
@@ -7342,15 +7419,27 @@ impl super::GameState {
             // Off-hand release (slice 5) — a raised shield: the frame path latched
             // that this held use button has a shield to raise; it holds only while
             // the button does (a menu or a released cursor drops it).
-            intent.guarding = self.local_guard.contains(&i)
+            // pt1124 (0.2.43) — a spyglass look (the frame path's `sighting`): sneak
+            // speed, no sprint, nothing mined, attacked or placed. A look takes the
+            // place of a guard.
+            intent.sighting = self.players[i].sighting
+                && intent.cursor_captured
+                && !self.players[i].combat.dead
+                && !self.players[i].seated();
+            intent.guarding = !intent.sighting
+                && self.local_guard.contains(&i)
                 && (intent.place_block || intent.use_held)
                 && intent.cursor_captured
                 && !self.players[i].combat.dead
                 && !self.players[i].seated();
             // A raised shield attacks and mines nothing (the frame path's gate, for
-            // the swing and the input the server hears).
-            if intent.guarding {
+            // the swing and the input the server hears); a look places nothing either.
+            if intent.guarding || intent.sighting {
                 intent.break_block = false;
+            }
+            if intent.sighting {
+                intent.place_block = false;
+                intent.use_held = false;
             }
         }
 
@@ -11574,6 +11663,7 @@ impl super::GameState {
                 frame_intents[pidx].clone()
             } else {
                 self.end_use_press(pidx);
+                self.end_spyglass_look(pidx);
                 continue;
             };
             let intent = &mut intent_local;
@@ -11639,25 +11729,28 @@ impl super::GameState {
             if self.use_press_ends(pidx, intent) {
                 self.end_use_press(pidx);
             }
+            // pt1124 (0.2.43) — likewise a spyglass look ends, before the skips, on
+            // any frame its seat cannot look: dead, seated, a screen over its view,
+            // the cursor free.
+            {
+                let p = &self.players[pidx];
+                if !intent.cursor_captured
+                    || p.combat.dead
+                    || p.seated()
+                    || self.seat_modal_open(pidx)
+                    || (pidx == 0 && self.p0_ui_modal_open())
+                {
+                    self.end_spyglass_look(pidx);
+                }
+            }
 
             // Skip input for dead players (death screen is drawn in HUD section)
             if self.players[pidx].combat.dead {
                 continue;
             }
 
-            // #44 — hold-to-zoom (C). Keyboard player only; gated on cursor
-            // capture so an open menu/chat/inventory releases the zoom. Render-
-            // only (transient FOV) — set every frame so it falls back off the
-            // moment C is released or the cursor is freed.
-            if pidx == 0 {
-                #[allow(unused_mut)]
-                let mut zoom = self.input.cursor_captured
-                    && self.input.action_held(crate::keybindings::Action::Zoom);
-                if crate::touch_input::TOUCH_PLATFORM {
-                    zoom |= self.touch.zoom_held;
-                }
-                self.players[0].camera.set_zoom(zoom);
-            }
+            // #44 — the Zoom key (C) zooms only through a spyglass since pt1124
+            // (0.2.43): `frame_spyglass_look`, after the hand swap below.
 
             // Mouse look (player 0 only — mouse applies with its own sensitivity).
             // While the cinematic Director is active the body camera must NOT
@@ -11821,13 +11914,17 @@ impl super::GameState {
             // v101 (off-hand plan, slice 2) — a window click
             // (`WindowClick::SwapHands`, the selected slot named), so a joined
             // client's server copy swaps by the same rule.
-            if intent.swap_hands
+            let swapped = intent.swap_hands
                 && intent.cursor_captured
                 && self.skin_paint.is_none()
-                && !self.players[pidx].crafting_ui.open
-            {
+                && !self.players[pidx].crafting_ui.open;
+            if swapped {
                 self.swap_hands(pidx);
             }
+
+            // pt1124 (0.2.43) — the spyglass look: its zoom, its slow walk and its
+            // gates, after the swap so F ends it this very frame.
+            self.frame_spyglass_look(pidx, intent, swapped);
 
             // Spec 28f — Inventory Explorer overlay (B key). Toggles
             // open/closed per player; cursor releases on open + recaptures
@@ -14063,10 +14160,21 @@ impl super::GameState {
             } else {
                 self.shield_press.insert(pidx, press);
             }
-            if hold.raised {
+            // pt1124 (0.2.43) — what the raise lifts (`hands::raised_item`, the rule
+            // the press was classified by): a shield guards, a spyglass looks.
+            let lifts = {
+                let (main, off) = self.players[pidx].hands_items();
+                crate::hands::raised_item(main, off).map(|(_, r)| r)
+            };
+            if hold.raised && lifts == Some(crate::hands::Raise::Shield) {
                 self.local_guard.insert(pidx);
             } else {
                 self.local_guard.remove(&pidx);
+            }
+            if hold.raised && lifts == Some(crate::hands::Raise::Spyglass) {
+                self.local_sight.insert(pidx);
+            } else {
+                self.local_sight.remove(&pidx);
             }
             if hold.held_over {
                 intent.place_block = false;
@@ -18355,7 +18463,12 @@ impl super::GameState {
             // Shown only in first-person — third-person draws the self-avatar
             // (above) instead, and clears these buffers in the `else` so a stale
             // hand from a first-person frame stops drawing once the camera pulls back.
-            if crate::viewmodel::SHOW_VIEWMODEL && self.players[pidx].camera.mode.shows_viewmodel() {
+            // pt1124 (0.2.43) — looking through a spyglass, the hand hides behind the
+            // lens (the `else` clears it).
+            if crate::viewmodel::SHOW_VIEWMODEL
+                && self.players[pidx].camera.mode.shows_viewmodel()
+                && !self.players[pidx].sighting
+            {
                 let slot = &self.players[pidx];
                 // Held items: the same resolver the network input path uses, so
                 // the in-hand items agree with what remote peers render. The
@@ -21536,6 +21649,11 @@ impl super::GameState {
                 // Director is active with hide-HUD on; always false on WASM. (The
                 // crosshair is a separate wgpu pass — gated via renderer.hide_crosshair.)
                 if pidx != 0 || !self.hud_suppressed() {
+                // pt1124 (0.2.43) — the spyglass lens, under the rest of the HUD, in
+                // first person (third person shows the avatar raising it).
+                if slot.sighting && slot.camera.mode.shows_viewmodel() {
+                    crate::hud_ui::draw_spyglass_lens(&self.renderer.egui.ctx, &screen.viewport, pidx);
+                }
                 crate::hud_ui::draw_hud(
                     &self.renderer.egui.ctx,
                     &screen.viewport,
@@ -24678,6 +24796,9 @@ impl super::GameState {
             // v101 — the raise the tick latched on this input's intent (a shield
             // held up): the server slows the body by it and counts the raise.
             shield_raised: self.net_local_intent.guarding,
+            // v103 (pt1124) — the spyglass look the tick latched on this input's
+            // intent: the server slows the body by it and relays the raised pose.
+            spyglass_raised: self.net_local_intent.sighting,
         };
 
         // Serialize once, send to whichever transport is active

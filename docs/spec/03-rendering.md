@@ -1608,6 +1608,33 @@ third-person avatar hand) and on the ground (local and server-broadcast drops).
     round boss; the hotbar, the off-hand box and the inventory screen's slots share it (the two
     places that draw a tool as its tier colour and a letter: the "Sd" letter arm is only the
     exhaustive match's fallback).
+- **The spyglass's look (pt1124, 0.2.43).** `ToolType::Spyglass` is a short brass telescope
+  built like every tool (`held_tool_model`, boxes in flat colours, **no texture layer added**):
+  standing along +Y, a dark eyepiece band at the bottom (`SPYGLASS_EYEPIECE_Y` = -0.305), a
+  narrow draw tube, a trim ring, the wide barrel, the objective's rim and its glass on top
+  (`SPYGLASS_OBJECTIVE_Y` = 0.32). Its colours are picked once by appearance, not by texel
+  position (`spyglass_paints`: the nearest opaque texel to a target colour over the copper
+  chest and copper cable tiles for the brass and the trim, the leather tile too for the band,
+  the glass tile for the lens). The one model draws everywhere:
+  - **In the hand**, first person and third person (the default tool pose), and in the
+    **inventory icon** through the tool icon path (`item_icon::paint_tool_icon`, the boxes'
+    fronts turned 45 degrees: no special painter).
+  - **On the ground**: `ItemLook::Spyglass` (`item_model::item_look`, local and full-payload
+    server drops alike), the model at half size laid on its side, bobbing and spinning like
+    the drop cube (`entity_model::push_item_drop_spyglass`).
+  - **Raised (third person)**: with the avatar's `SIGHTING` flag (`player_flags` 0x20) and a
+    spyglass in a hand (the main hand's first), that arm comes up under the eye (1.85 rad
+    forward, 0.40 rad in, the eating raise's shape: `spyglass::AVATAR_ARM_ANGLE`,
+    `AVATAR_ARM_YAW`) and the spyglass lies along the look with its eyepiece at the eye on the
+    hand's side, nodding with the head's pitch about the neck (`spyglass::avatar_transform`,
+    0.85 of the held size). A look takes the place of a guard: `GUARDING` is not drawn with it.
+  - **Looking (first person)**: the viewmodel hides (its buffers are cleared) and the lens
+    covers the view (`hud_ui::paint_spyglass_lens`, drawn by `draw_spyglass_lens` on the
+    viewport's egui Background layer, so the hotbar and hearts stay on top; explicit ring meshes,
+    `spyglass_lens_rings`, because egui strokes a circle outside its radius): dark (8, 7, 6)
+    outside a centred circle whose diameter is 0.84 of the viewport's shorter side, a soft
+    shadow inside the rim, a 4 px brass rim with a thin dark outer line. The zoom is the
+    camera's existing Zoom FOV (Spec 05 §3.4b). Third person draws no lens and no zoom.
 - **Held materials and the polished sword and rod (2026-11-13).** A material in
   the hand (bread, a stick, an ingot, ...) is the flat cut-out sprite of its icon,
   the path a held torch takes (`item_model::held_item_mesh`, `HELD_MATERIAL_WIDTH` 0.45

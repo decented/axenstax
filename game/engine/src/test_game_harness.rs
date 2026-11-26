@@ -251,6 +251,9 @@ mod tests {
     mod fishing_shots;
     #[path = "furnace_shots.rs"]
     mod furnace_shots;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[path = "spyglass_shots.rs"]
+    mod spyglass_shots;
     use super::*;
 
     /// Point `AXENSTAX_WORLDS_DIR` at one pid-scoped temp dir shared by every

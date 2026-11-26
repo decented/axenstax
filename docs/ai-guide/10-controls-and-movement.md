@@ -38,7 +38,7 @@ All bindings below are read directly from `input.rs` (which maps physical keys t
 | Key | Action |
 |-----|--------|
 | **F5** | Cycle the camera perspective: first-person → over-the-shoulder → behind (orbit) → back to first-person |
-| **C** (hold) | Hold-to-zoom (spyglass-style narrowed view). Keyboard only; releases when you let go or open a menu |
+| **C** (hold) | Look through a spyglass: zooms in behind a round lens, **only while a spyglass is in either hand** (with none, C does nothing). You walk slowly and can't mine or place while looking. Holding right-click with a spyglass does the same. Letting go, opening a menu, changing the hotbar slot or pressing F ends it. Craft one at a workbench: glass on top of two copper ingots in a column |
 | **Left Alt** (hold) | Free-look — look around in third-person *without* changing where you're aiming. **Only works if the "third-person free-look" setting is on (it is off by default) and you're already in a third-person view.** Don't promise it unless the player has enabled it |
 
 ### Screens, overlays & system
@@ -130,9 +130,9 @@ The on-screen overlay (`touch_input.rs`) appears automatically on a touch device
 | Bottom-centre | The 9-slot **hotbar** (tap a slot to select) + an **Inventory** button at its right end |
 | Anywhere else on screen | Drag to **look** (rotate the camera) — a second finger looks while the joystick thumb moves |
 | Top-left | **Pause** and **Chat** buttons |
-| Top-right | **Perspective** (camera cycle) and **Zoom** (hold) buttons |
+| Top-right | **Perspective** (camera cycle) and **Zoom** (hold; looks through a spyglass, only with one in either hand) buttons |
 
-So on touch you **can**: move, sprint, look, jump, sneak, break, place, select hotbar slots, open inventory, pause, open chat, cycle the camera, and zoom.
+So on touch you **can**: move, sprint, look, jump, sneak, break, place, select hotbar slots, open inventory, pause, open chat, cycle the camera, and look through a spyglass (Zoom button, with one in a hand).
 
 ### ❌ Not available on touch (verified `false` in `touch_input.rs::to_intent`)
 These have **no on-screen button**, so a touch player cannot currently do them — route around them:

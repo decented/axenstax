@@ -1745,7 +1745,22 @@ pub fn build_player_avatar_vertices_framed(
     // the board stands in front of the hand. Only when the avatar's flags say so.
     let main_wire = crate::protocol::HeldWire { kind: ps.held_kind, id: ps.held_id, tool: ps.held_tool };
     let off_wire = crate::protocol::HeldWire { kind: ps.off_kind, id: ps.off_id, tool: ps.off_tool };
-    let guard_side = if ps.flags & player_flags::GUARDING != 0 {
+    // pt1124 (0.2.43) — looking through a spyglass: the hand that holds it (the main
+    // hand's first, `spyglass::spyglass_hand`) raises it to the eye. Only when the
+    // avatar's flags say SIGHTING; a look takes the place of a guard.
+    let sight_side = if ps.flags & player_flags::SIGHTING != 0 {
+        let is_spyglass = |w: crate::protocol::HeldWire| w.tool_type() == Some(crate::crafting::ToolType::Spyglass);
+        if is_spyglass(main_wire) {
+            Some(crate::viewmodel::HandSide::Right)
+        } else if is_spyglass(off_wire) {
+            Some(crate::viewmodel::HandSide::Left)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let guard_side = if ps.flags & player_flags::GUARDING != 0 && sight_side.is_none() {
         let is_shield = |w: crate::protocol::HeldWire| w.tool_type() == Some(crate::crafting::ToolType::Shield);
         if is_shield(main_wire) {
             Some(crate::viewmodel::HandSide::Right)
@@ -1827,6 +1842,13 @@ pub fn build_player_avatar_vertices_framed(
             arm_override = Some(crate::eating::avatar_arm_angle(e.look, arm_override.unwrap_or(walk_swing)));
             // ... and swings in across the body so the food comes to the mouth.
             arm_yaw = crate::eating::avatar_arm_yaw(e.look, e.side);
+        }
+        // A raised spyglass: its arm comes up under the eye, like eating's raise.
+        if let Some(side) = sight_side
+            && side.arm_index() == i
+        {
+            arm_override = Some(crate::spyglass::AVATAR_ARM_ANGLE);
+            arm_yaw = crate::spyglass::avatar_arm_yaw(side);
         }
         let pose = PartPose { walk_swing, head_pitch: ps.pitch, arm_override, arm_yaw, ..Default::default() };
         if let Some(slot) = part_angle.get_mut(i) {
@@ -1916,6 +1938,19 @@ pub fn build_player_avatar_vertices_framed(
         };
         let x_yaw = part_yaw[side.arm_index()];
         let pose = crate::hold_pose::hold_pose(held, registry);
+        // pt1124 (0.2.43) — a raised spyglass is held to the eye, along the look
+        // (`spyglass::avatar_transform`), not hung from the hand anchor.
+        if sight_side == Some(side) && held.tool == Some(crate::crafting::ToolType::Spyglass) {
+            let m = crate::spyglass::avatar_transform(side, ps.pitch);
+            crate::shield_pose::transform_vertices(&mut item_verts, &m);
+            for v in &mut item_verts {
+                let p = rotate_model_yaw(Vec3::from(v.position), (sin_y, cos_y));
+                v.position = [p.x + foot_pos.x, p.y + foot_pos.y, p.z + foot_pos.z];
+                v.normal = rotate_model_yaw(Vec3::from(v.normal), (sin_y, cos_y)).to_array();
+            }
+            held_verts.extend(item_verts);
+            continue;
+        }
         // Off-hand release (slice 5) — a shield is placed by its own pose (worn on
         // the outside of the forearm, or lifted in front of the raised arm), not
         // hung from the hand anchor.
@@ -2104,7 +2139,37 @@ fn push_item_drop(
         crate::item_model::ItemLook::Armour { slot, material } => {
             push_item_drop_armour(verts, slot, material, pos, anim_time, light)
         }
+        crate::item_model::ItemLook::Spyglass => push_item_drop_spyglass(verts, pos, anim_time, light),
     }
+}
+
+/// pt1124 (0.2.43) — one dropped spyglass: the hand's model (`held_tool_model`),
+/// made smaller and laid on its side (+Y along the ground), bobbing and spinning
+/// like the drop cube, its underside as high above the ground as the cube's.
+fn push_item_drop_spyglass(verts: &mut Vec<Vertex>, pos: Vec3, anim_time: f32, light: (f32, f32)) {
+    const SCALE: f32 = 0.5;
+    let verts_start = verts.len();
+    let bob = (anim_time * 2.0).sin() * 0.06;
+    let yaw = anim_time * 0.9;
+    // The tube's radius once laid down (the objective rim is the widest part).
+    let radius = 0.075 * SCALE;
+    let centre = pos + Vec3::new(0.0, 0.08 + radius + bob, 0.0);
+    let (sin_y, cos_y) = yaw.sin_cos();
+    // Lay it down: +Y turned to +X about Z, then the spin about Y.
+    let lay = |p: Vec3| Vec3::new(p.y, -p.x, p.z);
+    let spin = |p: Vec3| Vec3::new(p.x * cos_y - p.z * sin_y, p.y, p.x * sin_y + p.z * cos_y);
+    let mesh = crate::held_tool_model::tool_model_with(
+        crate::crafting::ToolType::Spyglass,
+        crate::crafting::ToolMaterial::Wood,
+        crate::viewmodel::HandSide::Right,
+        false,
+    );
+    verts.extend(mesh.into_iter().map(|mut v| {
+        v.position = (spin(lay(Vec3::from(v.position) * SCALE)) + centre).to_array();
+        v.normal = spin(lay(Vec3::from(v.normal))).to_array();
+        v
+    }));
+    apply_light_channels(&mut verts[verts_start..], light);
 }
 
 /// Emit one dropped armour piece: its small model (`armour_model::drop_mesh`, foot
@@ -4826,6 +4891,43 @@ mod tests {
         assert!(third.2.is_some());
         let first = self_avatar_with_rod(crate::camera::CameraMode::FirstPerson, &ps, 0.0, 0, 0, 1.0, &reg, arm, crate::armour_model::NO_ARMOUR, None, Some(HandSide::Right));
         assert!(first.0.is_empty() && first.1.is_empty() && first.2.is_none());
+    }
+
+    /// pt1124 (0.2.43) — SIGHTING raises the spyglass to the eye, along the facing, in
+    /// the hand that holds it; a shield in the other hand is not lifted by it.
+    #[test]
+    fn a_sighting_avatar_holds_its_spyglass_to_the_eye_along_its_facing() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        use crate::protocol::{player_flags, HeldWire};
+        use crate::viewmodel::HandSide;
+        let reg = crate::block::BlockRegistry::new();
+        let spy = HeldWire::of(Some(&crate::item::Item::Tool(Tool::new(ToolType::Spyglass, ToolMaterial::Wood))));
+        let shield = HeldWire::of(Some(&crate::item::Item::Tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))));
+        for (side, main, off) in [(HandSide::Right, spy, HeldWire::EMPTY), (HandSide::Left, HeldWire::EMPTY, spy)] {
+            let mut ps = posed(0, false, main, off);
+            ps.flags = player_flags::SIGHTING;
+            let (_, held) = build_player_avatar_vertices(&ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+            let foot = Vec3::new(ps.x, ps.y, ps.z);
+            let eye = avatar_world_point(foot, ps.yaw, crate::spyglass::avatar_eye(side));
+            let forward = (avatar_world_point(foot, ps.yaw, Vec3::NEG_Z) - foot).normalize();
+            let pts: Vec<Vec3> = held.iter().map(|v| Vec3::from(v.position)).collect();
+            let near = pts.iter().map(|p| p.distance(eye)).fold(f32::MAX, f32::min);
+            assert!(near < 0.06, "{side:?}: the eyepiece is at the eye ({near})");
+            let reach = pts.iter().map(|p| (*p - eye).dot(forward)).fold(f32::MIN, f32::max);
+            assert!(reach > 0.4, "{side:?}: the tube runs out ahead of the eye ({reach})");
+            // Not sighting: held in the hand, well below the eye.
+            ps.flags = 0;
+            let (_, low) = build_player_avatar_vertices(&ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+            let top = low.iter().map(|v| v.position[1]).fold(f32::MIN, f32::max);
+            assert!(top < eye.y - 0.2, "{side:?}: lowered, it is not at the eye ({top})");
+        }
+        // A spyglass main and a shield off, sighting (and a lying GUARDING bit): the shield stays down.
+        let mut ps = posed(0, false, spy, shield);
+        ps.flags = player_flags::SIGHTING;
+        let (_, a) = build_player_avatar_vertices(&ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+        ps.flags = player_flags::SIGHTING | player_flags::GUARDING;
+        let (_, b) = build_player_avatar_vertices(&ps, 0.0, 0, 0, 1.0, &reg, crate::skin_uv::ArmModel::Classic);
+        assert_eq!(a.iter().map(|v| v.position).collect::<Vec<_>>(), b.iter().map(|v| v.position).collect::<Vec<_>>());
     }
 
     /// The torch's centroid in the `side` hand, in model space, for a pose. With

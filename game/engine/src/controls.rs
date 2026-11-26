@@ -158,7 +158,7 @@ pub const KEYBOARD_SECTIONS: &[ControlSection] = &[
             bound("Shift", "Sneak: creep to a ledge without falling (dive in water)", "input.rs InputState::sneak; physics.rs swim", &[Action::Sneak], first),
             bound("Double-tap W, or hold Ctrl", "Sprint", "input.rs press_action Forward double-tap; InputState::sprint", &[Action::Forward, Action::Sprint], sprint_keys),
             bound("Double-tap Space", "Fly on / off (Creative worlds)", "input.rs press_action Jump double-tap; physics.rs toggle_flight", &[Action::Jump], double_tap),
-            bound("Hold C", "Zoom in", "game_loop.rs hold-to-zoom (Action::Zoom)", &[Action::Zoom], hold),
+            bound("Hold C", "Look through a spyglass (one in either hand)", "game_loop.rs spyglass look (Action::Zoom, spyglass::look_frame)", &[Action::Zoom], hold),
             row("F5", "Third-person camera", "input.rs press_action CameraView (F5, fixed) -> camera_cycle"),
         ],
     },
@@ -167,7 +167,7 @@ pub const KEYBOARD_SECTIONS: &[ControlSection] = &[
         in_help_sheet: true,
         rows: &[
             bound("Left click (hold)", "Break blocks: hold until it breaks", "input.rs press_action Attack -> break_block", &[Action::Attack], held),
-            bound("Right click", "Place a block, use what you hold, open things", "input.rs press_action Use -> place_block", &[Action::Use], first),
+            bound("Right click", "Place a block, use what you hold, open things (hold it to raise a shield or look through a spyglass)", "input.rs press_action Use -> place_block", &[Action::Use], first),
             bound("Middle click", "Pick the block you're looking at into your hand (in Survival, only if you're carrying it)", "input.rs press_action PickBlock -> pick_block", &[Action::PickBlock], first),
             bound("1 to 9, or scroll wheel", "Choose the item in your hand", "input.rs press_action Hotbar1..9; lib.rs MouseWheel -> scroll", HOTBAR, hotbar_keys),
             bound("E", "Open your inventory and crafting", "input.rs press_action Inventory -> inventory_toggle", &[Action::Inventory], first),
@@ -210,7 +210,7 @@ pub const TOUCH_SECTIONS: &[ControlSection] = &[
             row("Jump button", "Jump (swim up in water)", "touch_input.rs ButtonKind::Jump"),
             row("Sneak button (hold)", "Sneak: creep to a ledge without falling", "touch_input.rs ButtonKind::Sneak"),
             row("View button", "Third-person camera", "touch_input.rs ButtonKind::Perspective -> camera_cycle"),
-            row("Zoom button (hold)", "Zoom in", "touch_input.rs ButtonKind::Zoom"),
+            row("Zoom button (hold)", "Look through a spyglass (one in either hand)", "touch_input.rs ButtonKind::Zoom"),
         ],
     },
     ControlSection {

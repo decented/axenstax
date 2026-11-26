@@ -566,6 +566,7 @@ impl TouchInput {
             place_block: self.place_pressed,
             use_held: self.place_held,
             guarding: false,
+            sighting: false, // set per tick by the game loop (a spyglass look)
             toggle_inventory: self.inventory_pressed,
             drop_item: false, // BRIDGE: touch UI has no Q-equivalent yet
             pause: self.pause_pressed,
