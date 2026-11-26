@@ -118,7 +118,7 @@ These answer the last playtest. Mission 0 below walks through them in an order t
 - **The fishing rod breaks blocks like a bare hand, on purpose.** Any item that is not the right tool mines at hand speed. Nothing is built to stop it.
 - **A blocked brigand hit "knocked you back":** it was not knockback. The brigand walked into you and slid you along. Fixed, see 5.
 - **Armour went 24, then 15, then 24:** correct, see the numbers in 8.
-- **Not built:** free typing on Site Board jobs was declined (picked jobs only, for child safety). A spyglass in place of the zoom key (**C**) is parked for later.
+- **Not built:** free typing on Site Board jobs is approved for later, behind a permission setting, and will come after Living World Tier 3 (for now, picked jobs only). A spyglass in place of the zoom key (**C**) is parked for later.
 
 **Fixed since last time** (the co-host: re-check each, one line of pass or fail):
 
