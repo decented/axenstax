@@ -1186,7 +1186,10 @@ broadcast returns; and a joiner's furnace transfers there can be
 overwritten by the host mirror (a take is copied back into the server's
 furnace from the host's unchanged slot, a paid deposit is removed by the
 next mirror): pre-existing, now reachable from the redesigned furnace
-screen. BRIDGE:
+screen. And (review 3 item 4, not fixed) a host's `/we set` or `/we paste` of
+bedrock marks the cell placed in the host's world only: the server copy
+receives the block and meta without the placed bit, so a Creative joiner's
+break of that bedrock is refused there as the world's own. BRIDGE:
 the mirror goes with `--no-lend`, and so does that path's second Proof-of-Play
 state (C1 review LOW-5, accepted): the owning copy keeps its own exposure map
 (`World::pop_exposure` travels only with a lend), so a cell the host exposed
