@@ -738,3 +738,43 @@ fn a_chasing_brigand_never_shoves_a_joiner_behind_a_raised_shield() {
     let blocks = shield_worn(&rig).len();
     assert!(blocks >= 3, "the brigand kept attacking and the shield kept blocking ({blocks} wearing blocks)");
 }
+
+/// pt1124 (0.2.43) — a joiner's spyglass look rides the input: the server latches it,
+/// walks the body at sneak speed with no sprint, and relays it as the avatar's
+/// SIGHTING bit (not GUARDING), and it never counts as a raised shield.
+#[test]
+fn a_joiners_spyglass_look_slows_its_body_and_is_relayed_as_the_sighting_pose() {
+    let mut rig = Rig::new("spyglass-look", 2);
+    let go = |rig: &mut Rig, j: usize, looking: bool| {
+        rig.joiners[j].input_seq += 1;
+        let seq = rig.joiners[j].input_seq;
+        let input = protocol::InputPacket {
+            tick: seq,
+            yaw: std::f32::consts::PI,
+            health: 20.0,
+            move_forward: 1.0,
+            sprint: true,
+            spyglass_raised: looking,
+            ..Default::default()
+        };
+        rig.joiners[j].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    };
+    let z0: Vec<f32> = rig.joiners.iter().map(|j| rig.hs.server.players[j.slot].player.pos.z).collect();
+    for _ in 0..12 {
+        go(&mut rig, 0, true);
+        go(&mut rig, 1, false);
+        rig.tick(1);
+    }
+    let moved = |rig: &Rig, j: usize| rig.hs.server.players[rig.joiners[j].slot].player.pos.z - z0[j];
+    let (looking, free) = (moved(&rig, 0), moved(&rig, 1));
+    assert!(looking > 0.2, "a look still walks ({looking})");
+    assert!(looking < free * 0.6, "but slower than a sprinting body ({looking} vs {free})");
+    let g = &rig.hs.server.players[rig.joiners[0].slot];
+    assert!(g.sighting_latch && !g.shield_latch, "latched as a look, not a raise");
+    assert_eq!(g.shield_ticks, 0, "a look is never a raised shield");
+    let state = crate::server::collect_player_state(g, 0);
+    assert_ne!(state.flags & protocol::player_flags::SIGHTING, 0, "relayed as the sighting pose");
+    assert_eq!(state.flags & protocol::player_flags::GUARDING, 0);
+    let f = &rig.hs.server.players[rig.joiners[1].slot];
+    assert_eq!(crate::server::collect_player_state(f, 1).flags & protocol::player_flags::SIGHTING, 0);
+}
