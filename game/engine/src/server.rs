@@ -580,14 +580,16 @@ pub fn collect_player_state(sp: &ServerPlayer, idx: u32) -> crate::protocol::Pla
         use crate::protocol::player_flags as pf;
         anim_state = 0;
         flags = (flags & pf::SWINGING) | pf::SEATED;
-    } else if sp.sighting_latch {
-        // pt1124 (0.2.43) — a spyglass at the eye, relayed for the raised pose
-        // (presentation only). A look takes the place of a guard.
-        flags |= crate::protocol::player_flags::SIGHTING;
-    } else if sp.shield_latch {
-        // Off-hand release (slice 5) — the raise the player's input reports,
-        // relayed as a flags bit for the guard pose (presentation only).
-        flags |= crate::protocol::player_flags::GUARDING;
+    } else {
+        // Off-hand release (slice 5) and pt1124 (0.2.43) — the raised pose, relayed
+        // as a flags bit (presentation only): the ONE pose the server takes from the
+        // player's claims and its copy of the hands (review 4 item 4), so a peer never
+        // sees a spyglass in an empty hand, nor a look over a shield that guards.
+        match sp.raised_pose() {
+            Some(crate::hands::Raise::Spyglass) => flags |= crate::protocol::player_flags::SIGHTING,
+            Some(crate::hands::Raise::Shield) => flags |= crate::protocol::player_flags::GUARDING,
+            None => {}
+        }
     }
     crate::protocol::PlayerState {
         player_index: idx,
@@ -855,13 +857,23 @@ impl ServerPlayer {
         if !self.server_simulated {
             return None;
         }
+        self.with_effective_hands(crate::shield::guarding)
+    }
+
+    /// The two hands of the server's copy of this joiner's window as they
+    /// EFFECTIVELY are (the selected slot, then the off-hand): every waiting window
+    /// event and every shield wear owed already applied ([`Self::effective_shield`]).
+    fn with_effective_hands<R>(
+        &self,
+        f: impl FnOnce(Option<&crate::item::ItemStack>, Option<&crate::item::ItemStack>) -> R,
+    ) -> R {
         let owed = !self.shield_owed.is_empty();
         // ANY waiting event can change what the seat holds (an item frame's `Take`
         // of its only shield, a move, a drop), not only a shield's own wear: the raw
         // shortcut is for an empty queue.
         let pending = self.window_events.waiting() > 0;
         if !owed && !pending {
-            return crate::shield::guarding(self.inventory.hotbar_slot(self.hotbar_slot), self.offhand.as_ref());
+            return f(self.inventory.hotbar_slot(self.hotbar_slot), self.offhand.as_ref());
         }
         let mut window = crate::window_events::effective_window(self);
         if owed {
@@ -869,7 +881,45 @@ impl ServerPlayer {
                 crate::shield::wear_blocking(&mut window.inv, self.hotbar_slot, &mut window.offhand, o.hand, o.durability, o.amount);
             }
         }
-        crate::shield::guarding(window.inv.hotbar_slot(self.hotbar_slot), window.offhand.as_ref())
+        f(window.inv.hotbar_slot(self.hotbar_slot), window.offhand.as_ref())
+    }
+
+    /// pt1124 review 4 item 4 — the ONE raised pose of this seat as the server takes
+    /// it: a raised shield, a spyglass at the eye, or neither, never both. A joiner's
+    /// two latches are claims, each checked against the server's copy of its hands
+    /// (effectively, [`Self::with_effective_hands`]): a look needs a spyglass in the
+    /// selected slot or the off-hand, a guard needs a shield there
+    /// ([`crate::shield::guarding`]). When both claims hold, the client's own rule
+    /// decides ([`crate::hands::raised_item`]: the main hand's first). Read where the
+    /// pose matters (the protection, the raise count, the relayed pose), so a hand
+    /// that changes after the input is taken changes the pose too. A local slot's
+    /// client resolved its own pose (a look takes the place of a guard); its latches
+    /// are taken as they are.
+    pub fn raised_pose(&self) -> Option<crate::hands::Raise> {
+        use crate::hands::Raise;
+        if !self.server_simulated {
+            return if self.sighting_latch { Some(Raise::Spyglass) } else { self.shield_latch.then_some(Raise::Shield) };
+        }
+        if !self.sighting_latch && !self.shield_latch {
+            return None;
+        }
+        self.with_effective_hands(|main, off| {
+            let (main_item, off_item) = (main.map(|s| &s.item), off.map(|s| &s.item));
+            let sight = self.sighting_latch && crate::spyglass::spyglass_hand(main_item, off_item).is_some();
+            let guard = self.shield_latch && crate::shield::guarding(main, off).is_some();
+            match (sight, guard) {
+                (true, true) => crate::hands::raised_item(main_item, off_item).map(|(_, r)| r),
+                (true, false) => Some(Raise::Spyglass),
+                (false, true) => Some(Raise::Shield),
+                (false, false) => None,
+            }
+        })
+    }
+
+    /// The guard latch is not outranked by a look ([`Self::raised_pose`]). Cheap
+    /// when no look is claimed (no window fold).
+    fn guard_not_outranked(&self) -> bool {
+        !self.sighting_latch || self.raised_pose() == Some(crate::hands::Raise::Shield)
     }
 
     /// This joiner's raised shield for the one block rule: its server body's
@@ -880,7 +930,7 @@ impl ServerPlayer {
         // The CURRENT latch too: a release already processed takes effect for every
         // damage phase that runs after it, though the tick's raise count was taken
         // earlier (a lent host drains its inputs after its early blasts).
-        if !self.shield_latch {
+        if !self.shield_latch || !self.guard_not_outranked() {
             return None;
         }
         let (hand, durability) = self.effective_shield()?;
@@ -920,7 +970,7 @@ impl ServerPlayer {
     /// ([`GameServer::run_shield_phase`]), so every phase reads the same value.
     pub fn tick_shield(&mut self) {
         let holds = self.effective_shield().is_some();
-        let raised = self.shield_latch && holds && self.is_present_and_alive();
+        let raised = self.shield_latch && holds && self.guard_not_outranked() && self.is_present_and_alive();
         if self.shield_latch && !holds && self.server_simulated && !self.shield_flag_logged {
             self.shield_flag_logged = true;
             log::info!(

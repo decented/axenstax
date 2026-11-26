@@ -197,6 +197,10 @@ fn a_blast_whose_centre_is_in_front_of_a_raised_joiner_shield_is_blocked() {
 #[test]
 fn the_raised_flag_slows_the_joiners_body_and_is_relayed_as_the_guarding_pose() {
     let mut rig = Rig::new("flag", 2);
+    // The server's copy holds the shield the raise claims (review 4 item 4: a guard
+    // with no shield there is never relayed).
+    let guarder = rig.joiners[0].slot;
+    rig.hs.server.players[guarder].offhand = Some(shield());
     let go = |rig: &mut Rig, j: usize, raised: bool, n: u32| {
         for _ in 0..n {
             rig.joiners[j].input_seq += 1;
@@ -745,6 +749,9 @@ fn a_chasing_brigand_never_shoves_a_joiner_behind_a_raised_shield() {
 #[test]
 fn a_joiners_spyglass_look_slows_its_body_and_is_relayed_as_the_sighting_pose() {
     let mut rig = Rig::new("spyglass-look", 2);
+    // The server's copy holds the spyglass the look claims (review 4 item 4).
+    let looker = rig.joiners[0].slot;
+    rig.hs.server.players[looker].offhand = Some(spyglass());
     let go = |rig: &mut Rig, j: usize, looking: bool| {
         rig.joiners[j].input_seq += 1;
         let seq = rig.joiners[j].input_seq;
@@ -777,4 +784,69 @@ fn a_joiners_spyglass_look_slows_its_body_and_is_relayed_as_the_sighting_pose() 
     assert_eq!(state.flags & protocol::player_flags::GUARDING, 0);
     let f = &rig.hs.server.players[rig.joiners[1].slot];
     assert_eq!(crate::server::collect_player_state(f, 1).flags & protocol::player_flags::SIGHTING, 0);
+}
+
+fn spyglass() -> crate::item::ItemStack {
+    crate::item::ItemStack::new_tool(Tool::new(ToolType::Spyglass, ToolMaterial::Wood))
+}
+
+fn shield() -> crate::item::ItemStack {
+    crate::item::ItemStack::new_tool(Tool::new(ToolType::Shield, ToolMaterial::Wood))
+}
+
+fn pose(rig: &Rig, j: usize) -> u8 {
+    let slot = rig.joiners[j].slot;
+    crate::server::collect_player_state(&rig.hs.server.players[slot], slot as u32).flags
+}
+
+/// pt1124 review 4 item 4 — a look is relayed only when the server's copy of the
+/// joiner's hands holds a spyglass (the selected slot or the off-hand): an
+/// empty-handed claim walks slowly (its own body) but peers never see the pose.
+#[test]
+fn an_empty_handed_spyglass_claim_is_never_relayed_as_the_sighting_pose() {
+    let mut rig = Rig::new("spyglass-empty-hand", 3);
+    let (empty, off, main) = (rig.joiners[0].slot, rig.joiners[1].slot, rig.joiners[2].slot);
+    rig.hs.server.players[off].offhand = Some(spyglass());
+    rig.hs.server.players[main].inventory.set_slot(4, Some(spyglass()));
+    rig.hs.server.players[main].hotbar_slot = 4;
+    for slot in [empty, off, main] {
+        rig.hs.server.players[slot].sighting_latch = true;
+    }
+    rig.tick(2);
+    use protocol::player_flags::{GUARDING, SIGHTING};
+    assert_eq!(pose(&rig, 0) & (SIGHTING | GUARDING), 0, "no spyglass in the server's copy: no pose");
+    assert_ne!(pose(&rig, 1) & SIGHTING, 0, "a spyglass in the off-hand looks");
+    assert_ne!(pose(&rig, 2) & SIGHTING, 0, "a spyglass in the selected slot looks");
+    // A spyglass elsewhere in the bag is not in a hand.
+    rig.hs.server.players[main].hotbar_slot = 5;
+    assert_eq!(pose(&rig, 2) & SIGHTING, 0, "a spyglass off the selected slot does not");
+}
+
+/// pt1124 review 4 item 4 — a shield and a spyglass in the two hands, both claimed
+/// raised: the server takes ONE pose by the client's rule (`hands::raised_item`, the
+/// main hand's first), and protection and the relayed pose agree on it.
+#[test]
+fn a_shield_and_a_spyglass_claimed_together_resolve_to_one_pose_main_hand_first() {
+    let mut rig = Rig::new("spyglass-and-shield", 2);
+    let (guarder, looker) = (rig.joiners[0].slot, rig.joiners[1].slot);
+    for (slot, main, off) in [(guarder, shield(), spyglass()), (looker, spyglass(), shield())] {
+        let sp = &mut rig.hs.server.players[slot];
+        crate::spawn_protection::disarm(sp);
+        sp.inventory.set_slot(0, Some(main));
+        sp.hotbar_slot = 0;
+        sp.offhand = Some(off);
+        sp.shield_latch = true;
+        sp.sighting_latch = true;
+    }
+    rig.tick(RAISE_TICKS + 2);
+    use protocol::player_flags::{GUARDING, SIGHTING};
+    // Shield in the main hand: a guard, not a look.
+    let g = &rig.hs.server.players[guarder];
+    assert_eq!(pose(&rig, 0) & (SIGHTING | GUARDING), GUARDING, "the main hand's shield guards and is relayed as a guard only");
+    assert!(g.shield_guard().is_some() && g.shield_ticks > 0, "and it protects");
+    // Spyglass in the main hand: a look, and the off-hand shield does not guard.
+    let l = &rig.hs.server.players[looker];
+    assert_eq!(pose(&rig, 1) & (SIGHTING | GUARDING), SIGHTING, "the main hand's spyglass looks and is relayed as a look only");
+    assert!(l.shield_guard().is_none(), "the off-hand shield gives no protection under a look");
+    assert_eq!(l.shield_ticks, 0, "nor counts a raise");
 }
