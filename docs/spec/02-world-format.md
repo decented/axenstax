@@ -188,8 +188,8 @@ saved, so the one that fell before the save is lost with the session as any drop
 placed bit (which every player placement sets and the save keeps) picks them; world-gen torches carry none and are
 never queued, because some bundled village plans hang a torch in mid-air with nothing beside it (the town hall's four,
 a multi-room cabin's one; the legacy village house's wall torch, workshop floor torch and the brigand hideout's four
-palisade-corner torches do stand on blocks world-gen put beside them; world-gen places no lanterns). A brief's first
-cut (rescanning whole loaded sections) would have dropped those plan torches at the first load of any saved village
+palisade-corner torches do stand on blocks world-gen put beside them; world-gen places no lanterns). A first cut
+(rescanning whole loaded sections) would have dropped those plan torches at the first load of any saved village
 column. A pushed chunk is a joined client's, which runs no support pass. So a player's torch already floating in an
 old saved world falls at its next load; a world-gen one stays until something beside it changes. **Light on other machines** (review 12): a joined client relights a received change
 when the old or new block gives light (`lighting::relight_received_change`) and redraws the sections round it; a
