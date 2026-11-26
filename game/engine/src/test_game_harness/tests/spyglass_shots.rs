@@ -239,9 +239,15 @@ fn game_harness_spyglass_shots() {
     snap(&mut hg, "fp-looking", true);
     release_all(&mut hg);
 
-    // Third person: raised to the eye, from the side and from behind.
+    // Third person: raised to the eye, from the side, three-quarter front and behind,
+    // with the camera pulled in so the tube reads.
     hg.state.players[0].camera.mode = crate::camera::CameraMode::OrbitBehind;
-    for (name, offset) in [("tp-raised-side", std::f32::consts::FRAC_PI_2), ("tp-raised-rear", 0.0)] {
+    hg.state.graphics.third_person_distance = 0.55;
+    for (name, offset) in [
+        ("tp-raised-side", std::f32::consts::FRAC_PI_2),
+        ("tp-raised-three-quarter", 2.3),
+        ("tp-raised-rear", 0.0),
+    ] {
         stand(&mut hg, 0.0, 0.0);
         hg.state.players[0].camera.orbit_yaw_offset = offset;
         hg.state.input.mouse_button_pressed(MouseButton::Right);
@@ -257,12 +263,31 @@ fn game_harness_spyglass_shots() {
     hg.frames(3);
     snap(&mut hg, "tp-held-front", false);
     hg.state.players[0].camera.mode = crate::camera::CameraMode::FirstPerson;
+    // The render look still carries the front shot's half turn; first person draws from it too.
+    hg.state.players[0].camera.orbit_yaw_offset = 0.0;
+    hg.state.players[0].camera.orbit_pitch_offset = 0.0;
 
-    // One on the ground, looked down at.
+    hg.state.graphics.third_person_distance = 1.0;
+
+    // One on the ground, looked down at, out of the pickup magnet's reach
+    // (`entity::ITEM_MAGNET_RADIUS`, 2.4).
     hold(&mut hg, None, None);
-    stand(&mut hg, 0.0, -0.75);
-    crate::entity::spawn_item(&mut hg.state.ecs, glam::Vec3::new(fx, fy, fz - 1.6), spyglass().unwrap(), 0);
-    hg.frames(4);
+    stand(&mut hg, 0.0, -0.42);
+    crate::entity::spawn_item(&mut hg.state.ecs, glam::Vec3::new(fx, fy, fz - 3.4), spyglass().unwrap(), 0);
+    hg.frames(20);
+    let at = hg
+        .state
+        .ecs
+        .query::<(&crate::entity::Position, &crate::entity::ItemEntity)>()
+        .iter()
+        .find(|(_, (_, it))| crate::spyglass::is_spyglass(Some(&it.stack.item)))
+        .map(|(_, (p, _))| p.0)
+        .expect("the spyglass is still on the ground for the shot");
+    aim_at(&mut hg, at);
+    hg.frames(2);
+    // The drop must be in front of the view the shot is drawn from.
+    let clip = hg.state.renderer.player_gpu[0].last_view_proj * glam::Vec4::new(at.x, at.y, at.z, 1.0);
+    assert!(clip.w > 0.0 && (clip.x / clip.w).abs() < 1.0 && (clip.y / clip.w).abs() < 1.0, "the drop is in view, clip {clip:?}");
     snap(&mut hg, "dropped", false);
 
     // The inventory icon at the hotbar's size and large, and the recipe card.
