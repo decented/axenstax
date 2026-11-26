@@ -1517,13 +1517,22 @@ PROCEDURE propagate_light_decrease(
             IF neighbor_level != 0 AND neighbor_level < old_level:
                 set_light(neighbor, 0)
                 decrease_queue.push_back((neighbor, neighbor_level))
+                IF emission(block_at(neighbor)) > 0:
+                    surviving_emitters.push(neighbor)
             ELSE IF neighbor_level >= old_level:
                 increase_queue.push_back((neighbor, neighbor_level))
+    FOR EACH e in surviving_emitters:
+        set_light(e, emission(block_at(e)))
+        increase_queue.push_back((e, emission(block_at(e))))
     propagate_light_increase(increase_queue)
 ```
 
 The decrease pass zeroes out all light values that were dependent on the removed source,
-then the increase pass re-fills from surviving adjacent sources.
+then the increase pass re-fills from surviving adjacent sources. **A surviving emitter the
+decrease pass darkens is reseeded at its own emission before the refill** (as built in
+`lighting::remove_block_light_at`, the one removal routine every caller shares; fixed 0.2.42,
+review 3 item 8: a level-14 torch beside a removed level-15 lantern was darkened with the
+rest and, being dimmer, never refilled, so it stood unlit until a full relight).
 
 #### 6.2.3 Sky Light Special Case
 

@@ -19,6 +19,8 @@
 //! to its old contribution), collecting boundary positions of
 //! remaining lit cells along the way; then re-propagate from those
 //! boundary positions to fill in any cells that had alternative paths.
+//! A surviving emitter the darkening passed over (dimmer than the removed
+//! source) is reseeded at its own emission first, so it never stays dark.
 
 use crate::block::{BlockId, BlockRegistry};
 use crate::chunk::CHUNK_SIZE;
@@ -101,6 +103,10 @@ pub fn remove_block_light_at(
     // it's a refill candidate.
     let mut darken: VecDeque<((i32, i32, i32), u8)> = VecDeque::new();
     let mut refill: Vec<(i32, i32, i32)> = Vec::new();
+    // Review 3 item 8 — a surviving emitter the darkening passes over (a torch
+    // at 14 beside the lantern at 15 that went) was darkened with the rest: it
+    // is reseeded at its own emission before the refill, or it stays dark.
+    let mut emitters: Vec<(i32, i32, i32)> = Vec::new();
     world.set_block_light_at(pos.0, pos.1, pos.2, 0);
     darken.push_back((pos, prev_emission));
     while let Some(((x, y, z), level)) = darken.pop_front() {
@@ -116,13 +122,24 @@ pub fn remove_block_light_at(
             if nl != 0 && nl < level {
                 world.set_block_light_at(np.0, np.1, np.2, 0);
                 darken.push_back((np, nl));
+                if registry.light_emission(world.get_block(np.0, np.1, np.2)) > 0 {
+                    emitters.push(np);
+                }
             } else {
                 refill.push(np);
             }
         }
     }
-    // Refill phase: re-propagate from boundary positions still lit.
+    // Refill phase: the surviving emitters at their own emission, then the
+    // boundary positions still lit.
     let mut queue: VecDeque<((i32, i32, i32), u8)> = VecDeque::new();
+    for e in emitters {
+        let emission = registry.light_emission(world.get_block(e.0, e.1, e.2));
+        if world.block_light_at(e.0, e.1, e.2) < emission {
+            world.set_block_light_at(e.0, e.1, e.2, emission);
+            queue.push_back((e, emission));
+        }
+    }
     for r in refill {
         let level = world.block_light_at(r.0, r.1, r.2);
         if level > 0 {
@@ -638,6 +655,32 @@ mod tests {
         assert!(mid_after > 0, "middle cell should retain light from torch 2");
         // Second torch itself still at 14.
         assert_eq!(w.block_light_at(5, 5, 10), 14);
+    }
+
+    /// Review 3 item 8 — a level-15 lantern beside a level-14 torch in the dark:
+    /// remove the lantern and the torch is still 14, and every cell matches a
+    /// fresh relight of the torch alone.
+    #[test]
+    fn removing_a_brighter_emitter_keeps_the_torch_beside_it_lit() {
+        let (mut w, r) = fresh();
+        w.set_block(7, 7, 7, block::LANTERN);
+        w.set_block(8, 7, 7, block::TORCH);
+        propagate_block_light_from(&mut w, [(7, 7, 7), (8, 7, 7)], &r);
+        assert_eq!(w.block_light_at(7, 7, 7), 15);
+        assert_eq!(w.block_light_at(8, 7, 7), 14);
+        w.set_block(7, 7, 7, block::AIR);
+        remove_block_light_at(&mut w, (7, 7, 7), 15, &r);
+        assert_eq!(w.block_light_at(8, 7, 7), 14, "the surviving torch is lit");
+        let (mut fresh_w, _) = fresh();
+        fresh_w.set_block(8, 7, 7, block::TORCH);
+        propagate_block_light_from(&mut fresh_w, [(8, 7, 7)], &r);
+        for x in 0..16 {
+            for y in 0..16 {
+                for z in 0..16 {
+                    assert_eq!(w.block_light_at(x, y, z), fresh_w.block_light_at(x, y, z), "({x}, {y}, {z})");
+                }
+            }
+        }
     }
 
     #[test]
