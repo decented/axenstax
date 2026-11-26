@@ -281,6 +281,12 @@ impl Chunk {
         )
     }
 
+    /// Whether any cell holds a block `pred` accepts (a full scan of the 4096
+    /// cells; for a load-time check, not a per-tick one).
+    pub(crate) fn holds_any(&self, pred: impl Fn(BlockId) -> bool) -> bool {
+        self.blocks.iter().any(|&b| pred(b))
+    }
+
     /// Check if chunk is entirely air. O(1): reads the maintained
     /// [`Chunk::non_air_count`], never scans the cells.
     #[inline]

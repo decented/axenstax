@@ -593,9 +593,10 @@ pub struct World {
     /// (torches, lanterns) that lost what held them. Every change passes
     /// `set_block`, so a break, a blast, a piston, a fall, a fire and a joiner's
     /// edit all land here alike. A joined client discards it (its server drops
-    /// the blocks); a save restore and `insert_chunk` never fill it, so blocks
-    /// already floating in a loaded world stay until a neighbour changes.
-    /// Runtime-only.
+    /// the blocks); `insert_chunk` never fills it, but a save restore marks each
+    /// loaded section holding a torch or lantern for a rescan
+    /// (`note_loaded_for_support`), so a collapse a save cut resumes after the
+    /// load. Runtime-only.
     support_log: std::collections::BTreeSet<(i32, i32, i32)>,
     /// pt1124 review 9 — the sections (chunk coordinates) whose changes did not
     /// fit in `support_log`: a later support pass rescans each whole section
@@ -1411,8 +1412,22 @@ impl World {
         self.support_sections.len()
     }
 
+    /// pt1124 review 3 items 6 and 7 — a section brought in from a save (or
+    /// back from the evicted store) that holds a torch or a lantern is marked
+    /// for the support rescan, as an overflowed section is. The support log is
+    /// runtime-only and a save does not settle it, so a collapse cut by a save
+    /// resumes after the load: each link still hanging falls then, as one item.
+    /// A generated section is never marked (world-gen torches stand on what
+    /// world-gen put beside them, and a never-saved chunk is not loaded).
+    pub fn note_loaded_for_support(&mut self, key: (i32, i32, i32)) {
+        if self.chunks.get(&key).is_some_and(|c| c.holds_any(block::may_attach)) {
+            self.support_sections.insert(key);
+        }
+    }
+
     /// pt1124 review 10 — whether any support work is waiting (cells or
-    /// overflowed sections): the save boundary settles it first.
+    /// overflowed sections).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn support_pending(&self) -> bool {
         !self.support_log.is_empty() || !self.support_sections.is_empty()
     }
@@ -1514,6 +1529,9 @@ impl World {
             if let Some(mut chunk) = self.evicted.remove(&(cx, cy, cz)) {
                 chunk.mesh_dirty = true;
                 self.chunks.insert((cx, cy, cz), chunk);
+                // A support check its neighbours could not finish while it was
+                // out (a Keep load returns some columns straight to the store).
+                self.note_loaded_for_support((cx, cy, cz));
                 any = true;
             }
         }

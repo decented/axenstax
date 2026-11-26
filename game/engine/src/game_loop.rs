@@ -6709,8 +6709,6 @@ impl super::GameState {
             self.autosave_counter = 0;
             #[cfg(not(target_arch = "wasm32"))]
             if let Err(e) = self.preflight_personal_local() { log::error!("Personal autosave failed: {e}"); return; }
-            // pt1124 review 10 — a support collapse in progress finishes first.
-            self.settle_support();
             let quest_world = match crate::quest_npcs::capture(self.world.quest_scope, &self.ecs) {
                 Ok(saved) => saved,
                 Err(error) => { log::error!("Quest autosave failed: {error}"); return; }

@@ -757,6 +757,13 @@ pub fn can_ask_bedrock_break(wasm: bool, strict: bool) -> bool {
     !wasm && !strict
 }
 
+/// The blocks that can need a support (`BlockRegistry::attachment` is `Some`
+/// for them at some meta): the torch and the lantern. A loaded section holding
+/// one is rescanned by the support pass (`World::note_loaded_for_support`).
+pub fn may_attach(id: BlockId) -> bool {
+    id == TORCH || id == LANTERN
+}
+
 /// What an attached block must have next to it to stay (`BlockRegistry::attachment`,
 /// run by `support.rs`). Lose it and the block drops as its item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4781,6 +4788,11 @@ mod tests {
         assert_eq!(reg.attachment(LANTERN, hanging), Some(Attachment::Above));
         let attached: Vec<BlockId> = (0..reg.len() as BlockId).filter(|&id| reg.attachment(id, 0).is_some()).collect();
         assert_eq!(attached, vec![TORCH, LANTERN], "the paper lanterns are solid cubes and stand alone");
+        // `may_attach` names exactly the blocks with an attachment at any meta.
+        for id in 0..reg.len() as BlockId {
+            let any = (0..=u8::MAX).any(|m| reg.attachment(id, m).is_some());
+            assert_eq!(may_attach(id), any, "{id}");
+        }
     }
 
     #[test]

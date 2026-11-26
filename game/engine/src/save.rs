@@ -3409,6 +3409,8 @@ fn load_chunk_dir(chunks_dir: &std::path::Path, world: &mut World, at_load: AtLo
     for ((cx, cy, cz), chunk) in good {
         world.insert_chunk(cx, cy, cz, chunk);
         world.note_disk_chunk((cx, cy, cz));
+        // pt1124 review 3 items 6 and 7 — a support collapse a save cut resumes.
+        world.note_loaded_for_support((cx, cy, cz));
     }
     Ok(loaded)
 }

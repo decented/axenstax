@@ -459,8 +459,6 @@ impl crate::GameState {
         crate::handover::live::authority::open_guard(&crate::save::world_dir(&self.world_name)).map_err(|r| r.0.to_string())?;
         #[cfg(not(target_arch = "wasm32"))]
         self.preflight_personal_local()?;
-        // pt1124 review 10 — a support collapse in progress finishes first.
-        self.settle_support();
         let quest_world = crate::quest_npcs::capture(self.world.quest_scope, &self.ecs)?;
         let clock = self.clock_to_save();
         let result = crate::save::tamed_mobs_to_saved(&self.ecs).and_then(|pets| {
@@ -501,29 +499,6 @@ impl crate::GameState {
         .inspect_err(|e| log::error!("Save failed: {e}"));
         self.session_saves.note_save(result.is_ok());
         result
-    }
-
-    /// pt1124 review 10 — finish any support collapse (a lantern chain falls one
-    /// link a pass, carried by a runtime-only log) before the world is written,
-    /// so a save between two passes never strands the rest of the chain:
-    /// `support::settle` runs the passes, the drops land as items here, the
-    /// sections round them relight, and a lending host's joiners are told.
-    /// A joined client's world is its server's (it saves nothing).
-    pub(crate) fn settle_support(&mut self) {
-        if self.joined() || !self.world.support_pending() {
-            return;
-        }
-        let dropped = crate::support::settle(&mut self.world, &self.registry);
-        if dropped.is_empty() {
-            return;
-        }
-        crate::support::spawn_drops(&mut self.ecs, &dropped);
-        for d in &dropped {
-            self.rebuild_chunks_for_lighting(d.cell.0, d.cell.1, d.cell.2);
-        }
-        if let Some(hs) = self.hosted_server.as_mut() {
-            hs.queue_host_broadcast(dropped.iter().map(crate::support::Dropped::air_change));
-        }
     }
 
     /// The age of the crash-recovery autosave a "Quit without saving" would

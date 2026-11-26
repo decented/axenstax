@@ -322,7 +322,11 @@ fn unpack_world_inner(
                 let cy: i32 = parts[1].parse().map_err(|_| format!("{path} isn't a chunk file name"))?;
                 let cz: i32 = parts[2].parse().map_err(|_| format!("{path} isn't a chunk file name"))?;
                 match crate::chunk::Chunk::from_bytes(&data) {
-                    Some(chunk) => world.insert_chunk(cx, cy, cz, chunk),
+                    Some(chunk) => {
+                        world.insert_chunk(cx, cy, cz, chunk);
+                        // pt1124 review 3 items 6 and 7 — as a folder load does.
+                        world.note_loaded_for_support((cx, cy, cz));
+                    }
                     None if strict_chunks => return Err(format!("{path} is damaged")),
                     None => log::warn!("skipping damaged chunk {path} in archive"),
                 }

@@ -119,13 +119,26 @@ fn a_floating_torch_in_a_loaded_world_stays_until_something_beside_it_changes() 
     assert_eq!(host.server.registry.mine_drop(TORCH), ItemStack::new_block(TORCH, 1));
 }
 
-/// pt1124 review 10 — a save between two passes of a lantern chain's collapse
-/// settles it first: every link falls exactly once (one item each), the saved
-/// world holds none of them, and the loaded world has nothing left to drop.
+/// Lantern items lying in a server's ECS.
+fn lantern_items(s: &crate::server::GameServer) -> u32 {
+    s.ecs
+        .query::<&crate::entity::ItemEntity>()
+        .iter()
+        .filter(|(_, ie)| ie.stack.item == Item::Block(LANTERN))
+        .map(|(_, ie)| u32::from(ie.stack.count))
+        .sum()
+}
+
+/// pt1124 review 3 items 6 and 7 — a save between two passes of a lantern
+/// chain's collapse neither strands it nor eats its items: the save keeps the
+/// links still hanging (no settlement), the load marks their section for the
+/// support rescan, and the ticks after it drop each remaining link once. Three
+/// links, three lantern items in all (the one that fell before the save, the
+/// two after the load; items on the ground are not saved).
 #[test]
-fn a_save_mid_collapse_finishes_the_chain_once_and_it_loads_fallen() {
-    let _g = crate::save::WorldsRootGuard::new("support-settle");
-    let name = "support-settle".to_string();
+fn a_save_mid_collapse_keeps_the_hanging_links_and_they_fall_after_the_load() {
+    let _g = crate::save::WorldsRootGuard::new("support-resume");
+    let name = "support-resume".to_string();
     let mut s = crate::server::GameServer::new(1, name.clone(), 31);
     for x in -4..=4 {
         for z in -4..=4 {
@@ -145,26 +158,50 @@ fn a_save_mid_collapse_finishes_the_chain_once_and_it_loads_fallen() {
     crate::support::spawn_drops(&mut s.ecs, &first);
     assert_eq!(first.len(), 1, "one link a pass");
     assert!(s.world.support_pending(), "the rest waits on the runtime log");
-    s.settle_support();
-    let lanterns: u32 = s
-        .ecs
-        .query::<&crate::entity::ItemEntity>()
-        .iter()
-        .filter(|(_, ie)| ie.stack.item == Item::Block(LANTERN))
-        .map(|(_, ie)| u32::from(ie.stack.count))
-        .sum();
-    assert_eq!(lanterns, 3, "each link dropped exactly once");
-    for y in 197..=199 {
-        assert_eq!(s.world.get_block(0, y, 0), AIR);
-    }
-    assert!(!s.world.support_pending());
+    let before_save = lantern_items(&s);
+    assert_eq!(before_save, 1);
     s.try_save().unwrap();
+    assert_eq!(lantern_items(&s), before_save, "the save drops nothing (no settlement)");
+    for y in 197..=198 {
+        assert_eq!(s.world.get_block(0, y, 0), LANTERN, "still hanging at {y} when saved");
+    }
     drop(s);
+
     let mut loaded = crate::server::GameServer::new(1, name, 31);
     loaded.initial_load().unwrap();
     assert_eq!(loaded.world.get_block(2, 198, 0), STONE, "the chain's chunk loaded");
-    for y in 197..=199 {
-        assert_eq!(loaded.world.get_block(0, y, 0), AIR, "no link left hanging at {y}");
+    for y in 197..=198 {
+        assert_eq!(loaded.world.get_block(0, y, 0), LANTERN, "the save kept the link at {y}");
     }
-    assert!(crate::support::tick_support(&mut loaded.world, &loaded.registry).is_empty(), "nothing falls twice");
+    assert!(loaded.world.support_pending(), "the load marked the section for the rescan");
+    for _ in 0..40 {
+        loaded.tick();
+    }
+    for y in 197..=199 {
+        assert_eq!(loaded.world.get_block(0, y, 0), AIR, "no link left floating at {y}");
+    }
+    let after_load = lantern_items(&loaded);
+    assert_eq!(after_load, 2, "each remaining link fell once after the load");
+    assert_eq!(before_save + after_load, 3, "three links, three lantern items in all");
+    assert!(!loaded.world.support_pending());
+    assert_eq!(loaded.world.get_block(2, 198, 0), STONE, "the control block stands");
+}
+
+/// Only a section a load brings in that holds a torch or a lantern is marked:
+/// inserting a section (world-gen, a pushed chunk) marks nothing, so a
+/// generated torch is never rescanned.
+#[test]
+fn only_loaded_sections_holding_a_torch_or_a_lantern_are_marked() {
+    let mut w = crate::world::World::new();
+    let mut torch = crate::chunk::Chunk::new();
+    torch.set(1, 1, 1, TORCH);
+    let mut plain = crate::chunk::Chunk::new();
+    plain.set(1, 1, 1, STONE);
+    w.insert_chunk(0, 4, 0, torch);
+    w.insert_chunk(1, 4, 0, plain);
+    assert!(!w.support_pending(), "inserting (world-gen, a push) marks nothing");
+    w.note_loaded_for_support((1, 4, 0));
+    assert!(!w.support_pending(), "a loaded section with no torch or lantern is not marked");
+    w.note_loaded_for_support((0, 4, 0));
+    assert_eq!(w.support_sections_len(), 1, "a loaded torch section is");
 }

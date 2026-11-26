@@ -25,12 +25,18 @@
 //!   A bulk edit past the log's bound marks whole sections instead, which a
 //!   later pass rescans ([`MAX_SECTIONS_PER_PASS`] a pass), so no change is
 //!   lost.
-//! * **Saving.** A save settles the work first ([`settle`]): the passes run
-//!   until nothing waits, so a collapse cut by a save is finished before the
-//!   world is written, never stranded half-way (the log is runtime-only).
-//! * **Old worlds.** A save restore and a pushed chunk never fill the log, so a
-//!   block already floating in a loaded world stays until something next to it
-//!   changes.
+//! * **Saving and loading** (review 3 items 6 and 7). The log is runtime-only
+//!   and a save neither keeps nor settles it: Save and Quit leaves a chain's
+//!   hanging links where they hang. A load instead marks every section it
+//!   brings in from a save (and every section back from the evicted store)
+//!   that holds a torch or a lantern for the same rescan an overflowed
+//!   section gets (`World::note_loaded_for_support`), so a collapse a save cut
+//!   resumes after the load, each link falling once as one item. A generated
+//!   section is never marked, and a pushed chunk (a joined client's) is not
+//!   the authority's world.
+//! * **Old worlds.** So a block already floating in a saved world falls at the
+//!   next load; one in a generated, never-saved section stays until something
+//!   next to it changes.
 
 use crate::block::{self, Attachment, BlockId, BlockRegistry};
 use crate::item::ItemStack;
@@ -45,6 +51,7 @@ pub const MAX_SECTIONS_PER_PASS: usize = 4;
 
 /// Most passes [`settle`] runs: a chain falls one link a pass, and no chain is
 /// taller than the world.
+#[cfg(test)]
 pub const MAX_SETTLE_PASSES: usize = 1024;
 
 /// The state and aux bits that mark a torch's meta as recording its support
@@ -181,11 +188,11 @@ pub fn tick_support(world: &mut World, registry: &BlockRegistry) -> Vec<Dropped>
     dropped
 }
 
-/// pt1124 review 10 — run support passes until nothing waits (at most
-/// [`MAX_SETTLE_PASSES`]) and return everything that dropped, in pass order.
-/// The save boundary calls it, so a collapse in progress (one link a pass,
-/// carried by the runtime-only log) finishes before the world is written: a
-/// loaded world never holds half a fallen chain, and nothing falls twice.
+/// Run support passes until nothing waits (at most [`MAX_SETTLE_PASSES`]) and
+/// return everything that dropped, in pass order. Tests only: the game runs
+/// one pass a support tick and never settles at a save (review 3 items 6 and 7;
+/// a save between two passes keeps the hanging links, and the load resumes them).
+#[cfg(test)]
 pub fn settle(world: &mut World, registry: &BlockRegistry) -> Vec<Dropped> {
     let mut all = Vec::new();
     for _ in 0..MAX_SETTLE_PASSES {

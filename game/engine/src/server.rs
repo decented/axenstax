@@ -3593,20 +3593,6 @@ impl GameServer {
     /// through the client's `save::save_world_wasm` (IndexedDB upload). Once
     /// single-player routes through HostedServer on WASM we'll add a WASM
     /// branch here.
-    /// pt1124 review 10 — finish any support collapse in this server's own
-    /// world before it is written (`support::settle`): the drops land as items
-    /// and every client is told, as a tick's pass does. The dedicated server
-    /// calls it before each save; a lent world is settled by its host client.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn settle_support(&mut self) {
-        if self.lent || !self.world.support_pending() {
-            return;
-        }
-        let dropped = crate::support::settle(&mut self.world, &self.registry);
-        crate::support::spawn_drops(&mut self.ecs, &dropped);
-        self.pending_block_changes.extend(dropped.iter().map(crate::support::Dropped::air_change));
-    }
-
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save(&self) {
         match self.try_save() {
