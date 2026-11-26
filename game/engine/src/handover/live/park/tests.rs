@@ -87,14 +87,16 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     // layouts in `park.rs`, the version a little-endian u32, the generation 7 a
     // little-endian u32, participant and runtime the generator x coordinate); it
     // first reproduced the three protocol-101 values exactly, and the 102 fence
-    // it gives is the code's.
+    // it gives is the code's. Protocol 103 (0.2.43, the spyglass): recomputed by
+    // the same independent script over the same layouts; it first reproduced the
+    // three protocol-102 values exactly, then gave the three 103 values below.
     assert_eq!(
         hex::encode(authority_digest(&authority)),
         "30a50bb9c25270bddc7157141c13c3fbd7efc722c1cf66b8b043feee033b62c1"
     );
     assert_eq!(
         hex::encode(fence.digest(&authority).unwrap()),
-        "0fc9cebacda3f21ef68afc5c07c426830633769d988b73ce064581de93c83918"
+        "9f2300592600b2e502f703a55f35424c22c7a3d0d6869a86f1ebd934bf4d506a"
     );
     assert_eq!(
         hex::encode(attachment.digest()),
@@ -102,7 +104,7 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     );
     assert_eq!(
         hex::encode(fence.message(&authority, attachment).unwrap()),
-        "410b48266ace637bf99aaeab40d0be53c5ba2128c5d613dc760b830ccb6f5e80"
+        "762431fac3e4ed60d39c555470e4984c6b5b52538f1a0d91a6354b4666cbaac6"
     );
     let imported = Attachment {
         context: GameplayContext::Imported(crate::personal_value::PersonalContext {
@@ -119,7 +121,7 @@ fn ordered_park_canonical_domains_match_independent_fixed_layout_goldens() {
     );
     assert_eq!(
         hex::encode(fence.message(&authority, imported).unwrap()),
-        "7ce3a5ed5088e2999125696b8071c68e18dc5101ebfaefb3c1480f04e1413b03"
+        "be243c7eba1df6d936c1194e88c7500de17994b695d855d3f3bd01ec9097c7a0"
     );
 }
 
