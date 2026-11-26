@@ -349,7 +349,9 @@ impl Player {
         if !self.in_water
             && world.is_climbable(feet_block_x, feet_y, feet_block_z)
         {
-            let speed = WALK_SPEED;
+            // pt1124 review 4 item 6 — a spyglass look steps off at sneak speed; the
+            // climb below is the ladder's own.
+            let speed = if input.sighting { SNEAK_SPEED } else { WALK_SPEED };
             let mut move_dir = Vec3::ZERO;
             move_dir += camera.horizontal_forward() * input.move_forward;
             move_dir += camera.right() * input.move_right;
@@ -367,7 +369,8 @@ impl Player {
 
         if self.in_water {
             // Swimming: free-form movement like flying but slower, with water drag
-            let speed = if input.sprint { 4.0 } else { 2.5 }; // swim sprint!
+            // swim sprint! (never while looking through a spyglass: review 4 item 6)
+            let speed = if input.sprint && !input.sighting { 4.0 } else { 2.5 };
             let mut move_dir = Vec3::ZERO;
             let fwd = camera.horizontal_forward();
             let right = camera.right();
@@ -522,6 +525,18 @@ impl Player {
     }
 
     fn tick_flying(&mut self, input: &PlayerIntent, camera: &Camera) {
+        if input.sighting {
+            // pt1124 review 4 item 6 — a spyglass look in flight: across at sneak
+            // speed with no sprint; rising and sinking keep flight speed.
+            let mut across = camera.horizontal_forward() * input.move_forward + camera.right() * input.move_right;
+            across.y = 0.0;
+            if across.length_squared() > 0.0 {
+                across = across.normalize();
+            }
+            let up = f32::from(u8::from(input.jump_held)) - f32::from(u8::from(input.sneak));
+            self.velocity = Vec3::new(across.x * SNEAK_SPEED, up * FLY_SPEED, across.z * SNEAK_SPEED) / 20.0;
+            return;
+        }
         let speed = if input.sprint {
             FLY_SPRINT_SPEED
         } else {
@@ -1517,6 +1532,93 @@ mod tests {
         // The server builds the same intent from the joiner's input.
         let pkt = crate::protocol::InputPacket { spyglass_raised: true, ..Default::default() };
         assert!(PlayerIntent::from_input_packet(&pkt).sighting);
+    }
+
+    fn horizontal(v: Vec3) -> f32 {
+        Vec3::new(v.x, 0.0, v.z).length()
+    }
+
+    /// pt1124 review 4 item 6 — on a ladder a look walks off at sneak speed, and the
+    /// climb (jump up, sneak down) is unchanged.
+    #[test]
+    fn looking_through_a_spyglass_on_a_ladder_walks_at_sneak_speed_and_still_climbs() {
+        let mut world = World::new();
+        let registry = BlockRegistry::new();
+        for x in -3..=3 {
+            for z in -3..=3 {
+                world.set_block(x, 63, z, block::STONE);
+            }
+        }
+        for y in 64..=70 {
+            world.set_block(0, y, 0, block::LADDER);
+        }
+        let cam = Camera::new(Vec3::new(0.5, 66.0, 0.5), 1.0);
+        let one = |intent: PlayerIntent| {
+            let mut p = Player::new(Vec3::new(0.5, 66.0, 0.5));
+            p.tick(&intent, &cam, &world, &registry, PlayMode::Survival);
+            p.velocity
+        };
+        let walk = one(PlayerIntent { move_right: 1.0, jump_held: true, ..Default::default() });
+        let look = one(PlayerIntent { move_right: 1.0, jump_held: true, sighting: true, sprint: true, ..Default::default() });
+        assert!((horizontal(walk) - WALK_SPEED / 20.0).abs() < 1e-4, "the ladder walks at walk speed ({walk})");
+        assert!((horizontal(look) - SNEAK_SPEED / 20.0).abs() < 1e-4, "a look on it at sneak speed ({look})");
+        assert_eq!(look.y, ladder_climb_vy(true, false), "and the climb is the ladder's own");
+        let down = one(PlayerIntent { sneak: true, sighting: true, ..Default::default() });
+        assert_eq!(down.y, ladder_climb_vy(false, true), "sneak still climbs down");
+    }
+
+    /// pt1124 review 4 item 6 — in water a look never swim-sprints, and swimming up
+    /// and down is unchanged (the plain swim's own vector).
+    #[test]
+    fn looking_through_a_spyglass_in_water_does_not_swim_sprint() {
+        let mut world = World::new();
+        let registry = BlockRegistry::new();
+        for x in -12..=12 {
+            for z in -12..=12 {
+                world.set_block(x, 59, z, block::STONE);
+                for y in 60..=70 {
+                    world.set_block(x, y, z, block::WATER);
+                }
+            }
+        }
+        let cam = Camera::new(Vec3::new(0.5, 65.0, 0.5), 1.0);
+        let run = |intent: PlayerIntent| {
+            let mut p = Player::new(Vec3::new(0.5, 65.0, 0.5));
+            for _ in 0..20 {
+                p.tick(&intent, &cam, &world, &registry, PlayMode::Survival);
+            }
+            assert!(p.in_water);
+            p.velocity
+        };
+        let swim = run(PlayerIntent { move_right: 1.0, jump_held: true, ..Default::default() });
+        let sprint = run(PlayerIntent { move_right: 1.0, jump_held: true, sprint: true, ..Default::default() });
+        let look = run(PlayerIntent { move_right: 1.0, jump_held: true, sprint: true, sighting: true, ..Default::default() });
+        assert!(horizontal(sprint) > horizontal(swim) * 1.2, "a swim sprint is faster ({sprint} vs {swim})");
+        assert!((look - swim).length() < 1e-5, "a look swims as a plain swim, up included ({look} vs {swim})");
+    }
+
+    /// pt1124 review 4 item 6 — in Creative flight a look moves across at sneak speed
+    /// with no sprint, and rises and sinks at flight speed.
+    #[test]
+    fn looking_through_a_spyglass_in_flight_moves_across_at_sneak_speed_and_keeps_up_and_down() {
+        let world = World::new();
+        let registry = BlockRegistry::new();
+        let cam = Camera::new(Vec3::new(0.5, 90.0, 0.5), 1.0);
+        let one = |intent: PlayerIntent| {
+            let mut p = Player::new(Vec3::new(0.5, 90.0, 0.5));
+            p.flying = true;
+            p.tick(&intent, &cam, &world, &registry, PlayMode::Creative);
+            p.velocity
+        };
+        let fly = one(PlayerIntent { move_forward: 1.0, sprint: true, ..Default::default() });
+        assert!((horizontal(fly) - FLY_SPRINT_SPEED / 20.0).abs() < 1e-3, "sprint flight ({fly})");
+        let look = one(PlayerIntent { move_forward: 1.0, sprint: true, sighting: true, ..Default::default() });
+        assert!((horizontal(look) - SNEAK_SPEED / 20.0).abs() < 1e-4, "a look flies across at sneak speed ({look})");
+        let up = one(PlayerIntent { move_forward: 1.0, jump_held: true, sprint: true, sighting: true, ..Default::default() });
+        assert!((horizontal(up) - SNEAK_SPEED / 20.0).abs() < 1e-4, "still sneak speed across while rising ({up})");
+        assert!((up.y - FLY_SPEED / 20.0).abs() < 1e-4, "and rises at flight speed ({up})");
+        let down = one(PlayerIntent { sneak: true, sighting: true, ..Default::default() });
+        assert!((down.y + FLY_SPEED / 20.0).abs() < 1e-4, "and sinks at flight speed ({down})");
     }
 
     /// A guard is not a crouch: no ledge protection, so a body walks off an edge.
