@@ -529,6 +529,8 @@ pub(super) static BOW_NAMES: &[(&[&str], (ToolType, ToolMaterial))] = &[
     (&["slingshot", "sling"], (ToolType::Slingshot, ToolMaterial::Wood)),
     // Off-hand release (slice 5) — the Shield.
     (&["shield"], (ToolType::Shield, ToolMaterial::Wood)),
+    // pt1124 (0.2.43) — the Spyglass.
+    (&["spyglass", "telescope"], (ToolType::Spyglass, ToolMaterial::Wood)),
     (&["eraser", "rubber_eraser"], (ToolType::Eraser, ToolMaterial::Wood)),
     // Blueprint feature — Drafting Stamp.
     (&["drafting_stamp", "stamp"], (ToolType::DraftingStamp, ToolMaterial::Wood)),

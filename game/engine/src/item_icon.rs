@@ -312,7 +312,8 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let types: Vec<ToolType> = all_tool_types().into_iter().filter(|t| *t != ToolType::Shield).collect();
-        assert_eq!(types.len(), 12, "the twelve non-shield tools");
+        // 13 as of pt1124 (0.2.43): + the Spyglass.
+        assert_eq!(types.len(), 13, "the thirteen non-shield tools");
         for (i, a) in types.iter().enumerate() {
             assert!(shape(*a).len() >= 3, "{a:?} is more than a bar");
             for b in &types[i + 1..] {

@@ -128,6 +128,9 @@ pub enum ItemLook {
     /// An armour piece's small model ([`crate::armour_model::drop_mesh`] on the
     /// ground, `held_mesh` in the hand): boxes in flat colours of the material.
     Armour { slot: ArmourSlot, material: ArmourMaterial },
+    /// pt1124 (0.2.43) — the Spyglass's small model (`held_tool_model`), lying on
+    /// its side on the ground; the hand draws the same model upright.
+    Spyglass,
 }
 
 /// A Plan as an item: a small parchment scroll cube, the Blueprint Paper top for
@@ -205,6 +208,8 @@ pub fn item_look(item: &Item, registry: &BlockRegistry) -> ItemLook {
     match item {
         Item::Block(id) => block_look(*id, registry),
         Item::Material(mid) => ItemLook::cube(material_texture(*mid)),
+        // pt1124 (0.2.43) — a dropped spyglass is its own model, not a tier cube.
+        Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Spyglass => ItemLook::Spyglass,
         Item::Tool(t) => ItemLook::cube(tool_texture(t.material)),
         // Spec 24 — a ground-dropped Plan: a small parchment scroll cube, the
         // Blueprint Paper top for the parchment faces and the plaque side for
@@ -277,6 +282,13 @@ pub fn held_item_mesh(held: HeldItem, registry: &BlockRegistry, side: HandSide) 
             ItemLook::Lantern => crate::lantern::held_mesh(registry),
             // `block_look` never says armour (a block is never a piece); drawn anyway.
             ItemLook::Armour { slot, material } => crate::armour_model::held_mesh(slot, material),
+            // `block_look` never says a spyglass (it is a tool); drawn anyway.
+            ItemLook::Spyglass => crate::held_tool_model::tool_model_with(
+                crate::crafting::ToolType::Spyglass,
+                crate::crafting::ToolMaterial::Wood,
+                side,
+                false,
+            ),
             // Centred on the origin: how it sits in the hand is `hold_pose`'s
             // (`HoldPose::Sprite` in third person, `viewmodel` in first).
             ItemLook::Sprite { layer } => sprite_triangles(layer, HELD_SPRITE_WIDTH),
@@ -1009,7 +1021,8 @@ mod tests {
         use crate::protocol::item_kind;
         let reg = test_registry();
         let slab = pos_set(&held_item_mesh(ItemRef::Tool(2).into(), &reg, HandSide::Right));
-        for byte in [13u8, 99, 200, 254] {
+        // 13 is the Spyglass since pt1124 (0.2.43).
+        for byte in [14u8, 99, 200, 254] {
             let held = HeldItem::from_wire(HeldWire { kind: item_kind::TOOL, id: 2, tool: byte });
             assert_eq!(held.tool, None, "byte {byte}");
             assert_eq!(pos_set(&held_item_mesh(held, &reg, HandSide::Right)), slab, "byte {byte} is the slab");
@@ -1127,6 +1140,24 @@ mod armour_held_tests {
         }
         // Not the legacy pair either: that is the possession claim, which names no armour.
         assert_eq!(crate::inventory::item_to_ref(&armour(ArmourSlot::Boots, ArmourMaterial::Iron)), ItemRef::Empty);
+    }
+
+    /// pt1124 (0.2.43) — a dropped spyglass is its own model; any other tool keeps its cube.
+    #[test]
+    fn a_dropped_spyglass_is_its_own_model_not_a_tier_cube() {
+        let reg = BlockRegistry::new();
+        let spy = Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Spyglass, ToolMaterial::Wood));
+        assert_eq!(item_look(&spy, &reg), ItemLook::Spyglass);
+        let pick = Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, ToolMaterial::Wood));
+        assert!(matches!(item_look(&pick, &reg), ItemLook::Cube { .. }));
+        // The ground model is the hand's model, laid down.
+        let mut ecs = hecs::World::new();
+        crate::entity::spawn_item(&mut ecs, glam::Vec3::new(5.0, 10.0, 5.0), crate::item::ItemStack::new_tool(crate::crafting::Tool::new(crate::crafting::ToolType::Spyglass, ToolMaterial::Wood)), 0);
+        let v = crate::entity_model::build_item_entity_vertices(&ecs, &reg, 0, glam::Vec3::new(50.0, 10.0, 50.0), |_| (1.0, 0.0));
+        let hand = crate::held_tool_model::tool_model_with(crate::crafting::ToolType::Spyglass, ToolMaterial::Wood, crate::viewmodel::HandSide::Right, false);
+        assert_eq!(v.len(), hand.len());
+        let (lo, hi) = v.iter().fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[1]), a.1.max(v.position[1])));
+        assert!(lo > 10.0 && hi - lo < 0.2, "it lies on its side above the ground ({lo}..{hi})");
     }
 
     #[test]

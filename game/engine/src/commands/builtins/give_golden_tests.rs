@@ -386,6 +386,8 @@ const GOLDEN: &[(&str, Expect)] = &[
     ("slingshot", Expect::Tool(ToolType::Slingshot, ToolMaterial::Wood)),
     ("sling", Expect::Tool(ToolType::Slingshot, ToolMaterial::Wood)),
     ("shield", Expect::Tool(ToolType::Shield, ToolMaterial::Wood)),
+    ("spyglass", Expect::Tool(ToolType::Spyglass, ToolMaterial::Wood)),
+    ("telescope", Expect::Tool(ToolType::Spyglass, ToolMaterial::Wood)),
     ("eraser", Expect::Tool(ToolType::Eraser, ToolMaterial::Wood)),
     ("rubber_eraser", Expect::Tool(ToolType::Eraser, ToolMaterial::Wood)),
     ("drafting_stamp", Expect::Tool(ToolType::DraftingStamp, ToolMaterial::Wood)),

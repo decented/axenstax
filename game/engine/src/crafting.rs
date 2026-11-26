@@ -75,12 +75,23 @@ pub enum ToolType {
     /// held right-click, it blocks an attack from the front (`shield.rs`).
     /// APPEND ONLY: saves store the variant index (wire tool byte 12).
     Shield,
+    /// pt1124 (0.2.43) — the Spyglass. Single-tier (`ToolMaterial::Wood` by
+    /// convention). Held in either hand, a held right-click (or the Zoom key)
+    /// looks through it: the view zooms behind a round lens and the body walks
+    /// at sneak speed (`spyglass.rs`). It never wears ([`Tool::use_tool`]).
+    /// APPEND ONLY: saves store the variant index (wire tool byte 13).
+    Spyglass,
 }
 
 /// Off-hand release (slice 5) — Shield durability. 336 uses, Minecraft's
 /// number; one durability per block plus one per whole point of damage blocked
 /// (`shield::wear_for`).
 pub const SHIELD_DURABILITY: u16 = 336;
+
+/// pt1124 (0.2.43) — the Spyglass's durability. It never wears
+/// ([`Tool::use_tool`] leaves it alone, on every copy), so this only gives it
+/// a value to serialise like any tool, and no durability bar ever shows.
+pub const SPYGLASS_DURABILITY: u16 = 1;
 
 /// Single-tier durability for `FlintAndSteel`. Mirrors Minecraft's 65
 /// uses; lives separate from `max_durability` so the per-tier ladder
@@ -133,6 +144,7 @@ impl Tool {
             ToolType::Eraser => ERASER_DURABILITY,
             ToolType::DraftingStamp => DRAFTING_STAMP_DURABILITY,
             ToolType::Shield => SHIELD_DURABILITY,
+            ToolType::Spyglass => SPYGLASS_DURABILITY,
             _ => max_durability(material),
         };
         Self { tool_type, material, durability }
@@ -154,11 +166,18 @@ impl Tool {
             ToolType::Eraser => ERASER_DURABILITY,
             ToolType::DraftingStamp => DRAFTING_STAMP_DURABILITY,
             ToolType::Shield => SHIELD_DURABILITY,
+            ToolType::Spyglass => SPYGLASS_DURABILITY,
             _ => max_durability(self.material),
         }
     }
 
+    /// Wear the tool by one use. A Spyglass never wears (mining or hitting
+    /// with one costs it nothing); every copy (client, server, the joiner
+    /// shadow) wears through here or `inventory::use_tool_cell`, which calls it.
     pub fn use_tool(&mut self) -> bool {
+        if self.tool_type == ToolType::Spyglass {
+            return false;
+        }
         if self.durability > 0 {
             self.durability -= 1;
             true
@@ -278,6 +297,8 @@ impl Tool {
             (_, ToolType::DraftingStamp) => "Drafting Stamp",
             // Off-hand release (slice 5) — the Shield, single-tier.
             (_, ToolType::Shield) => "Shield",
+            // pt1124 (0.2.43) — the Spyglass, single-tier.
+            (_, ToolType::Spyglass) => "Spyglass",
         }
     }
 
@@ -2471,6 +2492,12 @@ fn match_recipe_exact(grid: &[[CraftSlot; 3]; 3]) -> Option<ItemStack> {
         if col == [copper, coal, copper] {
             return Some(ItemStack::new_block(block::BATTERY, 1));
         }
+        // pt1124 (0.2.43) — the Spyglass: a glass lens on top of two copper
+        // ingots, a vertical column at the workbench (a 3-tall column does not
+        // fit the 2x2 player grid) → 1 spyglass. Any column of the grid.
+        if col == [CraftSlot::Block(block::GLASS), copper, copper] {
+            return Some(ItemStack::new_tool(Tool::new(ToolType::Spyglass, ToolMaterial::Wood)));
+        }
         // Spec 37 Market Bell: iron / iron / plank column. Distinct
         // from Village Bell (stick middle) — the double-iron reads as
         // a heftier "market" bell.
@@ -4343,6 +4370,68 @@ mod tests {
         assert_eq!(card.station, crate::crafting_catalogue::CraftStation::Workbench, "three wide and three tall");
         assert_eq!(card.output.count, 1);
         assert!(is_shield(match_recipe(&card.example_grid)));
+    }
+
+    /// pt1124 (0.2.43) — the Spyglass: glass on top of two copper ingots, one column.
+    fn spyglass_column(col: usize, cells: [CraftSlot; 3]) -> [[CraftSlot; 3]; 3] {
+        let mut g = empty_grid();
+        for (r, c) in cells.into_iter().enumerate() {
+            g[r][col] = c;
+        }
+        g
+    }
+
+    fn is_spyglass(s: Option<ItemStack>) -> bool {
+        matches!(s, Some(ItemStack { item: Item::Tool(t), count: 1 }) if t.tool_type == ToolType::Spyglass && t.durability == SPYGLASS_DURABILITY)
+    }
+
+    #[test]
+    fn glass_over_two_copper_ingots_in_any_column_make_one_spyglass() {
+        let glass = CraftSlot::Block(block::GLASS);
+        let copper = CraftSlot::Material(MaterialId::CopperIngot);
+        for col in 0..3 {
+            assert!(is_spyglass(match_recipe(&spyglass_column(col, [glass, copper, copper]))), "column {col}");
+        }
+        // The wrong order, the wrong metal, a missing cell, or a row instead of a column: nothing.
+        assert!(!is_spyglass(match_recipe(&spyglass_column(1, [copper, glass, copper]))), "the glass goes on top");
+        assert!(!is_spyglass(match_recipe(&spyglass_column(1, [copper, copper, glass]))), "not at the bottom");
+        let iron = CraftSlot::Material(MaterialId::IronIngot);
+        assert!(!is_spyglass(match_recipe(&spyglass_column(1, [glass, iron, iron]))), "copper, not iron");
+        let mut two = empty_grid();
+        two[0][1] = glass;
+        two[1][1] = copper;
+        assert!(!is_spyglass(match_recipe(&two)), "two tall is not the shape");
+        let mut row = empty_grid();
+        row[1] = [glass, copper, copper];
+        assert!(!is_spyglass(match_recipe(&row)), "a row is not a column");
+    }
+
+    #[test]
+    fn a_spyglass_stacks_one_and_never_wears() {
+        let mut t = Tool::new(ToolType::Spyglass, ToolMaterial::Wood);
+        assert_eq!(Item::Tool(t).max_stack(), 1);
+        assert_eq!(t.max_durability(), SPYGLASS_DURABILITY);
+        assert_eq!(t.name(), "Spyglass");
+        for _ in 0..500 {
+            t.use_tool();
+        }
+        assert_eq!(t.durability, SPYGLASS_DURABILITY, "mining or hitting with it costs nothing");
+        let mut cell = Some(ItemStack::new_tool(t));
+        let _ = crate::inventory::use_tool_cell(&mut cell);
+        assert!(cell.is_some(), "the cell rule keeps it");
+    }
+
+    #[test]
+    fn the_spyglass_card_needs_the_workbench_and_its_example_crafts_it() {
+        let cards = crate::crafting_catalogue::all_cards();
+        let card = cards
+            .iter()
+            .find(|c| matches!(&c.output.item, Item::Tool(t) if t.tool_type == ToolType::Spyglass))
+            .expect("a spyglass card");
+        assert_eq!(card.station, crate::crafting_catalogue::CraftStation::Workbench, "three tall");
+        assert_eq!(card.output.count, 1);
+        assert!(is_spyglass(match_recipe(&card.example_grid)));
+        assert!(card.usage.is_some_and(|u| u.contains("right-click")), "the card says how to use it");
     }
 
     #[test]

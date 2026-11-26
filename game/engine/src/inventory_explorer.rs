@@ -331,6 +331,8 @@ pub fn all_tool_combos() -> Vec<(ToolType, ToolMaterial)> {
     out.push((ToolType::DraftingStamp, ToolMaterial::Wood));
     // Off-hand release (slice 5) — the Shield.
     out.push((ToolType::Shield, ToolMaterial::Wood));
+    // pt1124 (0.2.43) — the Spyglass.
+    out.push((ToolType::Spyglass, ToolMaterial::Wood));
     out
 }
 
@@ -856,6 +858,7 @@ mod tests {
             ToolType::Eraser,
             ToolType::Slingshot,
             ToolType::DraftingStamp,
+            ToolType::Spyglass,
         ] {
             assert!(
                 entries
@@ -873,7 +876,8 @@ mod tests {
         // + Shears(Iron) + FishingRod(Wood) + Slingshot/Eraser/DraftingStamp
         // (Wood) = 32 (2026-06-18: +3 single-tier utility tools).
         // 33 as of the off-hand release (slice 5): + Shield(Wood).
-        assert_eq!(combos.len(), 33);
+        // 34 as of pt1124 (0.2.43): + Spyglass(Wood).
+        assert_eq!(combos.len(), 34);
         assert!(combos.contains(&(ToolType::Pickaxe, ToolMaterial::Satori)));
         assert!(combos.contains(&(ToolType::Bow, ToolMaterial::Wood)));
         assert!(combos.contains(&(ToolType::FlintAndSteel, ToolMaterial::Iron)));

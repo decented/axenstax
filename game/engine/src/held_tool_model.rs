@@ -105,6 +105,62 @@ fn metal() -> Paint {
     tier_paint(ToolMaterial::Iron)
 }
 
+/// pt1124 (0.2.43) — the Spyglass's two ends in the model's frame (the tube stands
+/// along +Y, centred on the grip): the eyepiece's end at the bottom, the glass of
+/// the objective lens at the top. The raised pose puts the eyepiece at the eye
+/// (`spyglass::avatar_transform`).
+pub const SPYGLASS_EYEPIECE_Y: f32 = -0.305;
+#[cfg(test)]
+pub const SPYGLASS_OBJECTIVE_Y: f32 = 0.32;
+
+/// The opaque texel of `layer` whose colour is nearest `rgb` (squared distance),
+/// with that distance: a flat colour chosen by what it looks like, not by where it
+/// sits in the tile.
+fn nearest_texel(layer: u32, rgb: [u8; 3]) -> (Paint, u32) {
+    let mask = layer_mask(layer);
+    let mut best = (Paint { layer, texel: (8, 8) }, u32::MAX);
+    for y in 0..TILE {
+        for x in 0..TILE {
+            if (mask[y as usize] >> x) & 1 == 0 {
+                continue;
+            }
+            let [r, g, b, _] = crate::item_model::layer_texel(layer, x, y);
+            let d = [(r, rgb[0]), (g, rgb[1]), (b, rgb[2])]
+                .iter()
+                .map(|&(a, t)| (i32::from(a) - i32::from(t)).pow(2) as u32)
+                .sum::<u32>();
+            if d < best.1 {
+                best = (Paint { layer, texel: (x, y) }, d);
+            }
+        }
+    }
+    best
+}
+
+/// The nearest texel to `rgb` over several layers.
+fn nearest_paint(layers: &[u32], rgb: [u8; 3]) -> Paint {
+    layers.iter().map(|&l| nearest_texel(l, rgb)).min_by_key(|(_, d)| *d).map(|(p, _)| p).expect("a layer")
+}
+
+/// The Spyglass's flat colours, picked once from existing layers (no new texture
+/// layer: the array is full): `[brass, dark brass trim, eyepiece band, lens glass]`.
+/// The copper chest and copper cable tiles carry the metal; the leather tile adds a
+/// dark brown for the eyepiece; the glass block's own tile the lens.
+pub(crate) fn spyglass_paints() -> [Paint; 4] {
+    static PAINTS: std::sync::OnceLock<[Paint; 4]> = std::sync::OnceLock::new();
+    *PAINTS.get_or_init(|| {
+        use crate::block::{TEX_CABLE_COPPER, TEX_COPPER_CHEST_SIDE, TEX_COPPER_CHEST_TOP, TEX_GLASS};
+        let metal = [TEX_COPPER_CHEST_SIDE, TEX_COPPER_CHEST_TOP, TEX_CABLE_COPPER];
+        let dark = [TEX_COPPER_CHEST_SIDE, TEX_COPPER_CHEST_TOP, TEX_CABLE_COPPER, TEX_ITEM_LEATHER];
+        [
+            nearest_paint(&metal, [214, 146, 74]),
+            nearest_paint(&metal, [150, 88, 46]),
+            nearest_paint(&dark, [62, 38, 26]),
+            nearest_paint(&[TEX_GLASS], [190, 228, 240]),
+        ]
+    })
+}
+
 /// The Fishing Rod's tilt about Z (degrees) and its length.
 const ROD_TILT_DEG: f32 = 9.0;
 const ROD_LEN: f32 = 0.66;
@@ -314,6 +370,21 @@ fn parts(tool: ToolType, material: ToolMaterial, line_out: bool) -> Vec<Part> {
             v.push(part(0.0, 0.0, 0.14, 0.14, 0.11, 0.0, steel));
             v
         }
+        // pt1124 (0.2.43) — a short brass telescope standing along +Y: a dark
+        // eyepiece band at the bottom, a narrow draw tube, a trim ring, the wide
+        // barrel, the objective's rim and its glass on top. Round in plan, so it
+        // is the same for both hands.
+        ToolType::Spyglass => {
+            let [brass, trim, band, glass] = spyglass_paints();
+            vec![
+                part(0.0, -0.27, 0.085, 0.07, 0.085, 0.0, band),
+                part(0.0, -0.15, 0.10, 0.18, 0.10, 0.0, brass),
+                part(0.0, -0.045, 0.125, 0.04, 0.125, 0.0, trim),
+                part(0.0, 0.12, 0.13, 0.30, 0.13, 0.0, brass),
+                part(0.0, 0.285, 0.15, 0.05, 0.15, 0.0, trim),
+                part(0.0, 0.313, 0.11, 0.014, 0.11, 0.0, glass),
+            ]
+        }
         // A knob and a stem on a wide flat base.
         ToolType::DraftingStamp => vec![
             part(0.0, 0.30, 0.13, 0.08, 0.13, 0.0, grip()),
@@ -402,8 +473,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_wire_table_lists_thirteen_tool_types() {
-        assert_eq!(all_tool_types().len(), 13, "a new tool type needs a shape in held_tool_model::parts");
+    fn the_wire_table_lists_fourteen_tool_types() {
+        // 14 as of pt1124 (0.2.43): + the Spyglass.
+        assert_eq!(all_tool_types().len(), 14, "a new tool type needs a shape in held_tool_model::parts");
     }
 
     #[test]
@@ -641,4 +713,31 @@ pub(crate) mod tests {
         };
         assert_eq!(set(&l), set(&r));
     }
+
+    /// pt1124 (0.2.43) — the Spyglass reads as a brass telescope: warm opaque metal,
+    /// a darker eyepiece band, a pale glass lens on top, from existing layers only.
+    #[test]
+    fn the_spyglass_is_a_brass_tube_with_a_dark_eyepiece_and_a_glass_lens() {
+        let [brass, trim, band, glass] = spyglass_paints();
+        let rgba = |p: Paint| crate::item_model::layer_texel(p.layer, p.texel.0, p.texel.1);
+        let luma = |c: [u8; 4]| 0.299 * f32::from(c[0]) + 0.587 * f32::from(c[1]) + 0.114 * f32::from(c[2]);
+        for (what, p) in [("brass", brass), ("trim", trim), ("band", band), ("glass", glass)] {
+            assert!(rgba(p)[3] >= 128, "{what} is an opaque texel ({:?})", rgba(p));
+        }
+        let b = rgba(brass);
+        assert!(b[0] > b[1] && b[1] > b[2] && b[0] >= 140, "brass is warm ({b:?})");
+        assert!(luma(rgba(band)) + 30.0 < luma(b), "the eyepiece is darker ({:?} vs {b:?})", rgba(band));
+        assert!(luma(rgba(trim)) < luma(b), "the trim is darker than the barrel");
+        let g = rgba(glass);
+        assert!(g[2] >= g[0] && luma(g) > luma(rgba(band)), "the lens is pale and cool ({g:?})");
+        // The model spans the two ends the raised pose uses, and is the same in both hands.
+        let v = tool_model(ToolType::Spyglass, ToolMaterial::Wood, HandSide::Right);
+        let (lo, hi) = v.iter().fold((f32::MAX, f32::MIN), |a, v| (a.0.min(v.position[1]), a.1.max(v.position[1])));
+        assert!((lo - SPYGLASS_EYEPIECE_Y).abs() < 1e-4 && (hi - SPYGLASS_OBJECTIVE_Y).abs() < 1e-4, "{lo}..{hi}");
+        assert_eq!(positions(&v), positions(&tool_model(ToolType::Spyglass, ToolMaterial::Wood, HandSide::Left)));
+        // The glass is on top, the band at the bottom.
+        let top = v.iter().filter(|v| v.position[1] > SPYGLASS_OBJECTIVE_Y - 1e-3).all(|v| v.tex_layer == glass.layer && v.uv == glass.uv());
+        assert!(top, "the top face is the lens");
+    }
+
 }
