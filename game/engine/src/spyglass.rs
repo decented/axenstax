@@ -86,6 +86,10 @@ pub struct LookFrame {
     pub hotbar_slot: usize,
     /// The hands were swapped (F) this frame.
     pub swapped: bool,
+    /// The seat cannot look this frame: a screen or panel over its view, the
+    /// cursor free, dead or seated. The look ends ([`LookState::end`]) and a
+    /// trigger still held afterwards is a new press.
+    pub blocked: bool,
 }
 
 /// What [`look_frame`] decided.
@@ -103,6 +107,10 @@ pub struct LookOut {
 
 /// One frame of a seat's look, in play (see the module doc). Pure.
 pub fn look_frame(state: &mut LookState, f: LookFrame) -> LookOut {
+    if f.blocked {
+        state.end();
+        return LookOut::default();
+    }
     // A change of slot or a swap ends a look in progress; whatever still holds
     // it up stays down until it is let go.
     if let Some(anchor) = state.anchor
@@ -171,7 +179,7 @@ mod tests {
     }
 
     fn frame(key_held: bool, raised: bool, in_hand: bool, slot: usize) -> LookFrame {
-        LookFrame { key_held, raised, spyglass_in_hand: in_hand, hotbar_slot: slot, swapped: false }
+        LookFrame { key_held, raised, spyglass_in_hand: in_hand, hotbar_slot: slot, swapped: false, blocked: false }
     }
 
     #[test]
@@ -228,6 +236,20 @@ mod tests {
         assert_eq!(out, LookOut { looking: false, by_key: false, end_raise: true });
         let out = look_frame(&mut s, LookFrame { swapped: true, ..frame(false, false, true, 5) });
         assert!(!out.looking && !out.end_raise, "nothing up, nothing to end");
+    }
+
+    #[test]
+    fn a_blocked_frame_never_looks_and_a_held_key_after_it_is_a_new_press() {
+        let mut s = LookState::default();
+        assert!(look_frame(&mut s, frame(true, false, true, 0)).looking);
+        // A screen over the view (one that keeps the cursor, too): no look, with C still held.
+        for _ in 0..3 {
+            let blocked = LookFrame { blocked: true, ..frame(true, true, true, 0) };
+            assert_eq!(look_frame(&mut s, blocked), LookOut::default());
+            assert_eq!(s, LookState::default());
+        }
+        // Closed with C still held and the spyglass in hand: a new press, so it looks.
+        assert!(look_frame(&mut s, frame(true, false, true, 0)).looking);
     }
 
     #[test]

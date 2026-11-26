@@ -4798,6 +4798,11 @@ impl super::GameState {
             spyglass_in_hand: crate::spyglass::spyglass_hand(main, off).is_some(),
             hotbar_slot: p.hotbar_slot,
             swapped,
+            blocked: !intent.cursor_captured
+                || p.combat.dead
+                || p.seated()
+                || self.seat_modal_open(pidx)
+                || (pidx == 0 && self.p0_ui_modal_open()),
         };
         let mut state = self.spyglass_look.get(&pidx).copied().unwrap_or_default();
         let out = crate::spyglass::look_frame(&mut state, frame);
