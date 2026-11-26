@@ -5715,7 +5715,10 @@ impl HostedServer {
                         sp.last_sneak = input.sneak;
                         // Off-hand release (slice 5) — the raise is a held pose, not a swing.
                         sp.shield_latch = input.shield_raised;
-                        sp.last_acting = input.break_block || (input.place_block && !input.shield_raised);
+                        // pt1124 (0.2.43) — so is a spyglass's look.
+                        sp.sighting_latch = input.spyglass_raised;
+                        sp.last_acting = input.break_block
+                            || (input.place_block && !input.shield_raised && !input.spyglass_raised);
                         sp.last_move_mag =
                             (input.move_forward.powi(2) + input.move_right.powi(2)).sqrt();
 

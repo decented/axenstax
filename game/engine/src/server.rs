@@ -224,6 +224,11 @@ pub struct ServerPlayer {
     /// it protects only while the server's copy of the window holds a shield
     /// ([`Self::shield_guard`]) and only by the server's own tick count.
     pub shield_latch: bool,
+    /// pt1124 (0.2.43) — the look of this joiner's latest input
+    /// (`InputPacket.spyglass_raised`), latched like `shield_latch`. Relayed as
+    /// `player_flags::SIGHTING`; the body's sneak-speed walk comes from the queued
+    /// input itself (`PlayerIntent::sighting`). Never protects.
+    pub sighting_latch: bool,
     /// Consecutive server ticks the latch has been set with a shield held in
     /// the server's copy (`shield::next_raised_ticks`): the server counts the
     /// raise itself and never takes a client's count.
@@ -575,6 +580,10 @@ pub fn collect_player_state(sp: &ServerPlayer, idx: u32) -> crate::protocol::Pla
         use crate::protocol::player_flags as pf;
         anim_state = 0;
         flags = (flags & pf::SWINGING) | pf::SEATED;
+    } else if sp.sighting_latch {
+        // pt1124 (0.2.43) — a spyglass at the eye, relayed for the raised pose
+        // (presentation only). A look takes the place of a guard.
+        flags |= crate::protocol::player_flags::SIGHTING;
     } else if sp.shield_latch {
         // Off-hand release (slice 5) — the raise the player's input reports,
         // relayed as a flags bit for the guard pose (presentation only).
@@ -659,6 +668,7 @@ impl ServerPlayer {
             armour_points: 0,
             armour_wear_hits: 0,
             shield_latch: false,
+            sighting_latch: false,
             shield_ticks: 0,
             shield_owed: Vec::new(),
             shield_flag_logged: false,

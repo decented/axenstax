@@ -38,6 +38,13 @@ pub struct PlayerIntent {
     /// copies.
     pub guarding: bool,
 
+    /// pt1124 (0.2.43) — looking through a spyglass (`spyglass::look_frame`):
+    /// the body walks at sneak speed and does not sprint, like a raised shield
+    /// ([`Self::guarding`]), and never protects. Set per tick by the game loop
+    /// from the look; a joiner's `InputPacket.spyglass_raised` fills it on the
+    /// server, so queued and replayed inputs simulate the same on both copies.
+    pub sighting: bool,
+
     /// Jump held (for swimming up, flying up).
     pub jump_held: bool,
 
@@ -168,6 +175,7 @@ impl PlayerIntent {
             sprint: pkt.sprint,
             sneak: pkt.sneak,
             guarding: pkt.shield_raised,
+            sighting: pkt.spyglass_raised,
             jump_held: pkt.jump,
             // jump_pressed is an edge event. Treating the held flag as a press
             // every tick would mis-fire double-tap-jump → flight toggle while

@@ -789,6 +789,15 @@ pub struct InputPacket {
     /// window holds a shield (`ServerPlayer::shield_guard`), so a lying client
     /// gains nothing a modified client could not claim already.
     pub shield_raised: bool,
+    /// v103 (pt1124, 0.2.43) — this player is looking through a spyglass: a
+    /// held right-click with a spyglass to raise (the shield's rule,
+    /// `hands::raised_item`), or the Zoom key with a spyglass in either hand
+    /// (`spyglass::look_frame`). APPENDED after `shield_raised`. Client-asserted
+    /// and harmless: the server walks the body at sneak speed with no sprint by
+    /// it (the client predicts the same, `PlayerIntent::sighting`) and relays it
+    /// as `player_flags::SIGHTING`; it never protects and never acts. The zoom
+    /// and the lens are the client's own.
+    pub spyglass_raised: bool,
 }
 
 /// v76 (C3a-fix-1) — one edit's hand ([`InputPacket::edit_hands`]): the
@@ -934,6 +943,10 @@ pub mod player_flags {
     /// pose. The relayed raise, from the player's latest input flag (a flags bit,
     /// no layout change); presentation only.
     pub const GUARDING: u8 = 0x10;
+    /// v103 (pt1124, 0.2.43) — looking through a spyglass: peers draw the arm
+    /// raising it to the eye (the spyglass hand, the main hand's first). From the
+    /// player's latest `InputPacket.spyglass_raised`; presentation only.
+    pub const SIGHTING: u8 = 0x20;
 }
 
 /// Per-player state as seen by other clients.
@@ -3129,7 +3142,13 @@ pub struct ServerAnnouncePacket {
 ///   would read it as `Hand::Other` in the possession fallback. A v101 peer
 ///   decodes every packet but disagrees on these meanings, so the bump refuses
 ///   it at join (`protocol_mismatch_reason`).
-pub const PROTOCOL_VERSION: u32 = 102;
+/// - v103 (2026-11-26, 0.2.43, pt1124): **the Spyglass.** `ToolType::Spyglass`
+///   is tool byte 13 in every item and on the avatar wire; `InputPacket`
+///   appends `spyglass_raised: bool` (the look: the server walks the body at
+///   sneak speed by it and relays it); `player_flags::SIGHTING` (0x20) is the
+///   relayed raised pose. A v102 peer decodes neither the byte nor the field, so
+///   the bump refuses it at join (`protocol_mismatch_reason`).
+pub const PROTOCOL_VERSION: u32 = 103;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -3340,7 +3359,8 @@ mod tests {
         // v100 — living world Tier 2 S7: Site Board (379), ItemAction::SiteBoard, BlockView::SiteBoard.
         // v101 — off-hand plan slice 2: the hand on every use packet, WindowClick::Offhand (= 11) and SwapHands (= 12), WireWindowSlot::Offhand (= 5), the tool type and the off-hand on the avatar wire.
         // v102 — 0.2.42: furnace click source is any inventory slot or TAKE_BACK; block 385 (Cobbled Deepslate), 381..=384 reserved; held item kind ARMOUR = 5.
-        assert_eq!(super::PROTOCOL_VERSION, 102);
+        // v103 — 0.2.43: ToolType::Spyglass (tool byte 13), InputPacket.spyglass_raised, player_flags::SIGHTING (0x20).
+        assert_eq!(super::PROTOCOL_VERSION, 103);
     }
 
     #[test]
@@ -3574,6 +3594,7 @@ mod tests {
                 unfit: 1, hand: crate::hands::Hand::Main,
             }], held_tool: crate::protocol::HeldWire::NO_TOOL, off_id: 0, off_kind: 0, off_tool: crate::protocol::HeldWire::NO_TOOL,
             shield_raised: true,
+            spyglass_raised: true,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();
@@ -3692,15 +3713,15 @@ mod tests {
         // v101: each use tag then carries its hand (Main = 0).
         tail.extend_from_slice(&0u32.to_le_bytes());
         // v101: held_tool u8, off_kind u8, off_id u16, off_tool u8 and then
-        // shield_raised (a bool, one byte) close the packet (all zero in a
-        // default-built one).
-        tail.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        // shield_raised (a bool, one byte); v103: spyglass_raised (a bool) closes
+        // the packet (all zero in a default-built one).
+        tail.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0]);
         // Everything before the appended fields is unchanged, and the
         // appended fields close the packet in append order (`None` is one
         // `0` byte).
         let prefix = bytes.len() - tail.len();
         assert_eq!(&bytes[prefix..], &tail[..]);
-        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8 + 4 + 8 + 8 + 6)]);
+        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8 + 4 + 8 + 8 + 7)]);
     }
 
     #[test]
@@ -4118,7 +4139,8 @@ mod tests {
         // v101 (off-hand review 4, appended before any build): `EntityUpdate.flags2` (`entity_flags2::BREED_BLOCKED`, `OWN_PET`).
         // v101 (off-hand plan slice 2): the hand on every use packet, WindowClick::Offhand (= 11) and SwapHands (= 12), WireWindowSlot::Offhand (= 5), the tool type and the off-hand on the avatar wire.
         // v102 (0.2.42): furnace click source is any inventory slot or TAKE_BACK; block 385, 381..=384 reserved; held item kind ARMOUR = 5.
-        assert_eq!(PROTOCOL_VERSION, 102);
+        // v103 (0.2.43): ToolType::Spyglass (tool byte 13), InputPacket.spyglass_raised, player_flags::SIGHTING (0x20).
+        assert_eq!(PROTOCOL_VERSION, 103);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -5546,13 +5568,14 @@ mod oc_wire_tests {
                 T::Eraser => 10,
                 T::DraftingStamp => 11,
                 T::Shield => 12,
+                T::Spyglass => 13,
             }
         }
         let all = [
             T::Pickaxe, T::Axe, T::Sword, T::Shovel, T::Bow, T::Hoe, T::FlintAndSteel,
-            T::Shears, T::FishingRod, T::Slingshot, T::Eraser, T::DraftingStamp, T::Shield,
+            T::Shears, T::FishingRod, T::Slingshot, T::Eraser, T::DraftingStamp, T::Shield, T::Spyglass,
         ];
-        let mut seen = [false; 13];
+        let mut seen = [false; 14];
         let mut bytes = std::collections::HashSet::new();
         for t in all {
             seen[place(t)] = true;
@@ -5575,7 +5598,7 @@ mod oc_wire_tests {
             }
         }
         assert!(seen.iter().all(|s| *s), "every tool type is listed");
-        assert_eq!(bytes.len(), 13, "one byte per type, whatever the material");
+        assert_eq!(bytes.len(), 14, "one byte per type, whatever the material");
         // Not a tool: no tool byte. An empty hand: the empty pair.
         for item in [crate::item::Item::Block(crate::block::TORCH), crate::item::Item::Material(crate::item::MaterialId::Stick)] {
             let wire = HeldWire::of(Some(&item));
@@ -5618,7 +5641,8 @@ mod oc_wire_tests {
             let bytes = serialize_packet(PacketType::ClientInput, &input);
             let back: InputPacket = safe_deserialize(&bytes[1..]).unwrap();
             assert_eq!(back.shield_raised, raised);
-            assert_eq!(*bytes.last().unwrap(), raised as u8, "the flag is the last byte: appended after off_tool");
+            // v103 appends `spyglass_raised` after it, so the flag is the byte before the last.
+            assert_eq!(bytes[bytes.len() - 2], raised as u8, "the flag follows off_tool");
         }
         // The default (an input built with `..Default::default()`) is lowered.
         assert!(!InputPacket::default().shield_raised);
@@ -5634,6 +5658,31 @@ mod oc_wire_tests {
         let back: PlayerState = safe_deserialize(&bincode::serialize(&state).unwrap()).unwrap();
         assert_ne!(back.flags & pf::GUARDING, 0);
         assert_eq!(bincode::serialize(&state).unwrap().len(), bincode::serialize(&PlayerState { flags: 0, ..state.clone() }).unwrap().len(), "a flags bit changes no length");
+    }
+
+    /// v103 (pt1124, 0.2.43) — `spyglass_raised` is the LAST field of the input, and
+    /// the relayed look is the 0x20 bit of `PlayerState.flags` (no layout change).
+    #[test]
+    fn the_input_packet_appends_spyglass_raised_and_the_look_is_a_flags_bit() {
+        for raised in [true, false] {
+            let input = InputPacket { spyglass_raised: raised, shield_raised: !raised, health: 20.0, ..Default::default() };
+            let bytes = serialize_packet(PacketType::ClientInput, &input);
+            let back: InputPacket = safe_deserialize(&bytes[1..]).unwrap();
+            assert_eq!((back.spyglass_raised, back.shield_raised), (raised, !raised));
+            assert_eq!(*bytes.last().unwrap(), raised as u8, "the flag is the last byte: appended after shield_raised");
+        }
+        assert!(!InputPacket::default().spyglass_raised);
+        use player_flags as pf;
+        assert_eq!(pf::SIGHTING, 0x20);
+        assert_eq!([pf::SWINGING, pf::CROUCHING, pf::ON_GROUND, pf::SEATED, pf::GUARDING].iter().fold(0, |a, b| a | b) & pf::SIGHTING, 0);
+        // The spyglass rides the held wire as tool byte 13, in either hand.
+        let spy = crate::item::Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Spyglass, crate::crafting::ToolMaterial::Wood));
+        let wire = HeldWire::of(Some(&spy));
+        assert_eq!(wire.tool, 13);
+        assert_eq!(wire.tool_type(), Some(crate::crafting::ToolType::Spyglass));
+        // The full-fidelity item wire round-trips it (drops, grants, the window).
+        let full = crate::inventory::item_to_wire_full(&spy);
+        assert_eq!(crate::inventory::item_from_wire_full(&full), Some(spy));
     }
 
     /// v101 — the shield's wear report is the variant appended after `GraveAt`, so no
