@@ -228,12 +228,18 @@ fn a_load_drops_no_held_torch_and_no_world_gen_torch() {
     assert_eq!(loaded.world.get_block(0, 176, 0), TORCH, "the floor torch over a section boundary holds");
     assert_eq!(loaded.world.get_block(15, 170, 0), TORCH, "the wall torch across a column border holds");
     assert_eq!(loaded.world.get_block(3, 180, 0), TORCH, "a world-gen torch is never judged by the load");
-    assert_eq!(dropped_items(&loaded), 0);
+    assert_eq!(torch_items(&loaded), 0, "no torch item dropped");
 }
 
-/// Items of any kind lying in a server's ECS.
-fn dropped_items(s: &crate::server::GameServer) -> usize {
-    s.ecs.query::<&crate::entity::ItemEntity>().iter().count()
+/// Torch items lying in a server's ECS (the server's own sims drop other
+/// things over 40 ticks: a world it generates round the test cells).
+fn torch_items(s: &crate::server::GameServer) -> u32 {
+    s.ecs
+        .query::<&crate::entity::ItemEntity>()
+        .iter()
+        .filter(|(_, ie)| ie.stack.item == Item::Block(TORCH))
+        .map(|(_, ie)| u32::from(ie.stack.count))
+        .sum()
 }
 
 /// Only a player-placed torch or lantern in a section a load brings in is
