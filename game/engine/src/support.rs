@@ -27,16 +27,17 @@
 //!   lost.
 //! * **Saving and loading** (review 3 items 6 and 7). The log is runtime-only
 //!   and a save neither keeps nor settles it: Save and Quit leaves a chain's
-//!   hanging links where they hang. A load instead marks every section it
-//!   brings in from a save (and every section back from the evicted store)
-//!   that holds a torch or a lantern for the same rescan an overflowed
-//!   section gets (`World::note_loaded_for_support`), so a collapse a save cut
-//!   resumes after the load, each link falling once as one item. A generated
-//!   section is never marked, and a pushed chunk (a joined client's) is not
-//!   the authority's world.
-//! * **Old worlds.** So a block already floating in a saved world falls at the
-//!   next load; one in a generated, never-saved section stays until something
-//!   next to it changes.
+//!   hanging links where they hang. A load instead queues every player-placed
+//!   torch and lantern in a section it brings in from a save (or back from the
+//!   evicted store) for one check (`World::note_loaded_for_support`), so a
+//!   collapse a save cut resumes after the load, each link falling once as one
+//!   item. World-gen torches carry no placed bit and are never queued (some
+//!   bundled village plans hang one in mid-air), a generated, never-saved
+//!   section is never loaded, and a pushed chunk (a joined client's) is not the
+//!   authority's world.
+//! * **Old worlds.** So a player's torch already floating in a saved world
+//!   falls at the next load; a world-gen one stays until something next to it
+//!   changes.
 
 use crate::block::{self, Attachment, BlockId, BlockRegistry};
 use crate::item::ItemStack;
@@ -142,10 +143,14 @@ pub fn tick_support(world: &mut World, registry: &BlockRegistry) -> Vec<Dropped>
     } else {
         Vec::new()
     };
-    if logged.is_empty() && sections.is_empty() {
+    // Review 3 items 6 and 7 — the placed torches and lanterns a load brought
+    // in, in the room the cell log left: each checked itself (not its
+    // neighbours, so a world-gen torch beside one is not judged by this).
+    let rechecks = world.take_support_rechecks(MAX_CELLS_PER_PASS.saturating_sub(logged.len()));
+    if logged.is_empty() && sections.is_empty() && rechecks.is_empty() {
         return Vec::new();
     }
-    let mut candidates: std::collections::BTreeSet<(i32, i32, i32)> = std::collections::BTreeSet::new();
+    let mut candidates: std::collections::BTreeSet<(i32, i32, i32)> = rechecks.into_iter().collect();
     for &cell in &logged {
         candidates.extend(std::iter::once(cell).chain(SIDES.iter().map(|&d| add(cell, d))));
     }

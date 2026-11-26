@@ -177,18 +177,21 @@ a lending host's server, a dedicated server; the server sends each AIR change an
 and a joined client discards its own log. A lantern placed on a block's side
 face is stamped standing: with nothing below it, it drops on the first pass. **Saving and loading** (0.2.42, review 3
 items 6 and 7; replaces review 10's settle-at-save): the log is runtime-only and **no save settles it or keeps it**
-(no save-layout change). A save between two passes writes the links still hanging. **A load marks each section it
-brings in from a save that holds a torch or a lantern** (`World::note_loaded_for_support`, called by every chunk load
-into the authority's world: `save::load_chunk_dir` for a folder load, autosave recovery, a Keep restore and a
-dedicated server's load, `world_archive` for an archive/cloud/web load; and `World::restore_column` for a section back
-from the evicted store, where a Keep load can put a column straight back) for the same section rescan an overflowed
-bulk edit gets (`MAX_SECTIONS_PER_PASS` a pass). So a Save and Quit mid-collapse keeps its hanging links, and after the
-reload they fall, one link a pass, each as one item (an item on the ground is not saved, so the one that fell before
-the save is lost with the session as any dropped item is). A generated, never-saved section is never marked
-(world-gen places torches only on blocks it places beside them: a village house's wall torch, a workshop's floor torch,
-a brigand hideout's four palisade-corner torches on their logs; no world-gen lanterns), and a pushed chunk is a joined
-client's, which runs no support pass. So a torch already floating in an old saved world falls at its next load; one in
-a generated section stays until something beside it changes. **Light on other machines** (review 12): a joined client relights a received change
+(no save-layout change). A save between two passes writes the links still hanging. **A load queues each
+player-placed torch and lantern in a section it brings in from a save for one support check** (`World::note_loaded_for_support`
+into `support_rechecks`, checked by `support::tick_support` in the room the cell log leaves, each cell itself; called by
+every chunk load into the authority's world: `save::load_chunk_dir` for a folder load, autosave recovery, a Keep restore
+and a dedicated server's load, `world_archive` for an archive/cloud/web load; and `World::restore_column` for a section
+back from the evicted store, where a Keep load can put a column straight back). So a Save and Quit mid-collapse keeps
+its hanging links, and after the reload they fall, one link a pass, each as one item (an item on the ground is not
+saved, so the one that fell before the save is lost with the session as any dropped item is). **Placed only:** the
+placed bit (which every player placement sets and the save keeps) picks them; world-gen torches carry none and are
+never queued, because some bundled village plans hang a torch in mid-air with nothing beside it (the town hall's four,
+a multi-room cabin's one; the legacy village house's wall torch, workshop floor torch and the brigand hideout's four
+palisade-corner torches do stand on blocks world-gen put beside them; world-gen places no lanterns). A brief's first
+cut (rescanning whole loaded sections) would have dropped those plan torches at the first load of any saved village
+column. A pushed chunk is a joined client's, which runs no support pass. So a player's torch already floating in an
+old saved world falls at its next load; a world-gen one stays until something beside it changes. **Light on other machines** (review 12): a joined client relights a received change
 when the old or new block gives light (`lighting::relight_received_change`) and redraws the sections round it; a
 lending host does the same for a joiner's edit and queues the sections round a dropped torch for redraw. Before,
 any torch another player broke (not only a support drop) left its light on a joined client.

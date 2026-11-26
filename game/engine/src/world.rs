@@ -593,15 +593,20 @@ pub struct World {
     /// (torches, lanterns) that lost what held them. Every change passes
     /// `set_block`, so a break, a blast, a piston, a fall, a fire and a joiner's
     /// edit all land here alike. A joined client discards it (its server drops
-    /// the blocks); `insert_chunk` never fills it, but a save restore marks each
-    /// loaded section holding a torch or lantern for a rescan
-    /// (`note_loaded_for_support`), so a collapse a save cut resumes after the
-    /// load. Runtime-only.
+    /// the blocks); `insert_chunk` never fills it, but a save restore queues
+    /// each loaded player-placed torch and lantern for a check
+    /// (`note_loaded_for_support`, `support_rechecks`), so a collapse a save cut
+    /// resumes after the load. Runtime-only.
     support_log: std::collections::BTreeSet<(i32, i32, i32)>,
     /// pt1124 review 9 — the sections (chunk coordinates) whose changes did not
     /// fit in `support_log`: a later support pass rescans each whole section
     /// (and the cells round it) once the cell log has room. Runtime-only.
     support_sections: std::collections::BTreeSet<(i32, i32, i32)>,
+    /// pt1124 review 3 items 6 and 7 — the player-placed torches and lanterns
+    /// in sections a load brought in from a save (or back from the evicted
+    /// store), each to be checked once by a support pass
+    /// ([`World::note_loaded_for_support`]). Runtime-only.
+    support_rechecks: std::collections::BTreeSet<(i32, i32, i32)>,
     /// C3c-3b — the faces whose attachment changed (set, removed, or a laid
     /// Blueprint developed) since the last [`World::take_attachment_changes`],
     /// oldest first, at most [`MAX_ATTACHMENT_CHANGES_LOGGED`]; a face can
@@ -1013,6 +1018,7 @@ impl World {
             tables_gone: None,
             support_log: std::collections::BTreeSet::new(),
             support_sections: std::collections::BTreeSet::new(),
+            support_rechecks: std::collections::BTreeSet::new(),
             attachment_log: None,
             disk_chunks: std::sync::Mutex::new(ahash::AHashSet::new()),
             block_entities: AHashMap::new(),
@@ -1398,6 +1404,7 @@ impl World {
     pub fn discard_support_log(&mut self) {
         self.support_log.clear();
         self.support_sections.clear();
+        self.support_rechecks.clear();
     }
 
     /// pt1124 — how many changed cells wait for the support pass.
@@ -1412,24 +1419,52 @@ impl World {
         self.support_sections.len()
     }
 
-    /// pt1124 review 3 items 6 and 7 — a section brought in from a save (or
-    /// back from the evicted store) that holds a torch or a lantern is marked
-    /// for the support rescan, as an overflowed section is. The support log is
-    /// runtime-only and a save does not settle it, so a collapse cut by a save
-    /// resumes after the load: each link still hanging falls then, as one item.
-    /// A generated section is never marked (world-gen torches stand on what
-    /// world-gen put beside them, and a never-saved chunk is not loaded).
+    /// pt1124 review 3 items 6 and 7 — every player-placed torch and lantern in
+    /// a section brought in from a save (or back from the evicted store) is
+    /// queued for one support check ([`World::take_support_rechecks`]). The
+    /// support log is runtime-only and a save does not settle it, so a collapse
+    /// cut by a save resumes after the load: each link still hanging falls then,
+    /// as one item. Only placed blocks (the placed bit a save keeps): world-gen
+    /// torches are never checked here, as some bundled village plans hang one
+    /// in mid-air (a town hall's four, a cabin's), and a never-saved section is
+    /// never loaded.
     pub fn note_loaded_for_support(&mut self, key: (i32, i32, i32)) {
-        if self.chunks.get(&key).is_some_and(|c| c.holds_any(block::may_attach)) {
-            self.support_sections.insert(key);
+        let Some(chunk) = self.chunks.get(&key).filter(|c| c.holds_any(block::may_attach)) else { return };
+        let cs = CHUNK_SIZE as i32;
+        let (bx, by, bz) = (key.0 * cs, key.1 * cs, key.2 * cs);
+        for ly in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                for lx in 0..CHUNK_SIZE {
+                    if block::may_attach(chunk.get(lx, ly, lz)) && chunk.is_placed(lx, ly, lz) {
+                        self.support_rechecks.insert((bx + lx as i32, by + ly as i32, bz + lz as i32));
+                    }
+                }
+            }
         }
+    }
+
+    /// pt1124 review 3 items 6 and 7 — up to `max` queued load rechecks, in
+    /// cell order (`support::tick_support` checks each cell itself).
+    pub fn take_support_rechecks(&mut self, max: usize) -> Vec<(i32, i32, i32)> {
+        let mut out = Vec::with_capacity(max.min(self.support_rechecks.len()));
+        while out.len() < max {
+            let Some(cell) = self.support_rechecks.pop_first() else { break };
+            out.push(cell);
+        }
+        out
+    }
+
+    /// How many loaded torches and lanterns wait for their support check.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn support_rechecks_len(&self) -> usize {
+        self.support_rechecks.len()
     }
 
     /// pt1124 review 10 — whether any support work is waiting (cells or
     /// overflowed sections).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn support_pending(&self) -> bool {
-        !self.support_log.is_empty() || !self.support_sections.is_empty()
+        !self.support_log.is_empty() || !self.support_sections.is_empty() || !self.support_rechecks.is_empty()
     }
 
     /// C3c-3b — start logging face-attachment changes (see the

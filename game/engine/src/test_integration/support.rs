@@ -151,6 +151,7 @@ fn a_save_mid_collapse_keeps_the_hanging_links_and_they_fall_after_the_load() {
     for y in 197..=199 {
         s.world.set_block(0, y, 0, LANTERN);
         s.world.set_meta((0, y, 0), hanging);
+        s.world.set_placed(0, y, 0, true); // a player hung them
     }
     s.world.discard_support_log();
     s.world.set_block(0, 200, 0, AIR);
@@ -173,7 +174,7 @@ fn a_save_mid_collapse_keeps_the_hanging_links_and_they_fall_after_the_load() {
     for y in 197..=198 {
         assert_eq!(loaded.world.get_block(0, y, 0), LANTERN, "the save kept the link at {y}");
     }
-    assert!(loaded.world.support_pending(), "the load marked the section for the rescan");
+    assert_eq!(loaded.world.support_rechecks_len(), 2, "the load queued the two placed links for a check");
     for _ in 0..40 {
         loaded.tick();
     }
@@ -187,21 +188,72 @@ fn a_save_mid_collapse_keeps_the_hanging_links_and_they_fall_after_the_load() {
     assert_eq!(loaded.world.get_block(2, 198, 0), STONE, "the control block stands");
 }
 
-/// Only a section a load brings in that holds a torch or a lantern is marked:
-/// inserting a section (world-gen, a pushed chunk) marks nothing, so a
-/// generated torch is never rescanned.
+/// A load checks only player-placed torches and lanterns, and a held one
+/// stays: a placed floor torch whose floor is in the section below, a placed
+/// wall torch whose wall is across a column border, and a world-gen torch (no
+/// placed bit) hanging in mid-air, as some bundled village plans hang one, all
+/// stand after a save, a reload and 40 ticks.
 #[test]
-fn only_loaded_sections_holding_a_torch_or_a_lantern_are_marked() {
+fn a_load_drops_no_held_torch_and_no_world_gen_torch() {
+    let _g = crate::save::WorldsRootGuard::new("support-held");
+    let name = "support-held".to_string();
+    let mut s = crate::server::GameServer::new(1, name.clone(), 31);
+    for x in -4..=20 {
+        for z in -4..=4 {
+            s.world.set_block(x, 150, z, STONE);
+        }
+    }
+    // A floor torch at y 176 (a section's bottom row) on a floor at y 175.
+    s.world.set_block(0, 175, 0, STONE);
+    s.world.set_block(0, 176, 0, TORCH);
+    s.world.set_meta((0, 176, 0), crate::support::torch_meta([0, 1, 0]).unwrap());
+    s.world.set_placed(0, 176, 0, true);
+    // A wall torch at x 15 on a wall at x 16, the next column.
+    s.world.set_block(16, 170, 0, STONE);
+    s.world.set_block(15, 170, 0, TORCH);
+    s.world.set_meta((15, 170, 0), crate::support::torch_meta([-1, 0, 0]).unwrap());
+    s.world.set_placed(15, 170, 0, true);
+    // A world-gen torch in mid-air, as a town hall's.
+    s.world.set_block(3, 180, 0, TORCH);
+    s.world.discard_support_log();
+    s.try_save().unwrap();
+    drop(s);
+
+    let mut loaded = crate::server::GameServer::new(1, name, 31);
+    loaded.initial_load().unwrap();
+    assert_eq!(loaded.world.support_rechecks_len(), 2, "the two placed torches are queued, the world-gen one is not");
+    for _ in 0..40 {
+        loaded.tick();
+    }
+    assert_eq!(loaded.world.get_block(0, 176, 0), TORCH, "the floor torch over a section boundary holds");
+    assert_eq!(loaded.world.get_block(15, 170, 0), TORCH, "the wall torch across a column border holds");
+    assert_eq!(loaded.world.get_block(3, 180, 0), TORCH, "a world-gen torch is never judged by the load");
+    assert_eq!(dropped_items(&loaded), 0);
+}
+
+/// Items of any kind lying in a server's ECS.
+fn dropped_items(s: &crate::server::GameServer) -> usize {
+    s.ecs.query::<&crate::entity::ItemEntity>().iter().count()
+}
+
+/// Only a player-placed torch or lantern in a section a load brings in is
+/// queued: inserting a section (world-gen, a pushed chunk) queues nothing.
+#[test]
+fn only_loaded_placed_torches_and_lanterns_are_queued() {
     let mut w = crate::world::World::new();
     let mut torch = crate::chunk::Chunk::new();
     torch.set(1, 1, 1, TORCH);
+    torch.set_placed(1, 1, 1, true);
+    torch.set(2, 1, 1, LANTERN); // world-gen's: no placed bit
     let mut plain = crate::chunk::Chunk::new();
     plain.set(1, 1, 1, STONE);
+    plain.set_placed(1, 1, 1, true);
     w.insert_chunk(0, 4, 0, torch);
     w.insert_chunk(1, 4, 0, plain);
-    assert!(!w.support_pending(), "inserting (world-gen, a push) marks nothing");
+    assert!(!w.support_pending(), "inserting (world-gen, a push) queues nothing");
     w.note_loaded_for_support((1, 4, 0));
-    assert!(!w.support_pending(), "a loaded section with no torch or lantern is not marked");
+    assert!(!w.support_pending(), "a loaded section with no torch or lantern queues nothing");
     w.note_loaded_for_support((0, 4, 0));
-    assert_eq!(w.support_sections_len(), 1, "a loaded torch section is");
+    assert_eq!(w.support_rechecks_len(), 1, "the placed torch is queued, the unplaced lantern is not");
+    assert_eq!(w.take_support_rechecks(8), vec![(1, 65, 1)]);
 }

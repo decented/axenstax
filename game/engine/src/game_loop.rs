@@ -4760,13 +4760,6 @@ impl super::GameState {
         self.local_off_use.clear();
     }
 
-    /// Does this client's block edit (and its `mined` tag) reach the server it
-    /// joined? True only when joined AND native: a joined client's edits and
-    /// mined tags are queued for the server on native only (L-web-edit, the
-    /// `#[cfg(not(target_arch = "wasm32"))]` push sites in the break arm), so
-    /// a web joiner's breaks stay client-side and it keeps its own break drops
-    /// as before C1. The break arm skips its self-grant and exposure clock
-    /// only when this holds. Keep in step with those push sites.
     /// pt1124 review 3 items 2 and 3 — whether this joined client can ask its
     /// server to break bedrock (`block::can_ask_bedrock_break`): native and not
     /// a Strict seat.
@@ -4779,6 +4772,13 @@ impl super::GameState {
         block::can_ask_bedrock_break(cfg!(target_arch = "wasm32"), strict)
     }
 
+    /// Does this client's block edit (and its `mined` tag) reach the server it
+    /// joined? True only when joined AND native: a joined client's edits and
+    /// mined tags are queued for the server on native only (L-web-edit, the
+    /// `#[cfg(not(target_arch = "wasm32"))]` push sites in the break arm), so
+    /// a web joiner's breaks stay client-side and it keeps its own break drops
+    /// as before C1. The break arm skips its self-grant and exposure clock
+    /// only when this holds. Keep in step with those push sites.
     pub(crate) fn edits_reach_server(&self) -> bool {
         crate::break_drops::edits_reach_server(self.joined(), cfg!(target_arch = "wasm32"))
     }
