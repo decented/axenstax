@@ -1113,7 +1113,7 @@ fn push_more_literal_cards(out: &mut Vec<RecipeCard>) {
         vec![blk(block::GLASS, 1), mat(M::CopperIngot, 2)],
         grid(&[(0, 0, CraftSlot::Block(block::GLASS)), (1, 0, CraftSlot::Material(M::CopperIngot)), (2, 0, CraftSlot::Material(M::CopperIngot))]),
         RecipeCategory::Tools)
-        .with_usage("Hold it in either hand and hold right-click (or the use button) to look through it and see far. The Zoom key (C) looks through it too. You walk slowly while looking."));
+        .with_usage("Hold right-click (or the use button) to look through it and see far. C does it too. You walk slowly while looking."));
     out.push(card("Market Bell", ItemStack::new_material(M::MarketBellItem, 1),
         vec![mat(M::IronIngot, 2), blk(block::OAK_PLANKS, 1)],
         grid(&[(0, 0, iron), (1, 0, iron), (2, 0, p)]), RecipeCategory::Stations));

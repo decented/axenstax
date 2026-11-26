@@ -5184,7 +5184,7 @@ pub fn draw_settings_panel(
             // #44 — hold-to-zoom (C) field of view. Its own narrow range, below
             // the personal-FOV floor.
             if touch_slider(ui, &mut gfx.zoom_fov, |v| egui::Slider::new(v, ZOOM_FOV_MIN..=ZOOM_FOV_MAX).fixed_decimals(0)
-                        .text(format!("Spyglass field of view (hold {} with a spyglass)", keys.hint(crate::keybindings::Action::Zoom))))
+                        .text(format!("Spyglass zoom (hold {})", keys.hint(crate::keybindings::Action::Zoom))))
             {
                 changed = true;
             }
