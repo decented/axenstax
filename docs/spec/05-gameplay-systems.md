@@ -394,7 +394,9 @@ path; it is an offline taster) and a Strict seat (whose movement packet may carr
 session) refuse every bedrock break themselves before predicting the hole (0.2.42, review 3 items 2 and 3; BRIDGE:
 a typed Creative break action for Strict seats). Bedrock a `/we set` or a `/we paste`
 writes is player-placed too, so the same Creative player can mine it, and a cell `/we` writes to AIR keeps no placed
-bit (`worldedit::write_cell`, review 8).
+bit (`worldedit::write_cell`, review 8). A `/we` cell outside the column's height (Y below 0 or at `WORLD_HEIGHT` and
+above) is skipped before anything is touched: no block, meta, placed bit or changed cell (0.2.42, review 3 item 5: a
+placed bit at Y 384 used to conjure a phantom section 24 that the save omitted and the checkpoint refused).
 
 **Harvest rules**: Certain blocks require a minimum tool tier to drop items. Mining stone without a pickaxe breaks the block but drops nothing. Mining iron ore without at least a stone pickaxe drops nothing. These rules are defined in the block registry and are plugin-extensible.
 

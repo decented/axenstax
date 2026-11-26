@@ -82,6 +82,13 @@ pub fn affected_chunks(min: [i32; 3], max: [i32; 3]) -> Vec<(i32, i32, i32)> {
 /// would flood the update scheduler for nothing.
 pub fn write_cell(world: &mut World, pos: [i32; 3], new: BlockId, changed: &mut Vec<[i32; 3]>) -> bool {
     let [x, y, z] = pos;
+    // pt1124 review 3 item 5 — a cell outside the column's height is no cell:
+    // `set_block` drops the write, and the meta, provenance and changed-cell
+    // list must not see it either (a placed bit at Y 384 conjured section 24, a
+    // phantom the save omits and the checkpoint refuses).
+    if !(0..crate::world::WORLD_HEIGHT).contains(&y) {
+        return false;
+    }
     let old = world.get_block(x, y, z);
     if old == new {
         return false;
@@ -426,6 +433,23 @@ mod tests {
         assert!(w.is_placed(5, 4, 0), "pasted bedrock is placed too");
         region_set(&mut w, [0, 4, 0], [1, 4, 0], block::AIR, &mut Vec::new());
         assert!(!w.is_placed(0, 4, 0) && !w.is_placed(1, 4, 0), "an emptied cell keeps no placed bit");
+    }
+
+    /// pt1124 review 3 item 5 — a `/we` write above (or below) the column touches
+    /// nothing: no block, no placed bit, no section conjured, no changed cell.
+    #[test]
+    fn an_out_of_height_worldedit_cell_writes_nothing() {
+        let mut w = World::new();
+        let mut changed = Vec::new();
+        for y in [crate::world::WORLD_HEIGHT, 384, -1] {
+            assert!(!write_cell(&mut w, [0, y, 0], block::BEDROCK, &mut changed), "Y {y}");
+            assert!(!w.is_placed(0, y, 0), "Y {y}: no placed bit");
+            assert!(!w.has_chunk(0, y.div_euclid(16), 0), "Y {y}: no section conjured");
+        }
+        let clip = Clipboard { dims: [1, 1, 1], blocks: vec![block::BEDROCK] };
+        assert_eq!(clipboard_paste(&mut w, &clip, [0, 384, 0], &mut changed), 0);
+        assert!(!w.has_chunk(0, 24, 0), "a paste at Y 384 conjures no section 24");
+        assert!(changed.is_empty());
     }
 
     #[test]
