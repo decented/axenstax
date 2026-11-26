@@ -734,8 +734,27 @@ pub fn unbreakable(id: BlockId, creative: bool, placed: bool) -> bool {
 /// `BlockChange` carries the block and meta, never provenance), so in Creative
 /// it asks and the server decides with its own `unbreakable` check; everywhere
 /// else the local world's bit is the authority's.
-pub fn break_gated_locally(id: BlockId, creative: bool, placed_here: bool, joined: bool) -> bool {
+///
+/// Review 3 items 2 and 3 — a joined client asks only where it has a way to
+/// ask that the server answers (`asks`, [`can_ask_bedrock_break`]). One that
+/// has none refuses every bedrock break itself, before it predicts the hole:
+/// the server would never correct a hole it was not told of, and a Strict
+/// server closes a session whose movement packet carries a break.
+pub fn break_gated_locally(id: BlockId, creative: bool, placed_here: bool, joined: bool, asks: bool) -> bool {
+    if joined && !asks {
+        return id == BEDROCK;
+    }
     unbreakable(id, creative, placed_here || (joined && creative))
+}
+
+/// Whether a joined client has a break request its server answers for
+/// bedrock: the native Mirror seat's queued edit (`pending_block_changes`,
+/// pushed on native only), which the server checks and corrects. The web
+/// build sends none (it is an offline taster with no request path), and a
+/// Strict seat's movement packet may carry no edit at all.
+// BRIDGE: typed Creative break action — replace when Strict seats get one
+pub fn can_ask_bedrock_break(wasm: bool, strict: bool) -> bool {
+    !wasm && !strict
 }
 
 /// What an attached block must have next to it to stay (`BlockRegistry::attachment`,
@@ -4738,10 +4757,19 @@ mod tests {
         assert!(!unbreakable(STONE, false, false));
         // Review 7: a Creative joiner asks to break bedrock it cannot see the
         // placed bit of; the server's own check decides (natural holds there).
-        assert!(!break_gated_locally(BEDROCK, true, false, true), "a Creative joiner asks");
-        assert!(break_gated_locally(BEDROCK, false, false, true), "a Survival joiner never asks");
-        assert!(break_gated_locally(BEDROCK, true, false, false), "a local Creative player's natural bedrock holds");
-        assert!(!break_gated_locally(BEDROCK, true, true, false));
+        assert!(!break_gated_locally(BEDROCK, true, false, true, true), "a Creative joiner asks");
+        assert!(break_gated_locally(BEDROCK, false, false, true, true), "a Survival joiner never asks");
+        assert!(break_gated_locally(BEDROCK, true, false, false, false), "a local Creative player's natural bedrock holds");
+        assert!(!break_gated_locally(BEDROCK, true, true, false, false));
+        // Review 3 items 2 and 3: a joined client with no request its server
+        // answers (the web build, a Strict seat) refuses bedrock itself, even
+        // bedrock its own copy marks placed, before it predicts a hole.
+        assert!(can_ask_bedrock_break(false, false), "native Mirror asks");
+        assert!(!can_ask_bedrock_break(true, false), "the web build has no request");
+        assert!(!can_ask_bedrock_break(false, true), "a Strict seat sends no legacy edit");
+        assert!(break_gated_locally(BEDROCK, true, false, true, false));
+        assert!(break_gated_locally(BEDROCK, true, true, true, false));
+        assert!(!break_gated_locally(STONE, true, false, true, false), "other blocks are not this gate's");
     }
 
     #[test]

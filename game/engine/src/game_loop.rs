@@ -4767,6 +4767,18 @@ impl super::GameState {
     /// a web joiner's breaks stay client-side and it keeps its own break drops
     /// as before C1. The break arm skips its self-grant and exposure clock
     /// only when this holds. Keep in step with those push sites.
+    /// pt1124 review 3 items 2 and 3 — whether this joined client can ask its
+    /// server to break bedrock (`block::can_ask_bedrock_break`): native and not
+    /// a Strict seat.
+    // BRIDGE: typed Creative break action — replace when Strict seats get one
+    pub(crate) fn can_ask_bedrock_break(&self) -> bool {
+        let strict = self
+            .remote_client
+            .as_ref()
+            .is_some_and(|c| c.inventory_mode == crate::action_identity::InventoryMode::Strict);
+        block::can_ask_bedrock_break(cfg!(target_arch = "wasm32"), strict)
+    }
+
     pub(crate) fn edits_reach_server(&self) -> bool {
         crate::break_drops::edits_reach_server(self.joined(), cfg!(target_arch = "wasm32"))
     }
@@ -12751,8 +12763,17 @@ impl super::GameState {
                             // pt1124 — bedrock the world made holds; placed
                             // bedrock breaks in Creative (`block::unbreakable`).
                             // A Creative joiner asks and its server decides
-                            // (review 7: the placed bit never reaches it).
-                            && !block::break_gated_locally(blk, self.is_creative, self.world.is_placed(pos[0], pos[1], pos[2]), self.joined())
+                            // (review 7: the placed bit never reaches it), but
+                            // only where it has a request the server answers
+                            // (review 3 items 2 and 3: the web build and a
+                            // Strict seat refuse here, before the prediction).
+                            && !block::break_gated_locally(
+                                blk,
+                                self.is_creative,
+                                self.world.is_placed(pos[0], pos[1], pos[2]),
+                                self.joined(),
+                                self.can_ask_bedrock_break(),
+                            )
                             && self.play_mode.can_edit_world()
                         {
                             // Release the plot if this break removes an owned

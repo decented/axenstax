@@ -388,7 +388,11 @@ creative, placed)`, read by the break arm (`game_loop`) and the server's edit ch
 `cell_permitted`). A joiner still cannot place bedrock. A joined client learns the placed bit with a pushed chunk, not
 with a single `BlockChange`, so in Creative a joined client never refuses a bedrock break itself
 (`block::break_gated_locally`): it asks, and the server's own check decides (natural bedrock is refused and sent
-back; bedrock a host placed after the joiner's chunk arrived breaks; review 7). Bedrock a `/we set` or a `/we paste`
+back; bedrock a host placed after the joiner's chunk arrived breaks; review 7). It asks only where it has a request
+the server answers (`block::can_ask_bedrock_break`: the native Mirror seat's queued edit). The web build (no request
+path; it is an offline taster) and a Strict seat (whose movement packet may carry no edit: the server would close the
+session) refuse every bedrock break themselves before predicting the hole (0.2.42, review 3 items 2 and 3; BRIDGE:
+a typed Creative break action for Strict seats). Bedrock a `/we set` or a `/we paste`
 writes is player-placed too, so the same Creative player can mine it, and a cell `/we` writes to AIR keeps no placed
 bit (`worldedit::write_cell`, review 8).
 
