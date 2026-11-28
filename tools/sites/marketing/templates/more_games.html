@@ -40,7 +40,7 @@
             <h3>{{ g.name }}</h3>
             <p>{{ g.tagline }}</p>
             <p class="hint" style="margin-top:0.6rem;">Version {{ g.version }} · Android 7 or later (64-bit ARM) · {{ g.size_mb }} MB</p>
-            <p style="margin-top:1rem;"><a href="{{ g.url }}" class="cta" rel="noopener">Download APK</a></p>
+            <p style="margin-top:1rem;"><a href="/more-games/{{ g.slug }}.apk" class="cta">Download APK</a></p>
             <p class="hint" style="margin-top:0.8rem;font-size:0.72rem;word-break:break-all;color:var(--stone-muted);">SHA-256: {{ g.sha256 }}</p>
         </div>
         {% endfor %}
@@ -49,7 +49,7 @@
     <section style="max-width:760px;margin:0 auto;padding:0.5rem 2rem 2rem;">
         <h2>Installing</h2>
         <p style="color:var(--stone);">Your browser will ask to allow installs from it the first time. After that, the game updates itself.</p>
-        <p style="color:var(--stone-muted);">Downloads come from nostr.download, a public file host.</p>
+        <p style="color:var(--stone-muted);">Downloads come from this site, checked against each game's signed release. The same files are published on nostr.download, a public file host.</p>
     </section>
 
     <footer class="marketing-footer">

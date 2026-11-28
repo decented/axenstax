@@ -101,9 +101,14 @@ registered in `check.sh`'s `site_tests` list.
 
 ## More games downloads
 
-The marketing `/more-games` page refreshes both games from their signed release
-announcements every five minutes. New releases need no website edit or redeploy.
-Verified downloads survive relay outages and restarts in the ignored marketing
-`data/` directory, which deployment already preserves. See
+The marketing `/more-games` page refreshes the three games (Stampede, Twang Thang
+and Cluster Flock) from their signed release announcements every five minutes.
+New releases need no website edit or redeploy. Each download is checked against
+the signed release and stored on the site at `data/apks/<sha256>.apk`, and the
+page's buttons serve it from `/more-games/<slug>.apk` with Android headers, so
+phones save a real `.apk` (they redirect to the public host until the file is
+stored). Verified downloads and the stored files survive relay outages and
+restarts in the ignored marketing `data/` directory, which deployment already
+preserves; the deploy user needs write access to `data/apks/`. See
 [the release catalogue contract](../../docs/foundations/2026-10-28-more-games-releases.md)
-for verification rules, persistence and the manual refresh command.
+for verification rules, storage, pruning and the manual refresh command.

@@ -11,12 +11,13 @@ merch claim site is deliberately UNLINKED — reachable only by direct code URL.
 import asyncio
 import logging
 import os
+import re
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -171,8 +172,50 @@ async def more_games(request: Request):
     Each card has an anchor (stampede, twang-thang, cluster-flock) that the in-game lobby links to.
     The background catalogue follows the games' signed release announcements."""
     ctx = _base_context()
-    ctx["games"] = [dict(g, size_mb=round(g["size_bytes"] / 1_000_000), slug=g["name"].lower().replace(" ", "-")) for g in catalogue.view()]
+    ctx["games"] = [dict(g, size_mb=round(g["size_bytes"] / 1_000_000), slug=_slug(g)) for g in catalogue.view()]
     return templates.TemplateResponse(request=request, name="more_games.html", context=ctx)
+
+
+def _slug(game: dict) -> str:
+    return game["name"].lower().replace(" ", "-")
+
+
+APK_MEDIA_TYPE = "application/vnd.android.package-archive"
+
+
+@app.api_route("/more-games/{slug}.apk", methods=["GET", "HEAD"])
+async def more_games_apk(slug: str, request: Request):
+    """The verified APK, served from this site with Android headers so phones save a
+    real .apk (the public host answers application/zip). Until a verified file is
+    stored, redirect to the game's public download so the button never breaks. The
+    file is opened here and streamed from the open handle, so a prune or replace
+    after this point cannot fail the response. Nothing is logged: the site keeps
+    no request logs."""
+    game = next((g for g in catalogue.view() if _slug(g) == slug), None)
+    if game is None:
+        raise HTTPException(status_code=404)
+    opened = catalogue.open_apk(game["package"])
+    if opened is None:
+        return RedirectResponse(game["url"], status_code=302, headers={"Cache-Control": "no-cache"})
+    handle, size = opened
+    version = re.sub(r"[^A-Za-z0-9._-]", "_", game["version"])
+    headers = {
+        "Cache-Control": "no-cache",
+        "Content-Length": str(size),
+        "Content-Disposition": f'attachment; filename="{game["name"].replace(" ", "")}-{version}.apk"',
+    }
+    if request.method == "HEAD":
+        handle.close()
+        return Response(media_type=APK_MEDIA_TYPE, headers=headers)
+
+    async def body():
+        try:
+            while chunk := await asyncio.to_thread(handle.read, 1 << 20):
+                yield chunk
+        finally:
+            handle.close()
+
+    return StreamingResponse(body(), media_type=APK_MEDIA_TYPE, headers=headers)
 
 
 @app.get("/roadmap", response_class=HTMLResponse)

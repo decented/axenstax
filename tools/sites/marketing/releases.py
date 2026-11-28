@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 import time
 import unicodedata
@@ -178,33 +179,85 @@ async def fetch_events(games: list[dict]) -> list[dict]:
     return [event for reply in replies if isinstance(reply, list) for event in reply]
 
 
-async def verified_url(release: dict) -> str | None:
-    """A new download must actually serve the announced bytes before it is linked."""
+APK_FILE = re.compile(r"[0-9a-f]{64}\.apk\Z")
+TEMP_PREFIX, TEMP_SUFFIX = ".apk-", ".part"
+STALE_TEMP_SECONDS = 300
+
+
+async def download_apk(release: dict, apk_dir: Path) -> str | None:
+    """Fetch the announced bytes, check size and SHA-256, and only then keep them.
+
+    The file lands at ``<apk_dir>/<sha256>.apk`` via an atomic rename, so the final
+    name never holds a partial or mismatched file. Returns the URL that served the
+    bytes, or None when no URL did.
+    """
+    sha, expected = release["sha256"], release["size_bytes"]
+    if not HEX64.fullmatch(sha) or not 0 < expected <= MAX_APK_BYTES:
+        return None
+    try:
+        apk_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        log.warning("Could not create the download directory")
+        return None
     async with httpx.AsyncClient(follow_redirects=False, timeout=20) as client:
         for url in release["urls"]:
             try:
                 async with asyncio.timeout(45):
-                    async with client.stream("GET", url) as response:
-                        if response.status_code != 200:
-                            continue
-                        size, digest = 0, hashlib.sha256()
-                        async for chunk in response.aiter_bytes():
-                            size += len(chunk)
-                            if size > release["size_bytes"]:
-                                break
-                            digest.update(chunk)
-                        if size == release["size_bytes"] and digest.hexdigest() == release["sha256"]:
-                            return url
-            except (httpx.HTTPError, TimeoutError):
+                    if await _fetch_to_file(client, url, sha, expected, apk_dir):
+                        return url
+            except (httpx.HTTPError, TimeoutError, OSError):
                 continue
     return None
 
 
+async def _fetch_to_file(client: httpx.AsyncClient, url: str, sha: str, expected: int, apk_dir: Path) -> bool:
+    handle, temporary = tempfile.mkstemp(dir=apk_dir, prefix=TEMP_PREFIX, suffix=TEMP_SUFFIX)
+    try:
+        with os.fdopen(handle, "wb") as out:
+            async with client.stream("GET", url) as response:
+                if response.status_code != 200:
+                    return False
+                size, digest = 0, hashlib.sha256()
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > expected:
+                        return False
+                    digest.update(chunk)
+                    out.write(chunk)
+        if size != expected or digest.hexdigest() != sha:
+            return False
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, apk_dir / f"{sha}.apk")
+        temporary = None
+        return True
+    finally:
+        # Also runs when the 90 s refresh bound cancels a download mid-stream.
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class ReleaseCatalogue:
-    def __init__(self, games: list[dict], cache_path: Path):
+    def __init__(self, games: list[dict], cache_path: Path, apk_dir: Path | None = None):
         self.games = games
         self.dirty = False
         self.cache_path = cache_path
+        self.apk_dir = apk_dir if apk_dir is not None else cache_path.parent / "apks"
+        # (sha256, size, mtime_ns, inode) of stored files whose bytes were hashed in this
+        # process. Requests only consult it; they never hash.
+        self._verified: set[tuple] = set()
+        # Hashes that were current when the previous refresh finished (prune grace).
+        self._recent: set[str] = set()
         self.current = {g["package"]: dict(g, created_at=0) for g in games}
 
     def view(self) -> list[dict]:
@@ -212,6 +265,92 @@ class ReleaseCatalogue:
 
     def rank(self, release: dict) -> tuple[int, int]:
         return release["version_code"], release["created_at"]
+
+    @staticmethod
+    def _key(sha: str, info: os.stat_result) -> tuple:
+        return sha, info.st_size, info.st_mtime_ns, info.st_ino
+
+    def _file_for(self, release: dict) -> Path | None:
+        """The stored copy of this release's bytes: a regular file (never a symlink)
+        of the announced size whose hash this process has verified. Never hashes."""
+        sha = release["sha256"]
+        path = self.apk_dir / f"{sha}.apk"
+        try:
+            info = path.lstat()
+        except OSError:
+            return None
+        if not stat.S_ISREG(info.st_mode) or info.st_size != release["size_bytes"]:
+            return None
+        return path if self._key(sha, info) in self._verified else None
+
+    def local_apk(self, package: str) -> Path | None:
+        """The current release's verified file on this server, or None."""
+        current = self.current.get(package)
+        return self._file_for(current) if current else None
+
+    def open_apk(self, package: str):
+        """Open the current release's verified file for streaming, or None.
+
+        Opened without following symlinks and checked against the verified memo by
+        the open handle's own identity, so a file swapped or removed after the check
+        cannot be served, and pruning an open file cannot break a running download.
+        """
+        current = self.current.get(package)
+        if current is None:
+            return None
+        path = self.apk_dir / f"{current['sha256']}.apk"
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            return None
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_size != current["size_bytes"]
+                    or self._key(current["sha256"], info) not in self._verified):
+                os.close(fd)
+                return None
+            return os.fdopen(fd, "rb"), info.st_size
+        except OSError:
+            os.close(fd)
+            return None
+
+    def _remember(self, release: dict) -> None:
+        """Trust a file that download_apk has just hashed and renamed into place."""
+        try:
+            info = (self.apk_dir / f"{release['sha256']}.apk").lstat()
+        except OSError:
+            return
+        if stat.S_ISREG(info.st_mode) and info.st_size == release["size_bytes"]:
+            self._verified.add(self._key(release["sha256"], info))
+
+    async def verify_stored(self) -> None:
+        """Hash each current release's stored file once (off the event loop). A symlink,
+        wrong-size or wrong-hash file is deleted so the fill step fetches it afresh."""
+        for current in list(self.current.values()):
+            path = self.apk_dir / f"{current['sha256']}.apk"
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            key = self._key(current["sha256"], info)
+            if key in self._verified:
+                continue
+            good = False
+            if stat.S_ISREG(info.st_mode) and info.st_size == current["size_bytes"]:
+                try:
+                    good = await asyncio.to_thread(_sha256_file, path) == current["sha256"]
+                    after = path.lstat()
+                    good = good and self._key(current["sha256"], after) == key
+                except OSError:
+                    good = False
+            if good:
+                self._verified.add(key)
+                continue
+            log.warning("Stored download for %s failed its check; replacing it", current["name"])
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     def adopt(self, game: dict, release: dict, url: str) -> None:
         self.dirty = True
@@ -256,7 +395,15 @@ class ReleaseCatalogue:
     async def refresh(self) -> None:
         if self.dirty:
             self.save()
-        events = await fetch_events(self.games)
+        # First, so a refresh cut short by the 90 s bound still prunes.
+        self.prune()
+        await self.verify_stored()
+        events, outage = [], None
+        try:
+            events = await fetch_events(self.games)
+        except OSError as error:
+            # Stored files can still be topped up and pruned while the relays are down.
+            outage = error
         for game in self.games:
             candidates = [r for e in events if (r := parse_release(e, game)) is not None]
             candidates.sort(key=self.rank, reverse=True)
@@ -265,11 +412,61 @@ class ReleaseCatalogue:
                 if self.rank(release) <= self.rank(current):
                     break
                 same_artifact = (release["sha256"], release["size_bytes"]) == (current["sha256"], current["size_bytes"])
-                url = current["url"] if same_artifact and current["url"] in release["urls"] else await verified_url(release)
+                if same_artifact and current["url"] in release["urls"]:
+                    url = current["url"]
+                elif self._file_for(release):
+                    url = release["urls"][0]  # bytes already verified on disk: no second download
+                else:
+                    url = await download_apk(release, self.apk_dir)
+                    if url:
+                        self._remember(release)
                 if url:
                     self.adopt(game, release, url)
                     self.save()
                     break
+        await self.fill_missing()
+        self.prune()
+        self._recent = {g["sha256"] for g in self.current.values()}
+        if outage is not None:
+            raise outage
+
+    async def fill_missing(self) -> None:
+        """Bundled floor entries and caches from older code have no stored file yet."""
+        await self.verify_stored()
+        for game in self.games:
+            current = self.current[game["package"]]
+            if self._file_for(current):
+                continue
+            offer = {"urls": [current["url"]], "sha256": current["sha256"], "size_bytes": current["size_bytes"]}
+            if await download_apk(offer, self.apk_dir):
+                self._remember(offer)
+            else:
+                log.warning("Could not store %s %s locally; its button redirects to the public host",
+                            game["name"], current["version"])
+
+    def prune(self) -> None:
+        """Remove stored APKs no game offers now or offered at the last refresh, and stray temporary files."""
+        # One refresh of grace: a file that has just been superseded may still be
+        # open in a running download.
+        keep = {g["sha256"] for g in self.current.values()} | self._recent
+        try:
+            entries = list(self.apk_dir.iterdir())
+        except OSError:
+            return
+        for path in entries:
+            try:
+                if not path.is_file() or path.is_symlink():
+                    continue
+                if APK_FILE.fullmatch(path.name):
+                    stale = path.name[:-4] not in keep
+                elif path.name.startswith(TEMP_PREFIX) and path.name.endswith(TEMP_SUFFIX):
+                    stale = time.time() - path.stat().st_mtime > STALE_TEMP_SECONDS
+                else:
+                    continue
+                if stale:
+                    path.unlink()
+            except OSError:
+                log.debug("Could not prune a stored download")
 
     async def run(self) -> None:
         while True:
